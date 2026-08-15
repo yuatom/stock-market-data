@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "collector-request.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "request_id",
+    "requested_at",
+    "trade_date",
+    "stage",
+    "mode",
+    "research_repository",
+    "research_repository_commit_sha",
+    "market_data_contract_sha"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "request_id": {"type": "string", "minLength": 1, "maxLength": 160},
+    "requested_at": {"type": "string", "format": "date-time"},
+    "trade_date": {"type": "string", "format": "date"},
+    "stage": {"enum": ["open_15m", "open_30m", "open_60m", "close"]},
+    "mode": {"enum": ["open_15m", "open_30m", "open_60m", "close"]},
+    "research_repository": {"const": "yuatom/stock-dairy"},
+    "research_repository_commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "market_data_contract_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "transaction_id": {"type": "string", "minLength": 1, "maxLength": 200}
+  }
+}

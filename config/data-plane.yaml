@@ -1,10 +1,10 @@
 schema_version: 1
-contract_version: 2
+contract_version: 3
 repository: yuatom/stock-market-data
 purpose:
   - own reusable Market Data Plane code, contracts, collection and storage semantics
   - keep GitHub Actions collector/runtime public while persisted third-party market data remains private
-  - expose commit-pinned data-contract identity to external consumers
+  - expose independent commit-pinned data-contract and data-read identities to research consumers
 
 boundaries:
   owns:
@@ -19,6 +19,7 @@ boundaries:
     - source_probe_semantics
     - market_data_inventory_semantics
     - collector_workflows
+    - cross_repository_collector_request_contract
   must_not_own:
     - persisted_market_fact_commit_history
     - research_watchlist_priority
@@ -33,10 +34,18 @@ repositories:
   compute_and_contract:
     repository: yuatom/stock-market-data
     required_visibility: public
+    branch: main
     actions_role: collector_and_data_maintenance_only
+  collector_request_control:
+    repository: yuatom/stock-market-data
+    branch: collector-requests
+    path: requests/collector-request.json
+    market_fact_authority: false
+    contract_authority: false
   persisted_data_store:
     repository: yuatom/stock-market-data-store
     required_visibility: private
+    branch: main
     data_root: data/market-data
     actions_required: false
   research_consumer:
@@ -52,10 +61,13 @@ security:
     minimum_permission: contents_write
     unrelated_repository_access_forbidden: true
   raw_market_data_in_public_actions_logs_or_artifacts_forbidden: true
+  public_workflow_must_not_upload_private_store_artifacts: true
+  public_workflow_permissions_default: contents_read
 
 principles:
   market_fact_contract_authority_in_compute_repo: true
   market_fact_payload_authority_in_private_store_repo: true
+  research_contract_authority_stays_in_stock_dairy: true
   provider_affine_series: true
   cross_provider_series_splice_forbidden: true
   append_only_normal_operation: true
@@ -65,12 +77,59 @@ principles:
   probe_is_not_market_fact: true
   store_presence_does_not_bypass_claim_qualification: true
   public_compute_repo_must_not_commit_third_party_market_payloads: true
+  mutable_collector_requests_must_not_advance_compute_main: true
+  one_authoritative_payload_store: true
+
+collection_membership:
+  owner: config/collection-universe.json
+  research_watchlist_is_not_dependency: true
+  ephemeral_legacy_shape_projection:
+    helper: scripts/build_collector_compat.py
+    persisted: false
+    semantic_authority: false
+
+collector_request_interface:
+  repository: yuatom/stock-market-data
+  branch: collector-requests
+  path: requests/collector-request.json
+  schema: schemas/collector-request.schema.json
+  runtime_modes: [open_15m, open_30m, open_60m, close]
+  producer: stock_dairy_chatgpt_runtime
+  request_must_bind:
+    - research_repository_commit_sha
+    - market_data_contract_sha
+    - trade_date
+    - stage
+    - request_id
+  market_data_contract_sha_must_equal_current_compute_main: true
+  current_trade_date_only: true
+  request_is_control_state_not_market_fact: true
+  collector_compute_checkout_ref: main
+  request_branch_content_must_not_be_used_as_compute_code: true
+
+payload_writers:
+  scheduled_and_on_demand_collector:
+    executor: stock_market_data_github_actions
+    allowed_repository: yuatom/stock-market-data-store
+    allowed_prefix: data/market-data
+  research_runtime_remote_fallback_writeback:
+    executor: stock_dairy_chatgpt_runtime
+    allowed_repository: yuatom/stock-market-data-store
+    allowed_prefix: data/market-data/sessions
+    write_scope: immutable_session_capture_only
+    series_mutation_forbidden: true
+    snapshot_latest_mutation_forbidden: true
+    report_completion_required: false
+    failure_effect: non_blocking_store_write_failure_only
+  writers_share_storage_semantics_from_this_contract: true
+  multiple_semantic_authorities_for_storage_forbidden: true
 
 consumer_interface:
   research_repository: yuatom/stock-dairy
   required_pins:
+    research_repository_commit_sha: immutable stock-dairy research-contract commit
     market_data_contract_sha: immutable commit in yuatom/stock-market-data containing active data-plane contract
-    market_data_read_sha: immutable commit in yuatom/stock-market-data-store resolved once per research run
+    market_data_read_sha: immutable commit in yuatom/stock-market-data-store resolved once per research run after optional bounded collector wait
   one_market_data_read_sha_per_research_run: true
   ref_shape:
     required: [repository, read_sha, path, blob_sha]
@@ -78,22 +137,31 @@ consumer_interface:
   market_data_contract_sha_must_not_be_reused_as_market_data_read_sha: true
   market_data_read_sha_must_not_be_reused_as_research_contract_sha: true
   external_consumer_must_requalify_fact_for_claim: true
+  legacy_local_store_mixing_in_same_run_forbidden: true
 
 migration:
   source_repository: yuatom/stock-dairy
   source_root: sources/market-data
   target_repository: yuatom/stock-market-data-store
   target_root: data/market-data
-  state: waiting_private_store_repository
-  cutover_requires:
+  initial_mirror_source_ref: b8814f501588adfecde3a63b02b32b5e5f27959f
+  initial_private_store_commit: b29b0bd13f1bf5a2f1586ffba3315e385e3373d9
+  initial_mirror_file_count: 261
+  initial_mirror_total_bytes: 1694709
+  initial_mirror_payload_tree_sha256: 384e2c726d617e8b014e5c2f087d9930249c88b38a76c85ef581881362516ef0
+  state: data_mirrored_runtime_installed_pending_collector_smoke_and_consumer_cutover
+  completed_gates:
     - private_store_repository_exists
     - private_store_repository_visibility_private
-    - TWELVE_DATA_API_KEY_configured_in_compute_repo
-    - MARKET_DATA_STORE_TOKEN_configured_in_compute_repo
     - source_assets_mirrored_and_hash_audited
     - collector_runtime_installed_in_compute_repo
-    - collector_smoke_passed_against_private_store
+  pending_gates:
+    - public_collector_private_store_read_smoke_passed
+    - public_collector_provider_secret_and_noop_passed
     - stock_dairy_external_read_contract_merged
-    - target_normal_append_only_increment_passed
-  source_collector_must_remain_authoritative_until_cutover_receipt: true
+    - external_store_on_demand_request_path_passed
+    - first_natural_settlement_mature_append_observed
+  source_collector_must_remain_authoritative_until_external_smoke_and_consumer_cutover: true
   dual_authoritative_collectors_for_same_logical_store_forbidden: true
+  first_natural_increment_may_be_post_cutover_acceptance_if_noop_provider_read_and_append_primitive_smoke_pass: true
+  rollback_archive_required_until_first_natural_increment_and_research_acceptance_pass: true
