@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "purpose": "Market-data collection membership and security identity only; this is not a research watchlist or priority authority.",
+  "daily_series": [
+    {"symbol":"AMD","asset_class":"stocks"},
+    {"symbol":"IWM","asset_class":"etf"},
+    {"symbol":"KWEB","asset_class":"etf"},
+    {"symbol":"META","asset_class":"stocks"},
+    {"symbol":"MU","asset_class":"stocks"},
+    {"symbol":"NVDA","asset_class":"stocks"},
+    {"symbol":"ORCL","asset_class":"stocks"},
+    {"symbol":"PLTR","asset_class":"stocks"},
+    {"symbol":"QQQ","asset_class":"etf"},
+    {"symbol":"RSP","asset_class":"etf"},
+    {"symbol":"SMH","asset_class":"etf"},
+    {"symbol":"SOXX","asset_class":"etf"},
+    {"symbol":"SPCX","asset_class":"stocks","ticker_effective_at":"2026-06-12"},
+    {"symbol":"SPY","asset_class":"etf"},
+    {"symbol":"TME","asset_class":"stocks"},
+    {"symbol":"TSLA","asset_class":"stocks"},
+    {"symbol":"TSM","asset_class":"stocks"},
+    {"symbol":"XLB","asset_class":"etf"},
+    {"symbol":"XLC","asset_class":"etf"},
+    {"symbol":"XLE","asset_class":"etf"},
+    {"symbol":"XLF","asset_class":"etf"},
+    {"symbol":"XLI","asset_class":"etf"},
+    {"symbol":"XLK","asset_class":"etf"},
+    {"symbol":"XLP","asset_class":"etf"},
+    {"symbol":"XLRE","asset_class":"etf"},
+    {"symbol":"XLU","asset_class":"etf"},
+    {"symbol":"XLV","asset_class":"etf"},
+    {"symbol":"XLY","asset_class":"etf"}
+  ],
+  "intraday": ["AMD","IWM","KWEB","META","MU","NVDA","ORCL","PLTR","QQQ","RSP","SMH","SOXX","SPCX","SPY","TME","TSLA","TSM"],
+  "rules": {
+    "collection_membership_is_not_research_priority": true,
+    "security_identity_effective_time_must_be_preserved": true,
+    "silent_symbol_substitution_forbidden": true
+  }
+}
