@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "market-data-capture.schema.json",
+  "type": "object",
+  "required": ["schema_version", "capture_id", "trade_date", "session", "provider", "generated_at", "qualified_facts"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "capture_id": {"type": "string", "minLength": 1},
+    "trade_date": {"type": "string", "format": "date"},
+    "session": {"enum": ["premarket", "regular", "after_hours", "official_daily_reference"]},
+    "window": {"type": ["object", "null"]},
+    "provider": {"type": "string", "minLength": 1},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "actual_data_cutoff": {"type": ["string", "null"], "format": "date-time"},
+    "feed_scope": {"type": ["string", "null"]},
+    "qualified_facts": {"type": "array"},
+    "missing_symbols": {"type": "array", "items": {"type": "string"}}
+  },
+  "additionalProperties": false
+}

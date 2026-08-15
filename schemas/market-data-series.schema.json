@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "market-data-series.schema.json",
+  "type": "object",
+  "required": ["schema_version", "series_id", "provider", "symbol", "asset_class", "session", "interval", "series_semantics", "adjustment_semantics", "record_count", "shards"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "series_id": {"type": "string", "minLength": 1},
+    "provider": {"type": "string", "minLength": 1},
+    "symbol": {"type": "string", "minLength": 1},
+    "asset_class": {"type": "string", "minLength": 1},
+    "session": {"const": "regular"},
+    "interval": {"const": "1d"},
+    "series_semantics": {"type": "string", "minLength": 1},
+    "adjustment_semantics": {"type": "string", "minLength": 1},
+    "identity_effective_from": {"type": ["string", "null"], "format": "date"},
+    "sort_order": {"const": "trade_date_asc"},
+    "record_count": {"type": "integer", "minimum": 0},
+    "first_trade_date": {"type": ["string", "null"], "format": "date"},
+    "last_trade_date": {"type": ["string", "null"], "format": "date"},
+    "shards": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "start", "end", "count", "sealed", "byte_length", "json_sha256", "blob_sha"],
+        "properties": {
+          "path": {"type": "string"},
+          "start": {"type": "integer", "minimum": 0},
+          "end": {"type": "integer", "minimum": -1},
+          "count": {"type": "integer", "minimum": 0},
+          "sealed": {"type": "boolean"},
+          "byte_length": {"type": "integer", "minimum": 0},
+          "json_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "blob_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+        },
+        "additionalProperties": true
+      }
+    },
+    "lineage_segments": {"type": "array"}
+  },
+  "additionalProperties": true
+}
