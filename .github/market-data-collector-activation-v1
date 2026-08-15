@@ -1,0 +1,4 @@
+mode: smoke_readonly
+trade_date: 2026-08-15
+request_id: migration-smoke-readonly-20260815
+requested_at: 2026-08-16T03:52:00+08:00
