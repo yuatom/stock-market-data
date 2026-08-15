@@ -1,8 +1,12 @@
 # Migration status
 
-## Target
+## Final target
 
-Physical separation of the reusable Market Data Plane from `yuatom/stock-dairy` into `yuatom/stock-market-data`.
+Three-repository split:
+
+- `yuatom/stock-market-data` — public Market Data Plane implementation and GitHub Actions collector runtime.
+- `yuatom/stock-market-data-store` — private persisted Market Data Store only.
+- `yuatom/stock-dairy` — private research, Evidence, Report, Decision, Evaluation and canonical finalization.
 
 ## Source baseline
 
@@ -10,23 +14,39 @@ Source repository: `yuatom/stock-dairy`.
 
 The source inventory already contains 28 `twelve_data_basic` Daily OHLCV series. 27 symbols have a 256-session baseline from 2025-08-08 through 2026-08-14; SPCX is identity-limited to 44 sessions from 2026-06-12 through 2026-08-14. Regular-session immutable captures and Open15/Open30/Open60/Close snapshots are also present.
 
-## Security gate
+## Why the public repository stays public
 
-Do not mirror third-party API data while this repository is public. Before physical data migration and collector cutover:
+The public repository contains only collector/store implementation, schemas, contracts and collection metadata. It must not commit third-party market-data payloads. Standard GitHub-hosted Actions can therefore execute the data-plane software without exposing persisted Twelve Data facts.
 
-1. repository visibility must be `private`;
-2. Actions secret `TWELVE_DATA_API_KEY` must be configured in this repository.
+## Private store gate
 
-These gates are intentionally stricter than convenience. They preserve the source Market Data Store contract and provider-data handling rules.
+Before physical migration and collector cutover:
+
+1. create `yuatom/stock-market-data-store` as a private repository;
+2. configure `TWELVE_DATA_API_KEY` in the public compute repository;
+3. configure a least-privilege `MARKET_DATA_STORE_TOKEN` in the public compute repository, scoped to Contents write on `yuatom/stock-market-data-store` only.
+
+## Identity model
+
+A research run binds three independent identities:
+
+- `repository_commit_sha` — `stock-dairy` research contract/runtime snapshot;
+- `market_data_contract_sha` — `stock-market-data` data-plane implementation/contract snapshot;
+- `market_data_read_sha` — one immutable `stock-market-data-store` data snapshot.
+
+They must never be conflated.
 
 ## Cutover sequence
 
-1. mirror the source Market Data Store with path translation `sources/market-data/** -> data/market-data/**`;
-2. verify source/target logical inventory, series ranges, record counts and canonical blob payloads;
-3. install collector/store runtime and run read-only + no-op/smoke checks;
-4. enable collector schedules in this repository;
-5. switch `stock-dairy` to one external `market_data_read_sha` per run;
-6. disable the old in-repo collector only after target write/read validation;
-7. retain the source data tree as immutable migration archive until post-cutover acceptance.
+1. create and initialize the private store repository;
+2. mirror `stock-dairy/sources/market-data/**` to `stock-market-data-store/data/market-data/**`;
+3. verify source/target logical inventory, series ranges, record counts and canonical payload hashes;
+4. install the current collector/store runtime in the public compute repository;
+5. configure cross-repository write authentication and prohibit raw market data in public logs/artifacts;
+6. run read-only and no-op smoke tests against the private store;
+7. prove one normal settlement-mature append-only increment in the private store;
+8. switch `stock-dairy` to external `market_data_contract_sha + market_data_read_sha` reads;
+9. disable the old in-repo collector only after external read/write validation;
+10. retain the old `stock-dairy/sources/market-data` tree as immutable rollback archive through post-cutover acceptance.
 
-No research/Decision/Report/Finalization authority moves into this repository.
+No research/Decision/Report/Evidence/Evaluation/Finalization authority moves into either data repository.
