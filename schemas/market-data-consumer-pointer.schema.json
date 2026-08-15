@@ -1,0 +1,24 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "$id":"market-data-consumer-pointer.schema.json",
+  "type":"object",
+  "additionalProperties":false,
+  "required":["repository","market_data_contract_sha","market_data_read_sha","refs"],
+  "properties":{
+    "repository":{"const":"yuatom/stock-market-data"},
+    "market_data_contract_sha":{"type":"string","pattern":"^[0-9a-f]{40}$"},
+    "market_data_read_sha":{"type":"string","pattern":"^[0-9a-f]{40}$"},
+    "refs":{
+      "type":"array",
+      "items":{
+        "type":"object",
+        "additionalProperties":false,
+        "required":["path","blob_sha"],
+        "properties":{
+          "path":{"type":"string","minLength":1},
+          "blob_sha":{"type":"string","pattern":"^[0-9a-f]{40}$"}
+        }
+      }
+    }
+  }
+}
