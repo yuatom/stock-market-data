@@ -1,5 +1,5 @@
 schema_version: 1
-contract_version: 3
+contract_version: 4
 repository: yuatom/stock-market-data
 purpose:
   - own reusable Market Data Plane code, contracts, collection and storage semantics
@@ -149,15 +149,24 @@ migration:
   initial_mirror_file_count: 261
   initial_mirror_total_bytes: 1694709
   initial_mirror_payload_tree_sha256: 384e2c726d617e8b014e5c2f087d9930249c88b38a76c85ef581881362516ef0
-  state: data_mirrored_runtime_installed_pending_collector_smoke_and_consumer_cutover
+  smoke_evidence:
+    private_store_readonly_run_id: 31905104622
+    provider_noop_run_id: 31905129892
+    provider_noop_symbols_requested: 28
+    provider_noop_changed_series: 0
+    provider_noop_failure_count: 0
+    provider_noop_result: ok
+    private_store_post_smoke_commit: 0db695f7d4aed10634a02ed00bbe5c63bf42cff3
+    conclusion: provider_and_private_store_execution_path_verified_without_market_series_revision
+  state: external_collector_smoke_passed_consumer_cutover_pending_first_natural_increment
   completed_gates:
     - private_store_repository_exists
     - private_store_repository_visibility_private
     - source_assets_mirrored_and_hash_audited
     - collector_runtime_installed_in_compute_repo
-  pending_gates:
     - public_collector_private_store_read_smoke_passed
     - public_collector_provider_secret_and_noop_passed
+  pending_gates:
     - stock_dairy_external_read_contract_merged
     - external_store_on_demand_request_path_passed
     - first_natural_settlement_mature_append_observed
