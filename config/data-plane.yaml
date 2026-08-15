@@ -1,24 +1,26 @@
 schema_version: 1
-contract_version: 1
+contract_version: 2
 repository: yuatom/stock-market-data
 purpose:
-  - own reusable qualified market facts independently from stock research/report completion
-  - own market-data collection, storage, recovery, inventory and non-authoritative probes
-  - expose immutable commit-pinned data reads to external research consumers
+  - own reusable Market Data Plane code, contracts, collection and storage semantics
+  - keep GitHub Actions collector/runtime public while persisted third-party market data remains private
+  - expose commit-pinned data-contract identity to external consumers
 
 boundaries:
   owns:
     - collection_universe
     - collector_transport_and_parser
-    - reusable_market_data_store
-    - daily_series
-    - session_capture
-    - stage_snapshot
-    - recovery_and_explicit_rebase
-    - collector_state
-    - source_probe_state
-    - market_data_inventory
+    - reusable_market_data_store_semantics
+    - daily_series_semantics
+    - session_capture_semantics
+    - stage_snapshot_semantics
+    - recovery_and_explicit_rebase_semantics
+    - collector_state_semantics
+    - source_probe_semantics
+    - market_data_inventory_semantics
+    - collector_workflows
   must_not_own:
+    - persisted_market_fact_commit_history
     - research_watchlist_priority
     - market_research
     - decision_semantics
@@ -27,14 +29,33 @@ boundaries:
     - evaluation_decisions
     - canonical_report_finalization
 
+repositories:
+  compute_and_contract:
+    repository: yuatom/stock-market-data
+    required_visibility: public
+    actions_role: collector_and_data_maintenance_only
+  persisted_data_store:
+    repository: yuatom/stock-market-data-store
+    required_visibility: private
+    data_root: data/market-data
+    actions_required: false
+  research_consumer:
+    repository: yuatom/stock-dairy
+
 security:
-  repository_visibility_required: private
   registered_third_party_api_data_public_storage_forbidden: true
-  required_actions_secrets:
+  compute_repo_required_actions_secrets:
     - TWELVE_DATA_API_KEY
+    - MARKET_DATA_STORE_TOKEN
+  market_data_store_token_scope:
+    repository: yuatom/stock-market-data-store
+    minimum_permission: contents_write
+    unrelated_repository_access_forbidden: true
+  raw_market_data_in_public_actions_logs_or_artifacts_forbidden: true
 
 principles:
-  market_fact_authority_only: true
+  market_fact_contract_authority_in_compute_repo: true
+  market_fact_payload_authority_in_private_store_repo: true
   provider_affine_series: true
   cross_provider_series_splice_forbidden: true
   append_only_normal_operation: true
@@ -43,34 +64,36 @@ principles:
   snapshot_immutable: true
   probe_is_not_market_fact: true
   store_presence_does_not_bypass_claim_qualification: true
-
-paths:
-  data_root: data/market-data
-  daily_series_root: data/market-data/series/daily
-  session_root: data/market-data/sessions
-  snapshot_root: data/market-data/snapshots
-  recovery_root: data/market-data/recovery
-  collector_state_root: data/market-data/collector-state
+  public_compute_repo_must_not_commit_third_party_market_payloads: true
 
 consumer_interface:
   research_repository: yuatom/stock-dairy
   required_pins:
-    market_data_contract_sha: repository commit containing the active data-plane contract
-    market_data_read_sha: one immutable stock-market-data commit resolved once per research run
+    market_data_contract_sha: immutable commit in yuatom/stock-market-data containing active data-plane contract
+    market_data_read_sha: immutable commit in yuatom/stock-market-data-store resolved once per research run
   one_market_data_read_sha_per_research_run: true
   ref_shape:
     required: [repository, read_sha, path, blob_sha]
+  ref_repository_must_equal: yuatom/stock-market-data-store
+  market_data_contract_sha_must_not_be_reused_as_market_data_read_sha: true
   market_data_read_sha_must_not_be_reused_as_research_contract_sha: true
   external_consumer_must_requalify_fact_for_claim: true
 
 migration:
   source_repository: yuatom/stock-dairy
   source_root: sources/market-data
-  state: prepared_waiting_repository_security_gate
+  target_repository: yuatom/stock-market-data-store
+  target_root: data/market-data
+  state: waiting_private_store_repository
   cutover_requires:
-    - repository_is_private
-    - TWELVE_DATA_API_KEY_configured
+    - private_store_repository_exists
+    - private_store_repository_visibility_private
+    - TWELVE_DATA_API_KEY_configured_in_compute_repo
+    - MARKET_DATA_STORE_TOKEN_configured_in_compute_repo
     - source_assets_mirrored_and_hash_audited
-    - collector_smoke_passed_in_this_repository
+    - collector_runtime_installed_in_compute_repo
+    - collector_smoke_passed_against_private_store
     - stock_dairy_external_read_contract_merged
+    - target_normal_append_only_increment_passed
   source_collector_must_remain_authoritative_until_cutover_receipt: true
+  dual_authoritative_collectors_for_same_logical_store_forbidden: true
