@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "market-data-stage-snapshot.schema.json",
+  "type": "object",
+  "required": ["schema_version", "snapshot_id", "stage", "trade_date", "generated_at", "coverage", "data_refs", "missing"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "snapshot_id": {"type": "string", "minLength": 1},
+    "stage": {"enum": ["premarket", "open_15m", "open_30m", "open_60m", "close"]},
+    "trade_date": {"type": "string", "format": "date"},
+    "target_window": {"type": ["object", "null"]},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "actual_data_cutoff": {"type": ["string", "null"], "format": "date-time"},
+    "coverage": {"type": "object"},
+    "data_refs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "blob_sha"],
+        "properties": {
+          "path": {"type": "string", "minLength": 1},
+          "blob_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+          "kind": {"type": "string"},
+          "window": {"type": ["string", "null"]}
+        },
+        "additionalProperties": true
+      }
+    },
+    "missing": {"type": "array"}
+  },
+  "additionalProperties": true
+}

@@ -1,0 +1,180 @@
+schema_version: 1
+contract_version: 8
+ownership_authority: config/contract-ownership.yaml
+source_identity_authority: sources/registry.yaml
+store_authority: config/market-data-store.yaml
+
+purpose:
+  - own endpoint transport parser retry timeout and bounded-concurrency semantics for the GitHub Actions market-data collector only
+  - own non-authoritative transport probe candidates before any new source contract is promoted
+  - keep ChatGPT runtime transport authority in config/market-data-access.yaml
+  - keep provider identity in sources/registry.yaml and store/reuse semantics in config/market-data-store.yaml
+  - make successful-http empty intraday responses diagnosable rather than silent missing
+  - provide a free structured regular-session fallback when Nasdaq does not yield target-window facts
+
+principles:
+  execution_plane: github_actions_market_data_collector
+  chatgpt_runtime_transport_not_redefined_here: true
+  provider_selection_for_report_research_forbidden: true
+  report_research_forbidden: true
+  report_projection_forbidden: true
+  report_finalization_forbidden: true
+  only_qualified_facts_may_reach_store: true
+  session_and_timestamp_truthfulness_required: true
+  probe_result_is_not_market_fact: true
+  probe_result_must_not_create_source_capability: true
+  cross_provider_bar_splice_for_same_symbol_window_forbidden: true
+
+http:
+  timeout_seconds: 20
+  user_agent: Mozilla/5.0 stock-dairy-market-data-collector/1
+
+regular_intraday_collection:
+  provider_order: [nasdaq_public_intraday, twelve_data_basic]
+  first_qualified_provider_per_symbol_wins: true
+  fallback_when_primary_has_no_qualified_target_window_facts: true
+  report_runtime_direct_twelve_data_transport_forbidden: true
+
+nasdaq_public_intraday:
+  provider_identity: nasdaq_public_intraday
+  regular_session_endpoint_template: https://api.nasdaq.com/api/quote/{symbol}/chart?assetclass={asset_class}&charttype=rs
+  source_contract: nasdaq_public_chart_last_sale_volume_v1
+  chart_array: data.chart
+  timestamp_field: x
+  timestamp_unit_detection:
+    seconds_upper_bound: 10000000000
+    milliseconds_divisor: 1000
+  last_sale_price_field: y
+  reported_minute_volume_field: w
+  allowed_sessions: [regular]
+  max_workers: 4
+  one_symbol_failure_scope: symbol_only
+  zero_qualified_increment_snapshot_forbidden: true
+  delayed_or_reference_semantics_must_be_preserved: true
+  http_success_with_zero_qualified_rows_must_record:
+    - raw_row_count
+    - timestamp_parseable_count
+    - trade_date_match_count
+    - target_window_match_count
+    - sample_raw_timestamp
+    - detected_timestamp_units
+  prohibited_uses: [official_close, official_vwap, true_minute_ohlc, consolidated_full_market_volume, realtime_claim_without_provider_semantics]
+
+nasdaq_extended_hours_probe:
+  provider_identity_candidate: nasdaq_public_intraday
+  role: shadow_transport_probe_only
+  market_fact_write_forbidden: true
+  allowed_write_prefix: sources/market-data/collector-state/probes/nasdaq-extended
+  probe_targets:
+    - {symbol: TME, asset_class: stocks}
+    - {symbol: PLTR, asset_class: stocks}
+    - {symbol: SPCX, asset_class: stocks}
+    - {symbol: NVDA, asset_class: stocks}
+    - {symbol: TSLA, asset_class: stocks}
+    - {symbol: MU, asset_class: stocks}
+    - {symbol: META, asset_class: stocks}
+    - {symbol: ORCL, asset_class: stocks}
+    - {symbol: TSM, asset_class: stocks}
+    - {symbol: AMD, asset_class: stocks}
+    - {symbol: QQQ, asset_class: etf}
+    - {symbol: SPY, asset_class: etf}
+  candidate_endpoints:
+    premarket:
+      - id: extended_trading_pre
+        url_template: https://api.nasdaq.com/api/quote/{symbol}/extended-trading?assetclass={asset_class}&markettype=pre
+    after_hours:
+      - id: extended_trading_post
+        url_template: https://api.nasdaq.com/api/quote/{symbol}/extended-trading?assetclass={asset_class}&markettype=post
+  response_success:
+    http_status: 200
+    json_object_required: true
+    application_status_path: status.rCode
+    application_status_success_value: 200
+    http_200_with_non_200_application_status_is_failure: true
+  capture_probe_fields:
+    - asset_class
+    - http_status
+    - content_type
+    - response_length
+    - json_top_level_keys
+    - response_status_object
+    - application_status_code
+    - application_status_success
+    - application_error_messages
+    - data_top_level_keys
+    - session_text
+    - last_update_info
+    - last_update_timestamp_et
+    - filter_list
+    - info_table_row_count
+    - info_table_first_row_keys
+    - info_table_first_row
+    - trade_detail_row_count
+    - trade_detail_first_row_keys
+    - trade_detail_first_row
+    - trade_detail_last_row
+    - trade_detail_time_parseable_count
+    - trade_detail_time_unparseable_count
+    - trade_detail_earliest_time_et
+    - trade_detail_latest_time_et
+    - trade_detail_session_window_match_count
+    - trade_detail_all_rows_in_candidate_session_window
+    - trade_date_candidate
+    - trade_date_resolution_basis
+    - trade_date_resolvable_without_hindsight
+    - latest_trade_lag_seconds_vs_last_update
+    - previous_info
+    - error_class
+    - error_detail
+  promotion_gate:
+    minimum_distinct_trade_sessions: 3
+    required_core_stock_targets: [TME, PLTR, SPCX, NVDA, TSLA, MU, META, ORCL, TSM, AMD]
+    required_market_anchor_targets: [QQQ, SPY]
+    required_for_premarket:
+      - repeated_http_200_json_and_application_rCode_200
+      - stable_response_shape
+      - explicit_session_text_or_equivalent
+      - explicit_trade_row_time_semantics
+      - target_trade_date_resolvable_without_hindsight
+      - security_identity_preserved
+      - delayed_semantics_preserved
+    required_for_after_hours:
+      - repeated_http_200_json_and_application_rCode_200
+      - stable_response_shape
+      - explicit_session_text_or_equivalent
+      - explicit_trade_row_time_semantics
+      - timestamp_after_regular_close_resolvable
+      - target_trade_date_resolvable_without_hindsight
+      - security_identity_preserved
+      - delayed_semantics_preserved
+    automatic_promotion_forbidden: true
+    report_route_registration_requires_explicit_contract_change: true
+
+
+twelve_data_basic:
+  provider_identity: twelve_data_basic
+  base_url: https://api.twelvedata.com
+  time_series_path: /time_series
+  api_key_env: TWELVE_DATA_API_KEY
+  interval_daily: 1day
+  interval_intraday: 1min
+  intraday_timezone: America/New_York
+  intraday_prepost: false
+  intraday_outputsize: 90
+  allowed_collector_uses:
+    - previous_session_daily_ohlcv_reconciliation
+    - provider_affine_daily_history_bootstrap
+    - provider_affine_daily_gap_repair
+    - regular_session_intraday_fallback
+  intraday_semantics:
+    datetime_is_bar_open_time_in_exchange_timezone: true
+    feed_scope: twelve_data_basic_us_equities_limited_realtime_coverage
+    regular_session_only: true
+    not_consolidated_sip: true
+    consolidated_full_market_volume_claim_forbidden: true
+    official_vwap_claim_forbidden: true
+  returned_history_overlap_must_be_compared_with_persisted_rows: true
+  historical_revision_must_not_silently_overwrite: true
+  live_premarket_forbidden: true
+  live_after_hours_forbidden: true
+  automatic_paid_upgrade_forbidden: true
