@@ -1,18 +1,25 @@
 schema_version: 1
-contract_version: 1
+contract_version: 2
 ownership_authority: config/data-plane.yaml
+collection_universe_authority: config/collection-universe.json
 purpose:
-- runtime configuration for the public Market Data collector
-- persist qualified facts only into the private stock-market-data-store checkout
+  - runtime configuration for the public Market Data collector
+  - persist qualified facts only into the private stock-market-data-store checkout
+  - keep collection membership independent from stock-dairy research membership
 principles:
   provider_affine_series: true
   cross_provider_series_splice_forbidden: true
   append_only_series: true
+  rolling_storage_deletion_forbidden: true
   duplicate_equal_is_noop: true
   duplicate_conflict_is_hard_error: true
   snapshot_immutable: true
+  latest_snapshot_must_not_move_backward: true
   explicit_series_rebase_requires_recovery_archive_and_revision_audit: true
   immutable_daily_series_append_requires_provider_settlement_maturity: true
+  public_compute_must_not_commit_market_payloads: true
+  persisted_payload_repository_must_be_private: true
+  collection_universe_is_not_research_watchlist: true
 paths:
   root: data/market-data
   daily_series_root: data/market-data/series/daily
@@ -28,26 +35,12 @@ series:
   shard_filename: '{start:06d}.json'
   index_filename: _index.json
   sort_order: trade_date_asc
-  required_record_fields:
-  - trade_date
-  - close
-  allowed_record_fields:
-  - trade_date
-  - open
-  - high
-  - low
-  - close
-  - volume
-  - source_timestamp
+  required_record_fields: [trade_date, close]
+  allowed_record_fields: [trade_date, open, high, low, close, volume, source_timestamp]
   storage_retention: append_only
-  analysis_windows_may_read_last_sessions:
-  - 20
-  - 50
-  - 128
-  - 256
+  analysis_windows_may_read_last_sessions: [20, 50, 128, 256]
   event_time_semantics:
     daily_regular_bar_fact_time: actual_regular_session_close_for_trade_date
-    actual_regular_session_close_authority: config/market-calendar.yaml
     retrieval_or_ingest_time_is_provenance_not_market_event_time: true
     same_trade_date_daily_bar_before_actual_regular_close_forbidden: true
     prior_trade_date_daily_bar_may_be_used_in_later_stage_when_identity_and_series_semantics_pass: true
@@ -82,20 +75,13 @@ series:
     session_semantics_must_match_series: true
     adjustment_semantics_must_match_series: true
   identity_gate:
-    metadata_authority: config/watchlist.json#instruments
+    metadata_authority: config/collection-universe.json#daily_series
     effective_date_field: ticker_effective_at
     date_before_effective_date: hard_error
 session_capture:
   immutable: true
   qualified_fact_only: true
-  preserve:
-  - provider
-  - symbol
-  - session
-  - trade_date
-  - source_timestamp
-  - feed_scope
-  - exact_source_identity
+  preserve: [provider, symbol, session, trade_date, source_timestamp, feed_scope, exact_source_identity]
   route_attempt_diagnostics_forbidden: true
   canonical_json_serialization: utf8_sort_keys_compact_newline_terminated
   path_templates:
@@ -110,34 +96,17 @@ stage_snapshot:
   latest_alias_filename: latest.json
   latest_ordering_field: generated_at
   latest_backward_move_forbidden: true
-  references_require:
-  - path
-  - blob_sha
+  references_require: [path, blob_sha]
   stage_windows:
-    open_15m:
-    - 09:30
-    - 09:45
-    open_30m:
-    - 09:30
-    - '10:00'
-    open_60m:
-    - 09:30
-    - '10:30'
+    open_15m: ['09:30', '09:45']
+    open_30m: ['09:30', '10:00']
+    open_60m: ['09:30', '10:30']
   composition:
-    open_15m:
-    - 09:30-09:44
-    open_30m:
-    - open_15m_refs
-    - 09:45-09:59
-    open_60m:
-    - open_30m_refs
-    - 10:00-10:29
-    close_first_pass:
-    - open_60m_refs_if_present
-    - 15:45-15:59
-    close_retry:
-    - previous_close_snapshot_refs
-    - missing_only_new_refs
+    open_15m: ['09:30-09:44']
+    open_30m: [open_15m_refs, '09:45-09:59']
+    open_60m: [open_30m_refs, '10:00-10:29']
+    close_first_pass: [open_60m_refs_if_present, '15:45-15:59']
+    close_retry: [previous_close_snapshot_refs, missing_only_new_refs]
     copy_preexisting_referenced_bars: false
   zero_qualified_increment:
     create_empty_snapshot: false
@@ -147,48 +116,47 @@ collector_state:
   close_missing_state:
     path_template: collector-state/{YYYY-MM}/{trade_date}-close-missing.json
     first_pass_always_persists_unresolved_set_even_when_zero_qualified: true
-    retry_load_precedence:
-    - close_missing_state
-    - prior_close_snapshot_missing
-    - full_intraday_universe
+    retry_load_precedence: [close_missing_state, prior_close_snapshot_missing, full_intraday_universe]
     retry_success_replaces_state_with_remaining_missing: true
     empty_missing_state_means_nothing_missing: true
     missing_state_absent_must_not_mean_nothing_missing: true
-    state_fields:
-    - schema_version
-    - trade_date
-    - updated_at
-    - last_mode
-    - missing
+    state_fields: [schema_version, trade_date, updated_at, last_mode, missing]
 collector:
   workflow_path: .github/workflows/market-data-collector.yml
+  compute_repository: yuatom/stock-market-data
+  compute_repository_visibility_required: public
+  persisted_store_repository: yuatom/stock-market-data-store
+  persisted_store_visibility_required: private
+  persisted_store_checkout_root: data/market-data
   role: market_data_collection_only
   report_research_forbidden: true
   report_projection_forbidden: true
   report_finalization_forbidden: true
-  repository_ci_forbidden: true
-  allowed_write_prefixes:
-  - sources/market-data
+  evaluation_forbidden: true
+  allowed_payload_write_repository: yuatom/stock-market-data-store
+  allowed_payload_write_prefixes: [data/market-data]
+  public_compute_payload_write_forbidden: true
   standard_runner_only: ubuntu-latest
   timeout_minutes: 8
-  repository_visibility_required_for_registered_third_party_api_data: private
   activation_probe_path: .github/market-data-collector-activation-v1
-  activation_mode_from_marker: true
   on_demand_request:
-    path: state/market-data-collector-request.json
-    schema: schemas/market-data-collector-request.schema.json
-    trigger_event: push_when_request_path_changes
-    accepted_modes:
-    - open_15m
-    - open_30m
-    - open_60m
-    - close
+    control_repository: yuatom/stock-market-data
+    control_branch: collector-requests
+    path: requests/collector-request.json
+    schema: schemas/collector-request.schema.json
+    trigger_event: push_on_collector_requests_branch_only
+    accepted_modes: [open_15m, open_30m, open_60m, close]
     target_trade_date_must_match_current_et_trade_date: true
-    request_is_read_only_to_collector: true
+    request_stage_must_equal_mode: true
+    request_market_data_contract_sha_must_equal_current_compute_main: true
+    request_research_repository_must_equal: yuatom/stock-dairy
+    request_is_control_state_not_market_fact: true
     collector_must_not_modify_request_file: true
     data_commit_must_not_retrigger_request_workflow: true
+    compute_checkout_must_use_main_not_request_branch: true
   secrets:
     twelve_data: TWELVE_DATA_API_KEY
+    private_store: MARKET_DATA_STORE_TOKEN
   budgets:
     twelve_data_basic:
       hard_credits_per_minute: 8
@@ -207,25 +175,34 @@ collector:
     compare_returned_overlap_with_persisted_rows: true
     historical_revision_behavior: do_not_overwrite_record_failure
     settlement_maturity:
-      minimum_next_day_et: 07:00
+      minimum_next_day_et: '07:00'
       direct_immutable_series_write_before_maturity_forbidden: true
       evidence_basis: 2026-08-13_same_provider_revision_observed_across_all_28_series_after_00_17_ingest
       conflict_after_maturity_behavior: keep_existing_hard_error_requires_explicit_rebase
     baseline_initializer: scripts/initialize_market_data_baseline.py
     explicit_baseline_rebaser: scripts/rebase_market_data_baseline.py
-    universe_authorities:
-      core: config/watchlist.json#core_watchlist
-      benchmarks: config/data-completeness.yaml#minute_matrix_requirements.tracked_benchmarks
-      sectors: config/data-completeness.yaml#sector_close_capability.exact_sector_etfs
+    universe_authority: config/collection-universe.json#daily_series
+  compatibility_projection:
+    helper: scripts/build_collector_compat.py
+    output_root: .runtime
+    persisted: false
+    semantic_authority: false
+    source: config/collection-universe.json
   shadow_probes:
     nasdaq_extended_hours:
       config: config/market-data-collector-access.yaml#nasdaq_extended_hours_probe
       script: scripts/probe_nasdaq_extended.py
-      write_prefix: sources/market-data/collector-state/probes/nasdaq-extended
+      write_prefix: data/market-data/collector-state/probes/nasdaq-extended
       market_fact_authority: false
       report_capability_authority: false
       automatic_promotion: false
       minimum_distinct_trade_sessions_before_promotion_review: 3
+  public_logging:
+    raw_market_data_payload_forbidden: true
+    api_credentials_forbidden: true
+    private_store_file_contents_forbidden: true
+    allowed_summary_fields: [mode, status, counts, missing_symbols, failure_classes, commit_sha, request_id]
+    raw_data_artifacts_forbidden: true
   scheduling:
     timezone: America/New_York
     window_collector_runs_after_target_window_end: true
@@ -234,17 +211,15 @@ collector:
     on_demand_push_is_primary_live_stage_handoff_when_snapshot_missing: true
     runtime_short_wait_may_capture_on_demand_or_scheduled_collector_handoff: true
     runtime_must_not_wait_for_late_scheduled_workflow_beyond_bounded_window: true
-    bounded_wait_timeout_falls_back_to_existing_remote_route: true
     report_schedule_shift_required: false
     daily_series_maturity_schedule_must_finish_before_premarket_report: true
     live_premarket_scheduled: false
     live_premarket_disabled_reason: no_qualified_live_premarket_adapter_registered
-    activation_probe_event: push_when_activation_probe_path_changes
     shadow_probe_does_not_change_live_source_status: true
   schedules_et:
-    previous_session_eod: 07:05
-    premarket_shadow_probe: 07:20
-    open_15m: 09:46
+    previous_session_eod: '07:05'
+    premarket_shadow_probe: '07:20'
+    open_15m: '09:46'
     open_30m: '10:01'
     open_60m: '10:31'
     close: '16:06'
