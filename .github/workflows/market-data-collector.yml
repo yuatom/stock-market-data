@@ -2,9 +2,8 @@ name: Market Data Collector
 
 on:
   push:
-    branches: [main, collector-requests]
+    branches: [collector-requests]
     paths:
-      - .github/market-data-collector-activation-v1
       - requests/collector-request.json
   workflow_dispatch:
     inputs:
@@ -164,20 +163,6 @@ jobs:
               mode = str(request['mode'])
               trade_date = str(request['trade_date'])
               request_id = str(request['request_id'])
-          elif event == 'push' and branch == 'main':
-              path = Path('control/.github/market-data-collector-activation-v1')
-              if not path.exists():
-                  raise SystemExit('main push is missing authorized collector activation marker')
-              values = {}
-              for line in path.read_text(encoding='utf-8').splitlines():
-                  if ': ' in line:
-                      key, value = line.split(': ', 1)
-                      values[key.strip()] = value.strip()
-              mode = values.get('mode', '')
-              trade_date = values.get('trade_date', '')
-              request_id = values.get('request_id', '')
-              if mode not in maintenance_modes:
-                  raise SystemExit(f'unauthorized activation mode: {mode}')
           elif event == 'workflow_dispatch':
               mode = os.environ.get('MANUAL_MODE', '')
               trade_date = os.environ.get('MANUAL_TRADE_DATE', '')
