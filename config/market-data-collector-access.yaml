@@ -1,5 +1,5 @@
 schema_version: 1
-contract_version: 8
+contract_version: 9
 ownership_authority: config/contract-ownership.yaml
 source_identity_authority: sources/registry.yaml
 store_authority: config/market-data-store.yaml
@@ -23,6 +23,8 @@ principles:
   session_and_timestamp_truthfulness_required: true
   probe_result_is_not_market_fact: true
   probe_result_must_not_create_source_capability: true
+  readiness_result_is_not_market_fact: true
+  readiness_result_must_not_auto_promote_source_capability: true
   cross_provider_bar_splice_for_same_symbol_window_forbidden: true
 
 http:
@@ -64,7 +66,11 @@ nasdaq_extended_hours_probe:
   provider_identity_candidate: nasdaq_public_intraday
   role: shadow_transport_probe_only
   market_fact_write_forbidden: true
-  allowed_write_prefix: sources/market-data/collector-state/probes/nasdaq-extended
+  allowed_write_prefix: data/market-data/collector-state/probes/nasdaq-extended
+  readiness_evaluator: scripts/evaluate_nasdaq_extended_probe.py
+  readiness_state_path: data/market-data/collector-state/probes/nasdaq-extended/promotion-readiness.json
+  readiness_market_fact_authority: false
+  readiness_automatic_promotion_allowed: false
   probe_targets:
     - {symbol: TME, asset_class: stocks}
     - {symbol: PLTR, asset_class: stocks}
