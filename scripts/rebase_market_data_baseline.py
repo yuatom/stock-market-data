@@ -7,6 +7,9 @@ already-persisted recent settlement rows. It archives the entire old logical
 series, records field-level overlap revisions, requires those revisions to be
 confined to a small tail window, and then rebuilds the same provider-affine
 series from the provider's current qualified baseline.
+
+Collection membership comes directly from config/collection-universe.json. No
+research-watchlist compatibility file participates in this maintenance path.
 """
 from __future__ import annotations
 
@@ -17,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+import collection_universe as collection
 import market_data_collectors as collectors
 import market_data_store as store
 
@@ -232,13 +236,11 @@ def rebase(
     *,
     trade_date: str,
     store_root: Path,
-    watchlist_path: Path,
-    completeness_path: Path,
+    universe_path: Path,
     store_config_path: Path,
     access_path: Path,
 ) -> dict[str, Any]:
-    watchlist = collectors.load_json(watchlist_path)
-    completeness = collectors.load_yaml(completeness_path)
+    universe_config = collection.load_collection_universe(universe_path)
     config = collectors.load_yaml(store_config_path)
     access = collectors.load_yaml(access_path)
     series_cfg = config["series"]
@@ -258,7 +260,7 @@ def rebase(
 
     provider = collectors.TWELVE_PROVIDER
     budget = config["collector"]["budgets"]["twelve_data_basic"]
-    universe = collectors._daily_universe(watchlist, completeness)
+    universe = collection.daily_universe(universe_config)
     results: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
 
@@ -295,7 +297,7 @@ def rebase(
                 per_minute=int(budget["hard_credits_per_minute"]),
             )
             fetched = collectors.fetch_twelve_daily(symbol, key, access, outputsize=target_records)
-            effective = collectors._identity_effective_date(watchlist, symbol)
+            effective = collection.ticker_effective_at(universe_config, symbol)
             eligible = [
                 row for row in fetched
                 if row["trade_date"] < trade_date
@@ -389,8 +391,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--trade-date", required=True)
     parser.add_argument("--store-root", default="sources/market-data")
-    parser.add_argument("--watchlist", default="config/watchlist.json")
-    parser.add_argument("--data-completeness", default="config/data-completeness.yaml")
+    parser.add_argument("--universe", default="config/collection-universe.json")
     parser.add_argument("--store-config", default="config/market-data-store.yaml")
     parser.add_argument("--access-config", default="config/market-data-collector-access.yaml")
     args = parser.parse_args(argv)
@@ -398,16 +399,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     result = rebase(
         trade_date=args.trade_date,
         store_root=store_root,
-        watchlist_path=Path(args.watchlist),
-        completeness_path=Path(args.data_completeness),
+        universe_path=Path(args.universe),
         store_config_path=Path(args.store_config),
         access_path=Path(args.access_config),
     )
     path = _write_result(store_root, args.trade_date, result)
     result["result_path"] = str(path)
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
-    # Successful independent symbols are persisted even if another symbol fails;
-    # the result artifact is the explicit retry surface.
     return 0
 
 

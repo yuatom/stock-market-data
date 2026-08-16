@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
 """One-shot safe initialization of reusable daily market-data baselines.
 
-This utility is deliberately narrower than the normal daily collector.  It may
+This utility is deliberately narrower than the normal daily collector. It may
 extend an existing provider-affine series backwards only when every overlapping
-record is byte-equivalent after canonical normalization.  It never revises an
+record is byte-equivalent after canonical normalization. It never revises an
 existing market fact, fills an internal gap, changes provider/session semantics,
 or bypasses security identity effective dates.
 
-The target depth is derived from
-config/market-data-store.yaml#series.analysis_windows_may_read_last_sessions,
-so the initialization does not create a second authority for research history
-length.  Once the baseline is initialized, the normal previous_session_eod
-collector remains append-only.
+Collection membership comes directly from config/collection-universe.json. No
+research-watchlist compatibility file participates in baseline maintenance.
 """
 from __future__ import annotations
 
@@ -22,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+import collection_universe as collection
 import market_data_collectors as collectors
 import market_data_store as store
 
@@ -50,13 +48,7 @@ def merge_verified_baseline(
     existing: Sequence[Mapping[str, Any]],
     fetched: Sequence[Mapping[str, Any]],
 ) -> tuple[list[dict[str, Any]], int, int, int]:
-    """Return a safe prefix/suffix extension around an immutable existing range.
-
-    Existing rows are the authority for their dates.  Fetched rows may add only
-    dates before the first existing row or after the last existing row.  Every
-    overlapping date must match exactly; a fetched date inside the existing
-    range that is absent locally is treated as an integrity gap and fails.
-    """
+    """Return a safe prefix/suffix extension around an immutable existing range."""
     existing_rows = [dict(x) for x in existing]
     fetched_rows = [dict(x) for x in fetched]
     if not fetched_rows:
@@ -193,13 +185,11 @@ def initialize(
     *,
     trade_date: str,
     store_root: Path,
-    watchlist_path: Path,
-    completeness_path: Path,
+    universe_path: Path,
     store_config_path: Path,
     access_path: Path,
 ) -> dict[str, Any]:
-    watchlist = collectors.load_json(watchlist_path)
-    completeness = collectors.load_yaml(completeness_path)
+    universe_config = collection.load_collection_universe(universe_path)
     config = collectors.load_yaml(store_config_path)
     access = collectors.load_yaml(access_path)
     windows = list(((config.get("series") or {}).get("analysis_windows_may_read_last_sessions") or []))
@@ -222,7 +212,7 @@ def initialize(
     provider = collectors.TWELVE_PROVIDER
     results: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
-    universe = collectors._daily_universe(watchlist, completeness)
+    universe = collection.daily_universe(universe_config)
     for symbol, asset_class in universe:
         try:
             collectors.wait_for_twelve_budget(
@@ -239,7 +229,7 @@ def initialize(
                 per_minute=int(budget["hard_credits_per_minute"]),
             )
             fetched = collectors.fetch_twelve_daily(symbol, key, access, outputsize=target_records)
-            effective = collectors._identity_effective_date(watchlist, symbol)
+            effective = collection.ticker_effective_at(universe_config, symbol)
             eligible = [
                 row for row in fetched
                 if row["trade_date"] < trade_date
@@ -354,8 +344,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--trade-date", required=True)
     parser.add_argument("--store-root", default="sources/market-data")
-    parser.add_argument("--watchlist", default="config/watchlist.json")
-    parser.add_argument("--data-completeness", default="config/data-completeness.yaml")
+    parser.add_argument("--universe", default="config/collection-universe.json")
     parser.add_argument("--store-config", default="config/market-data-store.yaml")
     parser.add_argument("--access-config", default="config/market-data-collector-access.yaml")
     args = parser.parse_args(argv)
@@ -363,17 +352,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     result = initialize(
         trade_date=args.trade_date,
         store_root=store_root,
-        watchlist_path=Path(args.watchlist),
-        completeness_path=Path(args.data_completeness),
+        universe_path=Path(args.universe),
         store_config_path=Path(args.store_config),
         access_path=Path(args.access_config),
     )
     result_path = _write_result(store_root, args.trade_date, result)
     result["result_path"] = str(result_path)
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
-    # Per-symbol conflicts are fail-closed for that series but do not discard
-    # successfully initialized independent series.  The persisted result is the
-    # explicit retry surface for any failures.
     return 0
 
 

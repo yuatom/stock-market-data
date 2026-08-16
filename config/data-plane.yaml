@@ -1,5 +1,5 @@
 schema_version: 1
-contract_version: 7
+contract_version: 8
 repository: yuatom/stock-market-data
 purpose:
   - own reusable Market Data Plane code, contracts, collection and storage semantics
@@ -102,12 +102,10 @@ collection_membership:
   loader: scripts/collection_universe.py
   research_watchlist_is_not_dependency: true
   live_collector_reads_first_class_universe_directly: true
-  runtime_compatibility_file_dependency_for_live_collection: false
-  legacy_baseline_maintenance_projection:
-    helper: scripts/build_collector_compat.py
-    persisted: false
-    semantic_authority: false
-    allowed_modes: [daily_baseline_init, daily_baseline_rebase]
+  baseline_initializer_reads_first_class_universe_directly: true
+  explicit_rebase_reads_first_class_universe_directly: true
+  runtime_compatibility_file_dependency: false
+  generated_compatibility_membership_files_forbidden: true
 
 supported_context_baseline:
   role: cutoff_valid_cross_asset_proxy
