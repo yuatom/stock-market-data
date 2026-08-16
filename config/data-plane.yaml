@@ -1,15 +1,17 @@
 schema_version: 1
-contract_version: 6
+contract_version: 7
 repository: yuatom/stock-market-data
 purpose:
   - own reusable Market Data Plane code, contracts, collection and storage semantics
   - keep GitHub Actions collector/runtime public while persisted third-party market data remains private
   - expose independent commit-pinned data-contract and data-read identities to research consumers
   - keep regular-session Market Fact acquisition and writes out of the research runtime
+  - make cutoff-valid cross-asset context a persisted Data Plane capability rather than a research-time side fetch
 
 boundaries:
   owns:
     - collection_universe
+    - cutoff_valid_cross_asset_proxy_semantics
     - collector_transport_and_parser
     - reusable_market_data_store_semantics
     - daily_series_semantics
@@ -21,6 +23,7 @@ boundaries:
     - market_data_inventory_semantics
     - collector_workflows
     - cross_repository_collector_request_contract
+    - explicit_data_maintenance_request_contract
   must_not_own:
     - persisted_market_fact_commit_history
     - research_watchlist_priority
@@ -30,6 +33,7 @@ boundaries:
     - evidence_authority
     - evaluation_decisions
     - canonical_report_finalization
+    - formal_macro_or_breadth_research_semantics
 
 repositories:
   compute_and_contract:
@@ -41,6 +45,12 @@ repositories:
     repository: yuatom/stock-market-data
     branch: collector-requests
     path: requests/collector-request.json
+    market_fact_authority: false
+    contract_authority: false
+  maintenance_request_control:
+    repository: yuatom/stock-market-data
+    branch: maintenance-requests
+    path: requests/market-data-maintenance.json
     market_fact_authority: false
     contract_authority: false
   persisted_data_store:
@@ -83,14 +93,52 @@ principles:
   market_fact_writes_are_collector_or_explicit_data_maintenance_only: true
   research_runtime_market_fact_write_forbidden: true
   research_runtime_may_request_collector_but_must_not_bypass_it: true
+  context_proxy_fact_must_preserve_proxy_semantics: true
+  context_proxy_must_not_be_relabelled_as_formal_underlying_metric: true
+  unsupported_enrichment_must_not_be_fabricated_from_proxy_data: true
 
 collection_membership:
   owner: config/collection-universe.json
+  loader: scripts/collection_universe.py
   research_watchlist_is_not_dependency: true
-  ephemeral_legacy_shape_projection:
+  live_collector_reads_first_class_universe_directly: true
+  runtime_compatibility_file_dependency_for_live_collection: false
+  legacy_baseline_maintenance_projection:
     helper: scripts/build_collector_compat.py
     persisted: false
     semantic_authority: false
+    allowed_modes: [daily_baseline_init, daily_baseline_rebase]
+
+supported_context_baseline:
+  role: cutoff_valid_cross_asset_proxy
+  owner: config/collection-universe.json#context_proxies
+  categories: [rates, volatility, dollar, commodities, crypto]
+  collection_session: regular
+  historical_repair_mode: historical_context_repair
+  historical_repair_window_et: {start: '15:45', end: '16:00'}
+  provider_timestamp_must_match_target_trade_date: true
+  target_window_timestamp_required: true
+  stored_fact_semantics_must_include:
+    - category
+    - quality_role
+    - semantics
+    - not_equivalent_to
+  interpretation:
+    rates: directional_duration_or_rates_proxy_only
+    volatility: directional_volatility_risk_proxy_only
+    dollar: directional_dollar_proxy_only
+    commodities: directional_precious_metals_proxy_only
+    crypto: directional_bitcoin_risk_proxy_only
+  forbidden_relabelling:
+    - official_yield_curve
+    - policy_rate
+    - spot_vix
+    - official_vix_close
+    - official_dollar_index
+    - spot_gold
+    - btc_spot
+    - official_consolidated_vwap
+    - sip_or_full_market_volume
 
 collector_request_interface:
   repository: yuatom/stock-market-data
@@ -111,6 +159,22 @@ collector_request_interface:
   collector_compute_checkout_ref: main
   request_branch_content_must_not_be_used_as_compute_code: true
 
+maintenance_request_interface:
+  repository: yuatom/stock-market-data
+  branch: maintenance-requests
+  path: requests/market-data-maintenance.json
+  schema: schemas/market-data-maintenance-request.schema.json
+  allowed_modes:
+    daily_baseline_init: collection_universe_daily_baseline
+    historical_context_repair: cutoff_valid_cross_asset_context_proxies_only
+  authority: owner_authorized_data_plane_maintenance
+  market_data_contract_sha_must_equal_current_compute_main: true
+  future_trade_date_forbidden: true
+  request_is_control_state_not_market_fact: true
+  collector_compute_checkout_ref: main
+  request_branch_content_must_not_be_used_as_compute_code: true
+  research_runtime_implicit_historical_repair_forbidden: true
+
 payload_writers:
   scheduled_and_on_demand_collector:
     executor: stock_market_data_github_actions
@@ -123,6 +187,7 @@ payload_writers:
     allowed_prefix: data/market-data
     explicit_mode_required: true
     recovery_and_revision_audit_required_when_mutating_persisted_history: true
+    append_only_context_repair_may_add_new_immutable_capture_and_snapshot_refs: true
   stock_dairy_research_runtime:
     executor: stock_dairy_chatgpt_runtime
     market_fact_write_allowed: false
@@ -148,6 +213,8 @@ consumer_interface:
   consumer_must_not_refresh_read_sha_after_research_input_freeze: true
   store_miss_may_trigger_collector_request: true
   store_miss_must_not_authorize_research_runtime_market_fetch_or_write: true
+  cutoff_valid_context_proxy_refs_are_first_class_market_data_refs: true
+  proxy_semantics_must_survive_into_frozen_research_input: true
 
 migration:
   source_repository: yuatom/stock-dairy
@@ -168,20 +235,8 @@ migration:
     provider_noop_result: ok
     private_store_post_smoke_commit: 0db695f7d4aed10634a02ed00bbe5c63bf42cff3
     conclusion: provider_and_private_store_execution_path_verified_without_market_series_revision
-  state: consumer_cutover_complete_post_cutover_acceptance_pending
+  state: consumer_cutover_complete
   consumer_cutover: complete
-  natural_run_acceptance: pending
-  completed_gates:
-    - private_store_repository_exists
-    - private_store_repository_visibility_private
-    - source_assets_mirrored_and_hash_audited
-    - collector_runtime_installed_in_compute_repo
-    - public_collector_private_store_read_smoke_passed
-    - public_collector_provider_secret_and_noop_passed
-    - stock_dairy_external_read_contract_merged
-  pending_gates:
-    - external_store_on_demand_request_path_passed
-    - first_natural_settlement_mature_append_observed
   source_collector_must_remain_authoritative_until_external_smoke_and_consumer_cutover: true
   dual_authoritative_collectors_for_same_logical_store_forbidden: true
   first_natural_increment_may_be_post_cutover_acceptance_if_noop_provider_read_and_append_primitive_smoke_pass: true
