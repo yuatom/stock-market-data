@@ -1,18 +1,19 @@
 schema_version: 1
-contract_version: 9
+contract_version: 10
 repository: yuatom/stock-market-data
 purpose:
   - own reusable Market Data Plane code, contracts, collection and storage semantics
   - keep GitHub Actions collector/runtime public while persisted third-party market data remains private
   - expose independent commit-pinned data-contract and data-read identities to research consumers
   - keep regular-session Market Fact acquisition and writes out of the research runtime
-  - make cutoff-valid cross-asset context a persisted Data Plane capability rather than a research-time side fetch
+  - make cutoff-valid Close supported-baseline context a persisted Data Plane capability rather than a research-time side fetch
   - keep mutable control branches as data-only triggers while execution logic always resolves from current main
 
 boundaries:
   owns:
     - collection_universe
     - cutoff_valid_cross_asset_proxy_semantics
+    - cutoff_valid_close_sector_context
     - collector_transport_and_parser
     - reusable_market_data_store_semantics
     - daily_series_semantics
@@ -98,6 +99,7 @@ principles:
   research_runtime_may_request_collector_but_must_not_bypass_it: true
   context_proxy_fact_must_preserve_proxy_semantics: true
   context_proxy_must_not_be_relabelled_as_formal_underlying_metric: true
+  sector_terminal_fact_must_be_timestamped_regular_session_context: true
   unsupported_enrichment_must_not_be_fabricated_from_proxy_data: true
 
 workflow_execution:
@@ -127,8 +129,26 @@ collection_membership:
   live_collector_reads_first_class_universe_directly: true
   baseline_initializer_reads_first_class_universe_directly: true
   explicit_rebase_reads_first_class_universe_directly: true
+  close_supported_baseline_maintenance_is_derived_from_collection_groups: true
+  live_intraday_universe_must_not_expand_only_for_historical_sector_repair: true
   runtime_compatibility_file_dependency: false
   generated_compatibility_membership_files_forbidden: true
+
+supported_close_baseline:
+  owner: config/collection-universe.json
+  historical_repair_mode: historical_context_repair
+  historical_repair_scope: cutoff_valid_close_supported_baseline
+  historical_repair_window_et: {start: '15:45', end: '16:00'}
+  terminal_groups:
+    sector_context: sector_etfs
+    cross_asset_context: context_proxies
+  required_sector_count: 11
+  required_cross_asset_categories: [rates, volatility, dollar, commodities, crypto]
+  provider_timestamp_must_match_target_trade_date: true
+  target_window_timestamp_required: true
+  terminal_market_fact_semantics: timestamped_regular_session_context_provider_specific_not_official_close_or_sip
+  daily_series_settlement_must_not_substitute_for_pre_1600_terminal_fact: true
+  research_runtime_backfill_forbidden: true
 
 supported_context_baseline:
   role: cutoff_valid_cross_asset_proxy
@@ -189,7 +209,7 @@ maintenance_request_interface:
   schema: schemas/market-data-maintenance-request.schema.json
   allowed_modes:
     daily_baseline_init: collection_universe_daily_baseline
-    historical_context_repair: cutoff_valid_cross_asset_context_proxies_only
+    historical_context_repair: cutoff_valid_close_supported_baseline
   authority: owner_authorized_data_plane_maintenance
   market_data_contract_sha_must_equal_current_compute_main: true
   future_trade_date_forbidden: true
@@ -250,7 +270,7 @@ migration:
   initial_private_store_commit: b29b0bd13f1bf5a2f1586ffba3315e385e3373d9
   initial_mirror_file_count: 261
   initial_mirror_total_bytes: 1694709
-  initial_mirror_payload_tree_sha256: 384e2c726d617e8b014e5c2f087d9930249c88b38a76c85ef581881362516ef0
+  initial_mirror_payload_tree_sha256: 384e2c726d617e8b0145c2f087d9930249c88b38a76c85ef581881362516ef0
   smoke_evidence:
     private_store_readonly_run_id: 31905104622
     provider_noop_run_id: 31905129892
