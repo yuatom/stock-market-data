@@ -1,5 +1,5 @@
 schema_version: 1
-contract_version: 8
+contract_version: 9
 repository: yuatom/stock-market-data
 purpose:
   - own reusable Market Data Plane code, contracts, collection and storage semantics
@@ -7,6 +7,7 @@ purpose:
   - expose independent commit-pinned data-contract and data-read identities to research consumers
   - keep regular-session Market Fact acquisition and writes out of the research runtime
   - make cutoff-valid cross-asset context a persisted Data Plane capability rather than a research-time side fetch
+  - keep mutable control branches as data-only triggers while execution logic always resolves from current main
 
 boundaries:
   owns:
@@ -22,6 +23,7 @@ boundaries:
     - source_probe_semantics
     - market_data_inventory_semantics
     - collector_workflows
+    - control_branch_dispatcher_contract
     - cross_repository_collector_request_contract
     - explicit_data_maintenance_request_contract
   must_not_own:
@@ -89,6 +91,7 @@ principles:
   store_presence_does_not_bypass_claim_qualification: true
   public_compute_repo_must_not_commit_third_party_market_payloads: true
   mutable_collector_requests_must_not_advance_compute_main: true
+  mutable_control_branch_must_not_execute_branch_local_runtime_logic: true
   one_authoritative_payload_store: true
   market_fact_writes_are_collector_or_explicit_data_maintenance_only: true
   research_runtime_market_fact_write_forbidden: true
@@ -96,6 +99,26 @@ principles:
   context_proxy_fact_must_preserve_proxy_semantics: true
   context_proxy_must_not_be_relabelled_as_formal_underlying_metric: true
   unsupported_enrichment_must_not_be_fabricated_from_proxy_data: true
+
+workflow_execution:
+  runtime_workflow: .github/workflows/market-data-collector-runtime.yml
+  runtime_authority_ref: main
+  runtime_trigger: workflow_call
+  scheduled_and_manual_entrypoint: .github/workflows/market-data-collector.yml
+  control_dispatcher_template: config/control-branch-dispatcher.yml
+  control_branches: [collector-requests, maintenance-requests]
+  control_branch_dispatcher_rules:
+    business_logic_forbidden: true
+    provider_logic_forbidden: true
+    store_write_logic_forbidden: true
+    must_call_runtime_at_main: true
+    must_pass_immutable_control_ref: true
+    must_pass_control_branch_identity: true
+    secrets_must_be_inherited_to_main_runtime: true
+  rationale:
+    - github_push_uses_workflow_definition_from_triggering_branch
+    - mutable_control_branch_workflow_drift_must_not_change_runtime_semantics
+    - request_payload_is_read_from_immutable_trigger_commit_but_compute_and_runtime_logic_are_resolved_from_main
 
 collection_membership:
   owner: config/collection-universe.json
@@ -154,8 +177,10 @@ collector_request_interface:
   market_data_contract_sha_must_equal_current_compute_main: true
   current_trade_date_only: true
   request_is_control_state_not_market_fact: true
+  control_request_read_ref_must_equal_trigger_commit: true
   collector_compute_checkout_ref: main
   request_branch_content_must_not_be_used_as_compute_code: true
+  request_branch_workflow_must_be_thin_dispatcher_only: true
 
 maintenance_request_interface:
   repository: yuatom/stock-market-data
@@ -169,8 +194,10 @@ maintenance_request_interface:
   market_data_contract_sha_must_equal_current_compute_main: true
   future_trade_date_forbidden: true
   request_is_control_state_not_market_fact: true
+  control_request_read_ref_must_equal_trigger_commit: true
   collector_compute_checkout_ref: main
   request_branch_content_must_not_be_used_as_compute_code: true
+  request_branch_workflow_must_be_thin_dispatcher_only: true
   research_runtime_implicit_historical_repair_forbidden: true
 
 payload_writers:
