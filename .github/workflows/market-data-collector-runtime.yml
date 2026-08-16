@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       trigger_kind:
-        description: Logical trigger kind: push, workflow_dispatch, or schedule
+        description: "Logical trigger kind: push, workflow_dispatch, or schedule"
         required: true
         type: string
       control_ref:
