@@ -3,9 +3,9 @@
   "$id": "collection-universe.schema.json",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "purpose", "daily_series", "intraday", "sector_etfs", "rules"],
+  "required": ["schema_version", "purpose", "daily_series", "intraday", "sector_etfs", "context_proxies", "rules"],
   "properties": {
-    "schema_version": {"const": 2},
+    "schema_version": {"const": 3},
     "purpose": {"type": "string", "minLength": 1},
     "daily_series": {
       "type": "array",
@@ -21,8 +21,43 @@
         }
       }
     },
-    "intraday": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
-    "sector_etfs": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "intraday": {"type": "array", "items": {"type": "string", "pattern": "^[A-Z][A-Z0-9.-]*$"}, "uniqueItems": true},
+    "sector_etfs": {"type": "array", "items": {"type": "string", "pattern": "^[A-Z][A-Z0-9.-]*$"}, "uniqueItems": true},
+    "context_proxies": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rates", "volatility", "dollar", "commodities", "crypto"],
+      "properties": {
+        "rates": {"$ref": "#/$defs/context_proxy"},
+        "volatility": {"$ref": "#/$defs/context_proxy"},
+        "dollar": {"$ref": "#/$defs/context_proxy"},
+        "commodities": {"$ref": "#/$defs/context_proxy"},
+        "crypto": {"$ref": "#/$defs/context_proxy"}
+      }
+    },
     "rules": {"type": "object"}
+  },
+  "$defs": {
+    "context_proxy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["symbols", "quality_role", "semantics", "not_equivalent_to"],
+      "properties": {
+        "symbols": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[A-Z][A-Z0-9.-]*$"}
+        },
+        "quality_role": {"const": "cutoff_valid_cross_asset_proxy"},
+        "semantics": {"type": "string", "minLength": 1},
+        "not_equivalent_to": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        }
+      }
+    }
   }
 }

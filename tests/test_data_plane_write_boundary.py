@@ -35,12 +35,32 @@ class DataPlaneWriteBoundaryTest(unittest.TestCase):
         self.assertTrue(consumer["consumer_must_not_refresh_read_sha_after_research_input_freeze"])
         self.assertTrue(consumer["store_miss_may_trigger_collector_request"])
         self.assertTrue(consumer["store_miss_must_not_authorize_research_runtime_market_fetch_or_write"])
+        self.assertTrue(consumer["cutoff_valid_context_proxy_refs_are_first_class_market_data_refs"])
+        self.assertTrue(consumer["proxy_semantics_must_survive_into_frozen_research_input"])
 
-    def test_unproven_post_cutover_gates_remain_pending(self):
-        migration = self.contract["migration"]
-        self.assertIn("external_store_on_demand_request_path_passed", migration["pending_gates"])
-        self.assertIn("first_natural_settlement_mature_append_observed", migration["pending_gates"])
-        self.assertNotIn("external_store_on_demand_request_path_passed", migration["completed_gates"])
+    def test_supported_context_baseline_is_data_plane_owned(self):
+        baseline = self.contract["supported_context_baseline"]
+        self.assertEqual(baseline["role"], "cutoff_valid_cross_asset_proxy")
+        self.assertEqual(
+            set(baseline["categories"]),
+            {"rates", "volatility", "dollar", "commodities", "crypto"},
+        )
+        self.assertEqual(baseline["historical_repair_mode"], "historical_context_repair")
+        self.assertTrue(baseline["provider_timestamp_must_match_target_trade_date"])
+        self.assertTrue(baseline["target_window_timestamp_required"])
+        self.assertTrue(self.contract["principles"]["context_proxy_must_not_be_relabelled_as_formal_underlying_metric"])
+        self.assertTrue(self.contract["principles"]["unsupported_enrichment_must_not_be_fabricated_from_proxy_data"])
+
+    def test_historical_maintenance_is_explicit_control_state(self):
+        interface = self.contract["maintenance_request_interface"]
+        self.assertEqual(interface["branch"], "maintenance-requests")
+        self.assertEqual(interface["path"], "requests/market-data-maintenance.json")
+        self.assertEqual(
+            interface["allowed_modes"]["historical_context_repair"],
+            "cutoff_valid_cross_asset_context_proxies_only",
+        )
+        self.assertTrue(interface["research_runtime_implicit_historical_repair_forbidden"])
+        self.assertTrue(interface["request_is_control_state_not_market_fact"])
 
 
 if __name__ == "__main__":
