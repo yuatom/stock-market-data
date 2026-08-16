@@ -44,7 +44,7 @@ class ControlWorkflowBoundaryTest(unittest.TestCase):
 
     def test_contract_forbids_control_branch_runtime_drift(self):
         contract = yaml.safe_load((ROOT / "config/data-plane.yaml").read_text(encoding="utf-8"))
-        self.assertEqual(contract["contract_version"], 9)
+        self.assertEqual(contract["contract_version"], 10)
         self.assertTrue(contract["principles"]["mutable_control_branch_must_not_execute_branch_local_runtime_logic"])
         workflow = contract["workflow_execution"]
         self.assertEqual(workflow["runtime_authority_ref"], "main")
