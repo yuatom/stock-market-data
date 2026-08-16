@@ -1,8 +1,10 @@
 {
-  "schema_version": 2,
-  "purpose": "Market-data collection membership, collection groups, asset class, and security identity only; this is not a research watchlist or research-priority authority.",
+  "schema_version": 3,
+  "purpose": "Market-data collection membership, collection groups, asset class, security identity, and explicit cutoff-valid cross-asset proxy semantics only; this is not a research watchlist or research-priority authority.",
   "daily_series": [
     {"symbol":"AMD","asset_class":"stocks"},
+    {"symbol":"GLD","asset_class":"etf"},
+    {"symbol":"IBIT","asset_class":"etf"},
     {"symbol":"IWM","asset_class":"etf"},
     {"symbol":"KWEB","asset_class":"etf"},
     {"symbol":"META","asset_class":"stocks"},
@@ -16,9 +18,12 @@
     {"symbol":"SOXX","asset_class":"etf"},
     {"symbol":"SPCX","asset_class":"stocks","ticker_effective_at":"2026-06-12"},
     {"symbol":"SPY","asset_class":"etf"},
+    {"symbol":"TLT","asset_class":"etf"},
     {"symbol":"TME","asset_class":"stocks"},
     {"symbol":"TSLA","asset_class":"stocks"},
     {"symbol":"TSM","asset_class":"stocks"},
+    {"symbol":"UUP","asset_class":"etf"},
+    {"symbol":"VIXY","asset_class":"etf"},
     {"symbol":"XLB","asset_class":"etf"},
     {"symbol":"XLC","asset_class":"etf"},
     {"symbol":"XLE","asset_class":"etf"},
@@ -31,14 +36,49 @@
     {"symbol":"XLV","asset_class":"etf"},
     {"symbol":"XLY","asset_class":"etf"}
   ],
-  "intraday": ["AMD","IWM","KWEB","META","MU","NVDA","ORCL","PLTR","QQQ","RSP","SMH","SOXX","SPCX","SPY","TME","TSLA","TSM"],
+  "intraday": ["AMD","GLD","IBIT","IWM","KWEB","META","MU","NVDA","ORCL","PLTR","QQQ","RSP","SMH","SOXX","SPCX","SPY","TLT","TME","TSLA","TSM","UUP","VIXY"],
   "sector_etfs": ["XLB","XLC","XLE","XLF","XLI","XLK","XLP","XLRE","XLU","XLV","XLY"],
+  "context_proxies": {
+    "rates": {
+      "symbols": ["TLT"],
+      "quality_role": "cutoff_valid_cross_asset_proxy",
+      "semantics": "U.S.-listed long-duration Treasury ETF price proxy for directional duration/rates context at the observed market timestamp.",
+      "not_equivalent_to": ["official_yield_curve", "policy_rate", "treasury_yield_level"]
+    },
+    "volatility": {
+      "symbols": ["VIXY"],
+      "quality_role": "cutoff_valid_cross_asset_proxy",
+      "semantics": "U.S.-listed short-term VIX futures ETF price proxy for directional volatility-risk context at the observed market timestamp.",
+      "not_equivalent_to": ["spot_vix", "official_vix_close", "implied_volatility_index_level"]
+    },
+    "dollar": {
+      "symbols": ["UUP"],
+      "quality_role": "cutoff_valid_cross_asset_proxy",
+      "semantics": "U.S.-listed dollar ETF price proxy for directional U.S. dollar context at the observed market timestamp.",
+      "not_equivalent_to": ["official_dollar_index", "dxy_spot", "broad_trade_weighted_dollar_index"]
+    },
+    "commodities": {
+      "symbols": ["GLD"],
+      "quality_role": "cutoff_valid_cross_asset_proxy",
+      "semantics": "U.S.-listed gold ETF price proxy for directional precious-metals commodity context at the observed market timestamp.",
+      "not_equivalent_to": ["spot_gold", "gold_futures_settlement", "broad_commodity_index"]
+    },
+    "crypto": {
+      "symbols": ["IBIT"],
+      "quality_role": "cutoff_valid_cross_asset_proxy",
+      "semantics": "U.S.-listed spot-Bitcoin ETF price proxy for directional Bitcoin risk context at the observed market timestamp.",
+      "not_equivalent_to": ["btc_spot", "bitcoin_reference_rate", "consolidated_crypto_market"]
+    }
+  },
   "rules": {
     "collection_membership_is_not_research_priority": true,
     "security_identity_effective_time_must_be_preserved": true,
     "silent_symbol_substitution_forbidden": true,
     "intraday_symbols_must_exist_in_daily_series": true,
     "sector_etfs_must_exist_in_daily_series": true,
-    "sector_etfs_are_collection_group_metadata_only": true
+    "sector_etfs_are_collection_group_metadata_only": true,
+    "context_proxy_symbols_must_exist_in_daily_and_intraday": true,
+    "context_proxy_semantics_must_be_preserved_in_market_facts": true,
+    "context_proxy_must_not_be_relabelled_as_formal_underlying_metric": true
   }
 }
