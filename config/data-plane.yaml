@@ -1,10 +1,11 @@
 schema_version: 1
-contract_version: 5
+contract_version: 6
 repository: yuatom/stock-market-data
 purpose:
   - own reusable Market Data Plane code, contracts, collection and storage semantics
   - keep GitHub Actions collector/runtime public while persisted third-party market data remains private
   - expose independent commit-pinned data-contract and data-read identities to research consumers
+  - keep regular-session Market Fact acquisition and writes out of the research runtime
 
 boundaries:
   owns:
@@ -79,6 +80,9 @@ principles:
   public_compute_repo_must_not_commit_third_party_market_payloads: true
   mutable_collector_requests_must_not_advance_compute_main: true
   one_authoritative_payload_store: true
+  market_fact_writes_are_collector_or_explicit_data_maintenance_only: true
+  research_runtime_market_fact_write_forbidden: true
+  research_runtime_may_request_collector_but_must_not_bypass_it: true
 
 collection_membership:
   owner: config/collection-universe.json
@@ -112,15 +116,17 @@ payload_writers:
     executor: stock_market_data_github_actions
     allowed_repository: yuatom/stock-market-data-store
     allowed_prefix: data/market-data
-  research_runtime_remote_fallback_writeback:
-    executor: stock_dairy_chatgpt_runtime
+    allowed_write_kinds: [daily_series, session_capture, stage_snapshot, collector_state, probe_state, inventory]
+  explicit_data_maintenance:
+    executor: stock_market_data_github_actions_or_local_recovery
     allowed_repository: yuatom/stock-market-data-store
-    allowed_prefix: data/market-data/sessions
-    write_scope: immutable_session_capture_only
-    series_mutation_forbidden: true
-    snapshot_latest_mutation_forbidden: true
-    report_completion_required: false
-    failure_effect: non_blocking_store_write_failure_only
+    allowed_prefix: data/market-data
+    explicit_mode_required: true
+    recovery_and_revision_audit_required_when_mutating_persisted_history: true
+  stock_dairy_research_runtime:
+    executor: stock_dairy_chatgpt_runtime
+    market_fact_write_allowed: false
+    allowed_control_write_only: collector_request_interface
   writers_share_storage_semantics_from_this_contract: true
   multiple_semantic_authorities_for_storage_forbidden: true
 
@@ -129,15 +135,19 @@ consumer_interface:
   required_pins:
     research_repository_commit_sha: immutable stock-dairy research-contract commit
     market_data_contract_sha: immutable commit in yuatom/stock-market-data containing active data-plane contract
-    market_data_read_sha: immutable commit in yuatom/stock-market-data-store resolved once per research run after optional bounded collector wait
-  one_market_data_read_sha_per_research_run: true
+    market_data_read_sha: immutable commit in yuatom/stock-market-data-store resolved once during research input resolution after optional bounded collector wait
+  one_market_data_read_sha_per_frozen_research_input: true
   ref_shape:
     required: [repository, read_sha, path, blob_sha]
   ref_repository_must_equal: yuatom/stock-market-data-store
   market_data_contract_sha_must_not_be_reused_as_market_data_read_sha: true
   market_data_read_sha_must_not_be_reused_as_research_contract_sha: true
   external_consumer_must_requalify_fact_for_claim: true
-  legacy_local_store_mixing_in_same_run_forbidden: true
+  legacy_local_store_mixing_in_same_input_forbidden: true
+  research_input_freeze_is_consumer_owned_not_data_plane_owned: true
+  consumer_must_not_refresh_read_sha_after_research_input_freeze: true
+  store_miss_may_trigger_collector_request: true
+  store_miss_must_not_authorize_research_runtime_market_fetch_or_write: true
 
 migration:
   source_repository: yuatom/stock-dairy
@@ -167,12 +177,11 @@ migration:
     - source_assets_mirrored_and_hash_audited
     - collector_runtime_installed_in_compute_repo
     - public_collector_private_store_read_smoke_passed
-    - public_collector_provider_secret_and_noop_passed
+    - external_provider_noop_smoke_passed
+    - external_on_demand_request_handoff_passed
     - stock_dairy_external_read_contract_merged
   pending_gates:
-    - external_store_on_demand_request_path_passed
     - first_natural_settlement_mature_append_observed
-  source_collector_must_remain_authoritative_until_external_smoke_and_consumer_cutover: true
   dual_authoritative_collectors_for_same_logical_store_forbidden: true
   first_natural_increment_may_be_post_cutover_acceptance_if_noop_provider_read_and_append_primitive_smoke_pass: true
   rollback_archive_required_until_first_natural_increment_and_research_acceptance_pass: true
