@@ -68,7 +68,7 @@ security:
 principles:
   market_fact_contract_authority_in_compute_repo: true
   market_fact_payload_authority_in_private_store_repo: true
-  research_contract_authority_stays_in_stock-dairy: true
+  research_contract_authority_stays_in_stock_dairy: true
   provider_affine_series: true
   cross_provider_series_splice_forbidden: true
   append_only_normal_operation: true
