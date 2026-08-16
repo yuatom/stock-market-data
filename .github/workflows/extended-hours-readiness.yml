@@ -1,0 +1,93 @@
+name: Extended Hours Readiness
+
+on:
+  workflow_dispatch:
+  schedule:
+    - {cron: '30 7 * * 1-5', timezone: America/New_York}
+    - {cron: '0 17 * * 1-5', timezone: America/New_York}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: extended-hours-readiness
+  cancel-in-progress: false
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout current public compute contract
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+          path: compute
+
+      - name: Checkout private Market Data Store
+        uses: actions/checkout@v4
+        with:
+          repository: yuatom/stock-market-data-store
+          token: ${{ secrets.MARKET_DATA_STORE_TOKEN }}
+          ref: main
+          fetch-depth: 0
+          path: store
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install bounded runtime dependency
+        run: python -m pip install --disable-pip-version-check PyYAML
+
+      - name: Evaluate promotion readiness
+        working-directory: compute
+        run: |
+          set -euo pipefail
+          python scripts/evaluate_nasdaq_extended_probe.py \
+            --config config/market-data-collector-access.yaml \
+            --store-root ../store/data/market-data \
+            --session all \
+            --output ../store/data/market-data/collector-state/probes/nasdaq-extended/promotion-readiness.json \
+            >/tmp/extended-hours-readiness.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          result = json.loads(Path('/tmp/extended-hours-readiness.json').read_text())
+          safe = {
+              session: {
+                  'status': value.get('status'),
+                  'promotion_ready': value.get('promotion_ready'),
+                  'qualifying_trade_sessions': value.get('qualifying_trade_sessions'),
+                  'required_distinct_trade_sessions': value.get('required_distinct_trade_sessions'),
+              }
+              for session, value in sorted((result.get('sessions') or {}).items())
+          }
+          print(json.dumps({'status': 'readiness_evaluated', 'sessions': safe}, sort_keys=True))
+          PY
+
+      - name: Persist readiness control state only
+        working-directory: store
+        run: |
+          set -euo pipefail
+          path='data/market-data/collector-state/probes/nasdaq-extended/promotion-readiness.json'
+          git add -- "$path"
+          if git diff --cached --quiet; then
+            echo '{"status":"no_readiness_change"}'
+            exit 0
+          fi
+          git config user.name 'stock-market-data-bot'
+          git config user.email 'stock-market-data-bot@users.noreply.github.com'
+          git commit -m 'state: refresh Nasdaq extended-hours readiness'
+          for attempt in 1 2 3; do
+            git pull --rebase origin main
+            if git push origin HEAD:main; then
+              echo "{\"status\":\"readiness_persisted\",\"store_commit_sha\":\"$(git rev-parse HEAD)\"}"
+              exit 0
+            fi
+            sleep $((attempt * 2))
+          done
+          exit 1
