@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "market-data-maintenance-request.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "request_id",
+    "requested_at",
+    "trade_date",
+    "mode",
+    "scope",
+    "authority",
+    "market_data_contract_sha"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "request_id": {"type": "string", "minLength": 8},
+    "requested_at": {"type": "string", "format": "date-time"},
+    "trade_date": {"type": "string", "format": "date"},
+    "mode": {"enum": ["daily_baseline_init", "historical_context_repair"]},
+    "scope": {
+      "enum": [
+        "collection_universe_daily_baseline",
+        "cutoff_valid_cross_asset_context_proxies_only"
+      ]
+    },
+    "authority": {"const": "owner_authorized_data_plane_maintenance"},
+    "market_data_contract_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"mode": {"const": "daily_baseline_init"}}},
+      "then": {"properties": {"scope": {"const": "collection_universe_daily_baseline"}}}
+    },
+    {
+      "if": {"properties": {"mode": {"const": "historical_context_repair"}}},
+      "then": {"properties": {"scope": {"const": "cutoff_valid_cross_asset_context_proxies_only"}}}
+    }
+  ]
+}
