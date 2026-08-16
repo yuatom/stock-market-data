@@ -178,10 +178,11 @@ migration:
     - collector_runtime_installed_in_compute_repo
     - public_collector_private_store_read_smoke_passed
     - external_provider_noop_smoke_passed
-    - external_on_demand_request_handoff_passed
     - stock_dairy_external_read_contract_merged
   pending_gates:
+    - external_store_on_demand_request_path_passed
     - first_natural_settlement_mature_append_observed
+  source_collector_must_remain_authoritative_until_external_smoke_and_consumer_cutover: true
   dual_authoritative_collectors_for_same_logical_store_forbidden: true
   first_natural_increment_may_be_post_cutover_acceptance_if_noop_provider_read_and_append_primitive_smoke_pass: true
   rollback_archive_required_until_first_natural_increment_and_research_acceptance_pass: true
