@@ -51,11 +51,16 @@ class CollectionUniverseTest(unittest.TestCase):
         self.assertIn("official_yield_curve", context["not_equivalent_to"])
         self.assertIn("treasury_yield_level", context["not_equivalent_to"])
 
-    def test_live_runtime_has_no_research_watchlist_cli_dependency(self):
-        source = (ROOT / "scripts/market_data_collection.py").read_text(encoding="utf-8")
-        self.assertNotIn('parser.add_argument("--watchlist"', source)
-        self.assertNotIn('parser.add_argument("--data-completeness"', source)
-        self.assertIn('parser.add_argument("--universe"', source)
+    def test_runtime_and_baseline_tools_share_one_universe_cli(self):
+        for relative in (
+            "scripts/market_data_collection.py",
+            "scripts/initialize_market_data_baseline.py",
+            "scripts/rebase_market_data_baseline.py",
+        ):
+            source = (ROOT / relative).read_text(encoding="utf-8")
+            self.assertNotIn('parser.add_argument("--watchlist"', source, relative)
+            self.assertNotIn('parser.add_argument("--data-completeness"', source, relative)
+            self.assertIn('parser.add_argument("--universe"', source, relative)
 
     def test_historical_context_repair_requires_explicit_authorization(self):
         with self.assertRaisesRegex(RuntimeError, "requires --maintenance-authorized"):
@@ -86,12 +91,18 @@ class CollectionUniverseTest(unittest.TestCase):
         self.assertIn("cutoff_valid_cross_asset_context_proxies_only", text)
         self.assertIn("owner_authorized_data_plane_maintenance", text)
 
-    def test_live_workflow_uses_first_class_universe(self):
+    def test_workflow_and_contract_forbid_runtime_compat_membership_files(self):
         workflow = (ROOT / ".github/workflows/market-data-collector.yml").read_text(encoding="utf-8")
+        contract = (ROOT / "config/data-plane.yaml").read_text(encoding="utf-8")
         self.assertIn("--universe config/collection-universe.json", workflow)
         self.assertIn("maintenance-requests", workflow)
         self.assertIn("historical_context_repair", workflow)
-        self.assertIn("runtime_compatibility_file_dependency_for_live_collection", (ROOT / "config/data-plane.yaml").read_text(encoding="utf-8"))
+        self.assertNotIn("build_collector_compat.py", workflow)
+        self.assertNotIn("collector-watchlist.json", workflow)
+        self.assertNotIn("collector-completeness.yaml", workflow)
+        self.assertIn("runtime_compatibility_file_dependency: false", contract)
+        self.assertIn("generated_compatibility_membership_files_forbidden: true", contract)
+        self.assertFalse((ROOT / "scripts/build_collector_compat.py").exists())
 
 
 if __name__ == "__main__":
