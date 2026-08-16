@@ -22,7 +22,7 @@
     "scope": {
       "enum": [
         "collection_universe_daily_baseline",
-        "cutoff_valid_cross_asset_context_proxies_only"
+        "cutoff_valid_close_supported_baseline"
       ]
     },
     "authority": {"const": "owner_authorized_data_plane_maintenance"},
@@ -35,7 +35,7 @@
     },
     {
       "if": {"properties": {"mode": {"const": "historical_context_repair"}}},
-      "then": {"properties": {"scope": {"const": "cutoff_valid_cross_asset_context_proxies_only"}}}
+      "then": {"properties": {"scope": {"const": "cutoff_valid_close_supported_baseline"}}}
     }
   ]
 }

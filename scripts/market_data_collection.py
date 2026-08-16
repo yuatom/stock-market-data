@@ -2,10 +2,10 @@
 """Canonical market-data collection orchestration.
 
 Provider primitives remain in market_data_collectors.py. This module owns the
-regular-session collection path, cutoff-valid cross-asset proxy persistence,
-and the narrowly authorized historical context repair path. Collection
-membership comes only from config/collection-universe.json; no research
-watchlist compatibility file is authoritative here.
+regular-session collection path, cutoff-valid Close supported-baseline
+persistence, and the narrowly authorized historical maintenance path.
+Collection membership comes only from config/collection-universe.json; no
+research watchlist compatibility file is authoritative here.
 """
 from __future__ import annotations
 
@@ -282,16 +282,18 @@ def collect_regular_window(
     config: Mapping[str, Any],
     access: Mapping[str, Any],
     symbols_override: Sequence[str] | None = None,
+    eligible_universe: Sequence[tuple[str, str]] | None = None,
 ) -> dict[str, Any]:
-    full_universe = collection.intraday_universe(universe_config)
+    full_universe = list(eligible_universe) if eligible_universe is not None else collection.intraday_universe(universe_config)
     by_symbol = dict(full_universe)
     if symbols_override is None:
         universe = full_universe
     else:
-        unknown = sorted(set(str(symbol).upper() for symbol in symbols_override) - set(by_symbol))
+        requested = [str(symbol).upper() for symbol in symbols_override]
+        unknown = sorted(set(requested) - set(by_symbol))
         if unknown:
-            raise RuntimeError(f"symbols_override outside collection universe: {unknown}")
-        universe = [(str(symbol).upper(), by_symbol[str(symbol).upper()]) for symbol in symbols_override]
+            raise RuntimeError(f"symbols_override outside eligible collection universe: {unknown}")
+        universe = [(symbol, by_symbol[symbol]) for symbol in requested]
 
     generated = datetime.now(ET).isoformat()
     facts_by_symbol: dict[str, tuple[str, list[dict[str, Any]]]] = {}
@@ -339,6 +341,7 @@ def collect_regular_window(
             failures.setdefault(symbol, []).append(f"twelve:{type(exc).__name__}:{exc}")
 
     context_specs = collection.context_by_symbol(universe_config)
+    sector_symbols = set(collection.sector_symbols(universe_config))
     capture_refs: list[dict[str, Any]] = []
     missing: list[str] = []
     provider_counts: dict[str, int] = {}
@@ -369,11 +372,17 @@ def collect_regular_window(
             qualified_facts=facts,
             missing_symbols=[],
         )
+        if symbol in context_specs:
+            kind = "cross_asset_proxy_capture"
+        elif symbol in sector_symbols:
+            kind = "sector_context_capture"
+        else:
+            kind = "regular_intraday_capture"
         capture_refs.append(
             {
                 "path": rel,
                 "blob_sha": blob,
-                "kind": "cross_asset_proxy_capture" if symbol in context_specs else "regular_intraday_capture",
+                "kind": kind,
                 "window": f"{start_et}-{end_et}",
                 "provider": provider,
             }
@@ -460,6 +469,7 @@ def collect_regular_window(
         "context_categories_requested": sorted(
             {context_specs[symbol]["category"] for symbol, _asset in universe if symbol in context_specs}
         ),
+        "sector_symbols_requested": sorted(symbol for symbol, _asset in universe if symbol in sector_symbols),
     }
 
 
@@ -508,9 +518,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise RuntimeError("historical_context_repair requires --maintenance-authorized")
 
     if args.mode == "previous_session_eod":
-        # The old provider primitive still consumes the legacy shape, but it is
-        # derived in memory from the first-class universe. No compatibility file
-        # participates in the collection path.
         watchlist, completeness = collection.compatibility_views(universe_config)
         result = base.collect_previous_session_eod(
             trade_date=trade_date,
@@ -536,7 +543,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = collect_regular_window(mode=args.mode, stage="close", trade_date=trade_date, start_et="15:45", end_et="16:00", store_root=store_root, universe_config=universe_config, config=config, access=access, symbols_override=symbols_override)
         result["terminal_semantics"] = "timestamped_regular_session_context_provider_specific_not_official_close_or_sip"
     elif args.mode == HISTORICAL_CONTEXT_REPAIR:
-        symbols_override = collection.context_symbols(universe_config)
+        maintenance_universe = collection.close_supported_baseline_universe(universe_config)
         result = collect_regular_window(
             mode=args.mode,
             stage="close",
@@ -547,10 +554,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             universe_config=universe_config,
             config=config,
             access=access,
-            symbols_override=symbols_override,
+            eligible_universe=maintenance_universe,
         )
-        result["repair_scope"] = "cutoff_valid_cross_asset_context_proxies_only"
-        result["terminal_semantics"] = "timestamped_regular_session_proxy_context_not_formal_underlying_metric"
+        result["repair_scope"] = "cutoff_valid_close_supported_baseline"
+        result["terminal_semantics"] = "timestamped_regular_session_supported_baseline_context_provider_specific_not_official_close_or_sip"
     else:
         result = {"mode": args.mode, "status": "no_qualified_live_premarket_adapter_registered", "changed": 0}
 
