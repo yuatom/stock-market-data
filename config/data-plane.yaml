@@ -68,7 +68,7 @@ security:
 principles:
   market_fact_contract_authority_in_compute_repo: true
   market_fact_payload_authority_in_private_store_repo: true
-  research_contract_authority_stays_in_stock_dairy: true
+  research_contract_authority_stays_in_stock-dairy: true
   provider_affine_series: true
   cross_provider_series_splice_forbidden: true
   append_only_normal_operation: true
@@ -177,7 +177,7 @@ migration:
     - source_assets_mirrored_and_hash_audited
     - collector_runtime_installed_in_compute_repo
     - public_collector_private_store_read_smoke_passed
-    - external_provider_noop_smoke_passed
+    - public_collector_provider_secret_and_noop_passed
     - stock_dairy_external_read_contract_merged
   pending_gates:
     - external_store_on_demand_request_path_passed
