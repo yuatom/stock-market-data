@@ -327,29 +327,18 @@ jobs:
             python scripts/probe_nasdaq_extended.py \
               --config config/market-data-collector-access.yaml \
               --store-root "$store_root" --session auto > /tmp/collector-output.txt 2>/tmp/collector-error.txt
-          elif [[ "$MODE" == 'daily_baseline_init' || "$MODE" == 'daily_baseline_rebase' ]]; then
-            # These recovery utilities predate the first-class universe API.
-            # Their compatibility files are ephemeral and scoped only to explicit
-            # baseline maintenance; live/scheduled collection never consumes them.
-            python scripts/build_collector_compat.py --output-dir .runtime
-            legacy_common=(
-              --store-root "$store_root"
-              --watchlist .runtime/collector-watchlist.json
-              --data-completeness .runtime/collector-completeness.yaml
-            )
-            if [[ "$MODE" == 'daily_baseline_init' ]]; then
-              python scripts/initialize_market_data_baseline.py \
-                --trade-date "$TRADE_DATE" \
-                "${legacy_common[@]}" \
-                --store-config config/market-data-store.yaml \
-                --access-config config/market-data-collector-access.yaml > /tmp/collector-output.txt 2>/tmp/collector-error.txt
-            else
-              python scripts/rebase_market_data_baseline.py \
-                --trade-date "$TRADE_DATE" \
-                "${legacy_common[@]}" \
-                --store-config config/market-data-store.yaml \
-                --access-config config/market-data-collector-access.yaml > /tmp/collector-output.txt 2>/tmp/collector-error.txt
-            fi
+          elif [[ "$MODE" == 'daily_baseline_init' ]]; then
+            python scripts/initialize_market_data_baseline.py \
+              --trade-date "$TRADE_DATE" \
+              "${universe_common[@]}" \
+              --store-config config/market-data-store.yaml \
+              --access-config config/market-data-collector-access.yaml > /tmp/collector-output.txt 2>/tmp/collector-error.txt
+          elif [[ "$MODE" == 'daily_baseline_rebase' ]]; then
+            python scripts/rebase_market_data_baseline.py \
+              --trade-date "$TRADE_DATE" \
+              "${universe_common[@]}" \
+              --store-config config/market-data-store.yaml \
+              --access-config config/market-data-collector-access.yaml > /tmp/collector-output.txt 2>/tmp/collector-error.txt
           else
             extra=()
             if [[ "$MODE" == 'historical_context_repair' ]]; then
