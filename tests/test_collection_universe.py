@@ -26,12 +26,29 @@ class CollectionUniverseTest(unittest.TestCase):
             ["GLD", "IBIT", "TLT", "UUP", "VIXY"],
         )
 
+    def test_close_supported_baseline_maintenance_is_derived_from_groups(self):
+        self.assertEqual(
+            collection.sector_symbols(self.universe),
+            ["XLB", "XLC", "XLE", "XLF", "XLI", "XLK", "XLP", "XLRE", "XLU", "XLV", "XLY"],
+        )
+        self.assertEqual(
+            collection.close_supported_baseline_symbols(self.universe),
+            ["GLD", "IBIT", "TLT", "UUP", "VIXY", "XLB", "XLC", "XLE", "XLF", "XLI", "XLK", "XLP", "XLRE", "XLU", "XLV", "XLY"],
+        )
+        live = {symbol for symbol, _asset in collection.intraday_universe(self.universe)}
+        self.assertFalse(set(collection.sector_symbols(self.universe)) & live)
+
     def test_every_context_proxy_is_daily_and_intraday(self):
         daily = {symbol for symbol, _asset in collection.daily_universe(self.universe)}
         intraday = {symbol for symbol, _asset in collection.intraday_universe(self.universe)}
         for symbol in collection.context_symbols(self.universe):
             self.assertIn(symbol, daily)
             self.assertIn(symbol, intraday)
+
+    def test_every_close_supported_baseline_symbol_is_daily(self):
+        daily = {symbol for symbol, _asset in collection.daily_universe(self.universe)}
+        for symbol in collection.close_supported_baseline_symbols(self.universe):
+            self.assertIn(symbol, daily)
 
     def test_proxy_fact_keeps_non_equivalence_guard(self):
         fact = collection.decorate_fact(
@@ -88,7 +105,8 @@ class CollectionUniverseTest(unittest.TestCase):
             {"daily_baseline_init", "historical_context_repair"},
         )
         text = json.dumps(schema, sort_keys=True)
-        self.assertIn("cutoff_valid_cross_asset_context_proxies_only", text)
+        self.assertIn("cutoff_valid_close_supported_baseline", text)
+        self.assertNotIn("cutoff_valid_cross_asset_context_proxies_only", text)
         self.assertIn("owner_authorized_data_plane_maintenance", text)
 
     def test_workflow_and_contract_forbid_runtime_compat_membership_files(self):
@@ -97,6 +115,7 @@ class CollectionUniverseTest(unittest.TestCase):
         self.assertIn("--universe config/collection-universe.json", workflow)
         self.assertIn("maintenance-requests", workflow)
         self.assertIn("historical_context_repair", workflow)
+        self.assertIn("cutoff_valid_close_supported_baseline", workflow)
         self.assertNotIn("build_collector_compat.py", workflow)
         self.assertNotIn("collector-watchlist.json", workflow)
         self.assertNotIn("collector-completeness.yaml", workflow)
