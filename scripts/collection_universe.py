@@ -45,6 +45,15 @@ def intraday_universe(universe: Mapping[str, Any]) -> list[tuple[str, str]]:
     return sorted((symbol, assets[symbol]) for symbol in symbols)
 
 
+def sector_symbols(universe: Mapping[str, Any]) -> list[str]:
+    return sorted(str(symbol).upper() for symbol in universe.get("sector_etfs") or [])
+
+
+def sector_universe(universe: Mapping[str, Any]) -> list[tuple[str, str]]:
+    assets = asset_classes(universe)
+    return [(symbol, assets[symbol]) for symbol in sector_symbols(universe)]
+
+
 def ticker_effective_at(universe: Mapping[str, Any], symbol: str) -> str | None:
     target = symbol.upper()
     for entry in _daily_entries(universe):
@@ -79,6 +88,21 @@ def context_by_symbol(universe: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
 
 def context_symbols(universe: Mapping[str, Any]) -> list[str]:
     return sorted(context_by_symbol(universe))
+
+
+def close_supported_baseline_symbols(universe: Mapping[str, Any]) -> list[str]:
+    """Return terminal Market Fact symbols required by the Close supported baseline.
+
+    Live Open15/Open30/Open60 membership remains owned by ``intraday``. Historical
+    Close maintenance intentionally adds the sector collection group without
+    mutating that live-stage universe.
+    """
+    return sorted(set(context_symbols(universe)) | set(sector_symbols(universe)))
+
+
+def close_supported_baseline_universe(universe: Mapping[str, Any]) -> list[tuple[str, str]]:
+    assets = asset_classes(universe)
+    return [(symbol, assets[symbol]) for symbol in close_supported_baseline_symbols(universe)]
 
 
 def decorate_fact(universe: Mapping[str, Any], fact: Mapping[str, Any]) -> dict[str, Any]:
@@ -136,6 +160,11 @@ def validate_collection_universe(universe: Mapping[str, Any]) -> None:
             if symbol not in daily_symbols or symbol not in intraday:
                 raise RuntimeError(f"context proxy must be collected in daily and intraday paths: {symbol}")
 
+    supported = close_supported_baseline_symbols(universe)
+    expected_count = len(set(sectors)) + len(seen - set(sectors))
+    if len(supported) != expected_count:
+        raise RuntimeError("Close supported baseline symbol derivation contains duplicate or missing membership")
+
 
 def compatibility_views(universe: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     """Return in-memory legacy shapes for old collector primitives only.
@@ -147,7 +176,7 @@ def compatibility_views(universe: Mapping[str, Any]) -> tuple[dict[str, Any], di
     validate_collection_universe(universe)
     assets = asset_classes(universe)
     intraday = [symbol for symbol, _asset in intraday_universe(universe)]
-    sectors = [str(symbol).upper() for symbol in universe.get("sector_etfs") or []]
+    sectors = sector_symbols(universe)
     instruments: dict[str, dict[str, Any]] = {}
     for symbol, asset in assets.items():
         meta: dict[str, Any] = {"asset_class": asset}
