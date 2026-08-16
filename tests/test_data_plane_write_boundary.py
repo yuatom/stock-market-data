@@ -51,13 +51,26 @@ class DataPlaneWriteBoundaryTest(unittest.TestCase):
         self.assertTrue(self.contract["principles"]["context_proxy_must_not_be_relabelled_as_formal_underlying_metric"])
         self.assertTrue(self.contract["principles"]["unsupported_enrichment_must_not_be_fabricated_from_proxy_data"])
 
+    def test_close_supported_baseline_requires_timestamped_sector_and_proxy_context(self):
+        baseline = self.contract["supported_close_baseline"]
+        self.assertEqual(baseline["historical_repair_scope"], "cutoff_valid_close_supported_baseline")
+        self.assertEqual(baseline["required_sector_count"], 11)
+        self.assertEqual(
+            set(baseline["required_cross_asset_categories"]),
+            {"rates", "volatility", "dollar", "commodities", "crypto"},
+        )
+        self.assertTrue(baseline["provider_timestamp_must_match_target_trade_date"])
+        self.assertTrue(baseline["target_window_timestamp_required"])
+        self.assertTrue(baseline["daily_series_settlement_must_not_substitute_for_pre_1600_terminal_fact"])
+        self.assertTrue(baseline["research_runtime_backfill_forbidden"])
+
     def test_historical_maintenance_is_explicit_control_state(self):
         interface = self.contract["maintenance_request_interface"]
         self.assertEqual(interface["branch"], "maintenance-requests")
         self.assertEqual(interface["path"], "requests/market-data-maintenance.json")
         self.assertEqual(
             interface["allowed_modes"]["historical_context_repair"],
-            "cutoff_valid_cross_asset_context_proxies_only",
+            "cutoff_valid_close_supported_baseline",
         )
         self.assertTrue(interface["research_runtime_implicit_historical_repair_forbidden"])
         self.assertTrue(interface["request_is_control_state_not_market_fact"])
