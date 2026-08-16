@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
-  "request_id": "baseline-context-20260816-1349z",
-  "requested_at": "2026-08-16T13:49:00Z",
-  "trade_date": "2026-08-16",
-  "mode": "daily_baseline_init",
-  "scope": "collection_universe_daily_baseline",
+  "request_id": "historical-context-repair-20260814-1355z",
+  "requested_at": "2026-08-16T13:55:00Z",
+  "trade_date": "2026-08-14",
+  "mode": "historical_context_repair",
+  "scope": "cutoff_valid_cross_asset_context_proxies_only",
   "authority": "owner_authorized_data_plane_maintenance",
   "market_data_contract_sha": "070a3fb20f38e2c9224d8786ba043ebe46de42d8"
 }
