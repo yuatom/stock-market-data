@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 import sys
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -37,6 +38,32 @@ class CollectionUniverseTest(unittest.TestCase):
         )
         live = {symbol for symbol, _asset in collection.intraday_universe(self.universe)}
         self.assertFalse(set(collection.sector_symbols(self.universe)) & live)
+
+    def test_historical_repair_executes_exact_supported_baseline_universe(self):
+        expected = collection.close_supported_baseline_universe(self.universe)
+        with mock.patch.object(runtime, "collect_regular_window", return_value={"mode": "historical_context_repair", "status": "ok"}) as collect:
+            rc = runtime.main(
+                [
+                    "--mode",
+                    "historical_context_repair",
+                    "--trade-date",
+                    "2026-08-14",
+                    "--universe",
+                    str(self.path),
+                    "--config",
+                    str(ROOT / "config/market-data-store.yaml"),
+                    "--access-config",
+                    str(ROOT / "config/market-data-collector-access.yaml"),
+                    "--maintenance-authorized",
+                ]
+            )
+        self.assertEqual(rc, 0)
+        kwargs = collect.call_args.kwargs
+        self.assertEqual(kwargs["eligible_universe"], expected)
+        self.assertIsNone(kwargs.get("symbols_override"))
+        self.assertEqual(kwargs["stage"], "close")
+        self.assertEqual(kwargs["start_et"], "15:45")
+        self.assertEqual(kwargs["end_et"], "16:00")
 
     def test_every_context_proxy_is_daily_and_intraday(self):
         daily = {symbol for symbol, _asset in collection.daily_universe(self.universe)}
@@ -116,6 +143,7 @@ class CollectionUniverseTest(unittest.TestCase):
         self.assertIn("maintenance-requests", workflow)
         self.assertIn("historical_context_repair", workflow)
         self.assertIn("cutoff_valid_close_supported_baseline", workflow)
+        self.assertIn("sector_symbols_requested", workflow)
         self.assertNotIn("build_collector_compat.py", workflow)
         self.assertNotIn("collector-watchlist.json", workflow)
         self.assertNotIn("collector-completeness.yaml", workflow)
