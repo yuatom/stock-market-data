@@ -92,7 +92,7 @@ class CollectionUniverseTest(unittest.TestCase):
         self.assertIn("owner_authorized_data_plane_maintenance", text)
 
     def test_workflow_and_contract_forbid_runtime_compat_membership_files(self):
-        workflow = (ROOT / ".github/workflows/market-data-collector.yml").read_text(encoding="utf-8")
+        workflow = (ROOT / ".github/workflows/market-data-collector-runtime.yml").read_text(encoding="utf-8")
         contract = (ROOT / "config/data-plane.yaml").read_text(encoding="utf-8")
         self.assertIn("--universe config/collection-universe.json", workflow)
         self.assertIn("maintenance-requests", workflow)

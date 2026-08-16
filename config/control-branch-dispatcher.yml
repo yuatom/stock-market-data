@@ -1,0 +1,20 @@
+name: Market Data Control Dispatcher
+
+on:
+  push:
+    branches: [collector-requests, maintenance-requests]
+    paths:
+      - requests/collector-request.json
+      - requests/market-data-maintenance.json
+
+permissions:
+  contents: read
+
+jobs:
+  dispatch:
+    uses: yuatom/stock-market-data/.github/workflows/market-data-collector-runtime.yml@main
+    with:
+      trigger_kind: push
+      control_ref: ${{ github.sha }}
+      control_branch: ${{ github.ref_name }}
+    secrets: inherit
