@@ -1,5 +1,5 @@
 schema_version: 1
-contract_version: 4
+contract_version: 5
 repository: yuatom/stock-market-data
 purpose:
   - own reusable Market Data Plane code, contracts, collection and storage semantics
@@ -158,7 +158,9 @@ migration:
     provider_noop_result: ok
     private_store_post_smoke_commit: 0db695f7d4aed10634a02ed00bbe5c63bf42cff3
     conclusion: provider_and_private_store_execution_path_verified_without_market_series_revision
-  state: external_collector_smoke_passed_consumer_cutover_pending_first_natural_increment
+  state: consumer_cutover_complete_post_cutover_acceptance_pending
+  consumer_cutover: complete
+  natural_run_acceptance: pending
   completed_gates:
     - private_store_repository_exists
     - private_store_repository_visibility_private
@@ -166,8 +168,8 @@ migration:
     - collector_runtime_installed_in_compute_repo
     - public_collector_private_store_read_smoke_passed
     - public_collector_provider_secret_and_noop_passed
-  pending_gates:
     - stock_dairy_external_read_contract_merged
+  pending_gates:
     - external_store_on_demand_request_path_passed
     - first_natural_settlement_mature_append_observed
   source_collector_must_remain_authoritative_until_external_smoke_and_consumer_cutover: true
