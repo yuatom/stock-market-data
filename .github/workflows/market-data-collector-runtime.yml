@@ -186,7 +186,7 @@ jobs:
                   raise SystemExit('maintenance request authority is unauthorized')
               expected_scope = {
                   'daily_baseline_init': 'collection_universe_daily_baseline',
-                  'historical_context_repair': 'cutoff_valid_cross_asset_context_proxies_only',
+                  'historical_context_repair': 'cutoff_valid_close_supported_baseline',
               }
               requested_mode = str(request.get('mode') or '')
               if requested_mode not in expected_scope:
@@ -379,7 +379,8 @@ jobs:
               'mode','status','changed','changed_series','bootstrapped_series','symbols_requested',
               'symbols_requested_in_increment','symbols_available_in_increment','symbols_missing_in_increment',
               'snapshot_written','target_records','request_id','path','result_count','target_count',
-              'application_success_json','trade_detail_rows','repair_scope','context_categories_requested'
+              'application_success_json','trade_detail_rows','repair_scope','context_categories_requested',
+              'sector_symbols_requested'
           }
           safe = {k: result[k] for k in sorted(result) if k in allowed}
           if isinstance(result.get('failures'), list):
