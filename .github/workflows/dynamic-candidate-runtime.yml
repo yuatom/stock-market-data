@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       control_ref:
-        description: Immutable discovery request commit
+        description: Immutable dynamic market-data request commit
         required: true
         type: string
       control_branch:
@@ -83,8 +83,14 @@ jobs:
               raise SystemExit('request schema_version must be 1')
           if request.get('research_repository') != 'yuatom/stock-dairy':
               raise SystemExit('unauthorized research repository')
-          if request.get('stage') not in {'open_30m','close'}:
-              raise SystemExit('stage must be open_30m or close')
+          stage = request.get('stage')
+          purpose = request.get('request_purpose')
+          if stage not in {'open_15m','open_30m','close'}:
+              raise SystemExit('stage must be open_15m, open_30m or close')
+          if purpose not in {'carryover_validation','opportunity_discovery'}:
+              raise SystemExit('invalid request_purpose')
+          if stage == 'open_15m' and purpose != 'carryover_validation':
+              raise SystemExit('Open15 dynamic collection is carryover_validation only')
           symbols = request.get('candidate_symbols')
           if not isinstance(symbols, list) or not (1 <= len(symbols) <= 8):
               raise SystemExit('candidate_symbols must contain 1-8 symbols')
@@ -100,9 +106,9 @@ jobs:
           out = Path(os.environ['GITHUB_OUTPUT'])
           with out.open('a', encoding='utf-8') as fh:
               fh.write(f'contract_sha={compute_sha}\n')
-          print(json.dumps({'request_id':request.get('request_id'),'stage':request.get('stage'),'candidate_count':len(symbols),'contract_sha':compute_sha}, sort_keys=True))
+          print(json.dumps({'request_id':request.get('request_id'),'stage':stage,'request_purpose':purpose,'candidate_count':len(symbols),'contract_sha':compute_sha}, sort_keys=True))
 
-      - name: Collect qualified candidate facts
+      - name: Collect qualified dynamic facts
         working-directory: compute
         env:
           TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
@@ -137,7 +143,7 @@ jobs:
           changed_count="$(git diff --cached --name-only -- data/market-data | wc -l | tr -d ' ')"
           git config user.name 'stock-market-data-bot'
           git config user.email 'stock-market-data-bot@users.noreply.github.com'
-          git commit -m 'data: collect dynamic opportunity candidates'
+          git commit -m 'data: collect dynamic research objects'
           for attempt in 1 2 3; do
             git pull --rebase origin main
             if git push origin HEAD:main; then
