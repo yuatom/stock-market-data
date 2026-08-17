@@ -1,51 +1,30 @@
-name: Market Data Collector
+name: Market Data Control Dispatcher
 
 on:
-  workflow_dispatch:
-    inputs:
-      mode:
-        description: Collector mode
-        required: true
-        default: smoke_readonly
-        type: choice
-        options:
-          - smoke_readonly
-          - previous_session_eod
-          - daily_baseline_init
-          - daily_baseline_rebase
-          - nasdaq_extended_probe
-          - open_15m
-          - open_30m
-          - open_60m
-          - close
-          - close_retry
-          - close_final
-          - historical_context_repair
-      trade_date:
-        description: Optional ET trade/calendar date YYYY-MM-DD
-        required: false
-        type: string
-  schedule:
-    - {cron: '5 7 * * 1-5', timezone: America/New_York}
-    - {cron: '20 7 * * 1-5', timezone: America/New_York}
-    - {cron: '46 9 * * 1-5', timezone: America/New_York}
-    - {cron: '1 10 * * 1-5', timezone: America/New_York}
-    - {cron: '31 10 * * 1-5', timezone: America/New_York}
-    - {cron: '6 16 * * 1-5', timezone: America/New_York}
-    - {cron: '21 16 * * 1-5', timezone: America/New_York}
-    - {cron: '36 16 * * 1-5', timezone: America/New_York}
-    - {cron: '45 16 * * 1-5', timezone: America/New_York}
-    - {cron: '51 16 * * 1-5', timezone: America/New_York}
+  push:
+    branches: [collector-requests, maintenance-requests, discovery-requests]
+    paths:
+      - requests/collector-request.json
+      - requests/market-data-maintenance.json
+      - requests/dynamic-candidate-request.json
 
 permissions:
   contents: read
 
 jobs:
-  run:
-    uses: ./.github/workflows/market-data-collector-runtime.yml
+  dispatch-standard:
+    if: github.ref_name != 'discovery-requests'
+    uses: yuatom/stock-market-data/.github/workflows/market-data-collector-runtime.yml@main
     with:
-      trigger_kind: ${{ github.event_name }}
-      schedule: ${{ github.event.schedule || '' }}
-      mode: ${{ inputs.mode || '' }}
-      trade_date: ${{ inputs.trade_date || '' }}
+      trigger_kind: push
+      control_ref: ${{ github.sha }}
+      control_branch: ${{ github.ref_name }}
+    secrets: inherit
+
+  dispatch-discovery:
+    if: github.ref_name == 'discovery-requests'
+    uses: yuatom/stock-market-data/.github/workflows/dynamic-candidate-runtime.yml@main
+    with:
+      control_ref: ${{ github.sha }}
+      control_branch: ${{ github.ref_name }}
     secrets: inherit
