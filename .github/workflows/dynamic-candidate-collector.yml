@@ -1,0 +1,143 @@
+name: Dynamic Candidate Market Data Collector
+
+on:
+  push:
+    branches: [discovery-requests]
+    paths: [requests/dynamic-candidate-request.json]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dynamic-candidate-market-data
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Checkout immutable request
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          path: control
+
+      - name: Checkout current compute contract
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+          path: compute
+
+      - name: Checkout private Market Data Store
+        uses: actions/checkout@v4
+        with:
+          repository: yuatom/stock-market-data-store
+          token: ${{ secrets.MARKET_DATA_STORE_TOKEN }}
+          ref: main
+          fetch-depth: 0
+          path: store
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install bounded dependency
+        run: python -m pip install --disable-pip-version-check PyYAML
+
+      - name: Validate request against current contract
+        id: request
+        shell: python
+        run: |
+          import json
+          import os
+          import re
+          import subprocess
+          from datetime import datetime
+          from pathlib import Path
+          from zoneinfo import ZoneInfo
+
+          request = json.loads(Path('control/requests/dynamic-candidate-request.json').read_text(encoding='utf-8'))
+          required = {
+              'schema_version','request_id','requested_at','trade_date','stage','research_repository',
+              'research_repository_commit_sha','market_data_contract_sha','candidate_symbols'
+          }
+          missing = sorted(required - set(request))
+          if missing:
+              raise SystemExit(f'request missing fields: {missing}')
+          if request.get('schema_version') != 1:
+              raise SystemExit('request schema_version must be 1')
+          if request.get('research_repository') != 'yuatom/stock-dairy':
+              raise SystemExit('unauthorized research repository')
+          if request.get('stage') not in {'open_30m','close'}:
+              raise SystemExit('dynamic candidates are allowed only for open_30m/close')
+          symbols = request.get('candidate_symbols')
+          if not isinstance(symbols, list) or not (1 <= len(symbols) <= 8):
+              raise SystemExit('candidate_symbols must contain 1-8 symbols')
+          if len(set(symbols)) != len(symbols) or any(not re.fullmatch(r'[A-Z][A-Z0-9.-]{0,9}', str(x)) for x in symbols):
+              raise SystemExit('invalid candidate_symbols')
+          compute_sha = subprocess.check_output(['git','-C','compute','rev-parse','HEAD'], text=True).strip()
+          if request.get('market_data_contract_sha') != compute_sha:
+              raise SystemExit('request market_data_contract_sha does not match current compute main')
+          if not re.fullmatch(r'[0-9a-f]{40}', str(request.get('research_repository_commit_sha') or '')):
+              raise SystemExit('invalid research repository commit sha')
+          today_et = datetime.now(ZoneInfo('America/New_York')).date().isoformat()
+          if str(request.get('trade_date') or '') > today_et:
+              raise SystemExit('trade_date cannot be in the future')
+          out = Path(os.environ['GITHUB_OUTPUT'])
+          with out.open('a', encoding='utf-8') as fh:
+              fh.write(f"trade_date={request['trade_date']}\n")
+              fh.write(f"stage={request['stage']}\n")
+              fh.write(f"request_id={request['request_id']}\n")
+              fh.write(f"contract_sha={compute_sha}\n")
+          print(json.dumps({'request_id':request['request_id'],'stage':request['stage'],'trade_date':request['trade_date'],'candidate_count':len(symbols),'market_data_contract_sha':compute_sha}, sort_keys=True))
+
+      - name: Collect candidate history and regular-session facts
+        working-directory: compute
+        env:
+          TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
+        run: |
+          set -euo pipefail
+          python scripts/collect_dynamic_candidates.py \
+            --request ../control/requests/dynamic-candidate-request.json \
+            --store-root ../store/data/market-data \
+            --store-config config/market-data-store.yaml \
+            --access-config config/market-data-collector-access.yaml \
+            --dynamic-config config/dynamic-candidate-collection.yaml \
+            --expected-contract-sha '${{ steps.request.outputs.contract_sha }}'
+
+      - name: Rebuild Store inventory
+        working-directory: compute
+        run: >-
+          python scripts/build_market_data_inventory.py
+          --store-root ../store/data/market-data
+          --output ../store/data/market-data/collector-state/market-data-inventory.json
+          >/dev/null
+
+      - name: Persist private Store only
+        working-directory: store
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add -- data/market-data
+          if git diff --cached --quiet; then
+            echo '{"status":"no_store_change","changed_paths":0}'
+            exit 0
+          fi
+          changed_count="$(git diff --cached --name-only -- data/market-data | wc -l | tr -d ' ')"
+          git config user.name 'stock-market-data-bot'
+          git config user.email 'stock-market-data-bot@users.noreply.github.com'
+          git commit -m "data: collect dynamic opportunity candidates"
+          for attempt in 1 2 3; do
+            git pull --rebase origin main
+            if git push origin HEAD:main; then
+              echo "{\"status\":\"store_persisted\",\"changed_paths\":$changed_count,\"store_commit_sha\":\"$(git rev-parse HEAD)\"}"
+              exit 0
+            fi
+            sleep $((attempt * 2))
+          done
+          echo 'failed to persist private Store after retries' >&2
+          exit 1
