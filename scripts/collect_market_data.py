@@ -10,6 +10,11 @@ Daily Series writes also pass the provider-settlement maturity policy owned by
 ``config/market-data-store.yaml`` before immutable append-only storage is
 allowed.  This keeps provisional post-close OHLCV values out of the reusable
 history without moving any user-facing report schedule.
+
+Live Close additionally collects the dedicated 11-sector collection group in
+the 15:45-16:00 window without expanding Open15/Open30/Open60 membership. This
+keeps the exact Close sector surface available without spending sector credits
+at every intraday stage.
 """
 from __future__ import annotations
 
@@ -20,8 +25,9 @@ from pathlib import Path
 from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
+import collection_universe as collection
 import market_data_collectors as base
-from market_data_collection import main
+import market_data_collection as runtime
 
 ET = ZoneInfo("America/New_York")
 
@@ -134,13 +140,68 @@ def _ensure_predecessors(argv: list[str]) -> None:
         if _snapshot_complete(store_root, trade_date, stage):
             continue
         print(f"dependency_snapshot_missing_or_partial stage={stage}; materializing exact predecessor window")
-        rc = main(_replace_mode(argv, stage))
+        rc = runtime.main(_replace_mode(argv, stage))
         if rc != 0:
             raise SystemExit(rc)
         if not _snapshot_complete(store_root, trade_date, stage):
             # Do not fabricate completeness. The requested later stage still
             # runs and will carry predecessor missing symbols into its snapshot.
             print(f"dependency_snapshot_still_partial stage={stage}; continuing claim-scoped")
+
+
+def _live_close_universe(universe_config: Mapping[str, Any]) -> list[tuple[str, str]]:
+    assets = collection.asset_classes(universe_config)
+    symbols = {
+        symbol for symbol, _asset in collection.intraday_universe(universe_config)
+    } | set(collection.sector_symbols(universe_config))
+    return [(symbol, assets[symbol]) for symbol in sorted(symbols)]
+
+
+def _run_live_close(argv: list[str]) -> int | None:
+    mode = str(_arg_value(argv, "--mode") or "")
+    if mode not in {"close", "close_retry", "close_final"}:
+        return None
+
+    trade_date = str(_arg_value(argv, "--trade-date") or datetime.now(ET).date().isoformat())
+    store_root = Path(str(_arg_value(argv, "--store-root", "sources/market-data")))
+    universe_path = str(_arg_value(argv, "--universe", "config/collection-universe.json"))
+    config_path = str(_arg_value(argv, "--config", "config/market-data-store.yaml"))
+    access_path = str(_arg_value(argv, "--access-config", "config/market-data-collector-access.yaml"))
+
+    universe_config = collection.load_collection_universe(universe_path)
+    config = base.load_yaml(config_path)
+    access = base.load_yaml(access_path)
+    eligible = _live_close_universe(universe_config)
+
+    symbols_override = None
+    if mode in {"close_retry", "close_final"}:
+        symbols_override = runtime._retry_symbols(store_root, trade_date, universe_config)
+        if not symbols_override:
+            print(json.dumps({"mode": mode, "status": "nothing_missing", "changed": 0}, sort_keys=True))
+            return 0
+
+    result = runtime.collect_regular_window(
+        mode=mode,
+        stage="close",
+        trade_date=trade_date,
+        start_et="15:45",
+        end_et="16:00",
+        store_root=store_root,
+        universe_config=universe_config,
+        config=config,
+        access=access,
+        symbols_override=symbols_override,
+        eligible_universe=eligible,
+    )
+    result["terminal_semantics"] = (
+        "timestamped_regular_session_context_provider_specific_not_official_close_or_sip"
+    )
+    result["live_close_sector_surface"] = {
+        "required_sector_symbols": collection.sector_symbols(universe_config),
+        "sector_symbols_requested": result.get("sector_symbols_requested", []),
+    }
+    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    return 0
 
 
 def cli(argv: list[str] | None = None) -> int:
@@ -150,7 +211,10 @@ def cli(argv: list[str] | None = None) -> int:
         print(json.dumps(gate, ensure_ascii=False, sort_keys=True))
         return 0
     _ensure_predecessors(args)
-    return main(args)
+    close_result = _run_live_close(args)
+    if close_result is not None:
+        return close_result
+    return runtime.main(args)
 
 
 if __name__ == "__main__":
