@@ -1,0 +1,50 @@
+schema_version: 1
+contract_version: 1
+purpose:
+  - collect bounded transaction-scoped regular-session market facts for opportunity-discovery candidates
+  - keep the fixed collection universe unchanged as the normal supported baseline
+  - allow research input resolution to request temporary non-watchlist equity symbols before the Store read SHA is pinned
+
+principles:
+  fixed_collection_universe_remains_default_baseline: true
+  dynamic_candidate_membership_is_request_scoped_not_persistent_research_priority: true
+  dynamic_candidates_must_be_us_listed_common_equities: true
+  request_symbol_limit: 8
+  arbitrary_asset_class_request_forbidden: true
+  market_fact_semantics_match_existing_provider_contracts: true
+  immutable_store_write_required: true
+  research_decision_logic_forbidden: true
+  opportunity_qualification_forbidden: true
+  request_must_bind_stock_dairy_repository_sha: true
+  request_must_bind_current_market_data_contract_sha: true
+
+request:
+  schema: schemas/dynamic-candidate-request.schema.json
+  control_branch: discovery-requests
+  path: requests/dynamic-candidate-request.json
+  authorized_research_repository: yuatom/stock-dairy
+  allowed_stages: [open_30m, close]
+  symbol_limit: 8
+
+collection:
+  daily_series:
+    provider: twelve_data_basic
+    target_history_sessions: 256
+    require_records_before_trade_date: true
+    immutable_append_only: true
+    existing_overlap_must_be_byte_equivalent: true
+  intraday:
+    provider_order: [nasdaq_public_intraday, twelve_data_basic]
+    open_30m_window: ["09:30", "10:00"]
+    close_window: ["15:45", "16:00"]
+    session: regular
+    dedicated_snapshot_stage_prefix: discovery_
+    capture_semantics: provider_specific_regular_price_volume
+    official_vwap_or_sip_semantics_forbidden: true
+
+result:
+  snapshot_stage_templates:
+    open_30m: discovery_open_30m
+    close: discovery_close
+  candidate_missing_is_explicit: true
+  result_state_path: collector-state/{YYYY-MM}/{trade_date}-dynamic-candidate-{stage}.json
