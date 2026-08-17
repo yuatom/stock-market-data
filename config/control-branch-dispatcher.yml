@@ -2,19 +2,29 @@ name: Market Data Control Dispatcher
 
 on:
   push:
-    branches: [collector-requests, maintenance-requests]
+    branches: [collector-requests, maintenance-requests, discovery-requests]
     paths:
       - requests/collector-request.json
       - requests/market-data-maintenance.json
+      - requests/dynamic-candidate-request.json
 
 permissions:
   contents: read
 
 jobs:
-  dispatch:
+  dispatch-standard:
+    if: github.ref_name != 'discovery-requests'
     uses: yuatom/stock-market-data/.github/workflows/market-data-collector-runtime.yml@main
     with:
       trigger_kind: push
+      control_ref: ${{ github.sha }}
+      control_branch: ${{ github.ref_name }}
+    secrets: inherit
+
+  dispatch-discovery:
+    if: github.ref_name == 'discovery-requests'
+    uses: yuatom/stock-market-data/.github/workflows/dynamic-candidate-runtime.yml@main
+    with:
       control_ref: ${{ github.sha }}
       control_branch: ${{ github.ref_name }}
     secrets: inherit

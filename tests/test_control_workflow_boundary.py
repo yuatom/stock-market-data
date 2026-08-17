@@ -10,12 +10,12 @@ ROOT = Path(__file__).resolve().parents[1]
 class ControlWorkflowBoundaryTest(unittest.TestCase):
     def test_main_entrypoint_does_not_consume_control_branch_push(self):
         text = (ROOT / ".github/workflows/market-data-collector.yml").read_text(encoding="utf-8")
-        self.assertNotIn("branches: [collector-requests, maintenance-requests]", text)
+        self.assertNotIn("branches: [collector-requests, maintenance-requests, discovery-requests]", text)
         self.assertIn("uses: ./.github/workflows/market-data-collector-runtime.yml", text)
         self.assertIn("workflow_dispatch:", text)
         self.assertIn("schedule:", text)
 
-    def test_runtime_is_reusable_and_checks_out_immutable_control_ref(self):
+    def test_standard_runtime_is_reusable_and_checks_out_immutable_control_ref(self):
         text = (ROOT / ".github/workflows/market-data-collector-runtime.yml").read_text(encoding="utf-8")
         self.assertIn("workflow_call:", text)
         self.assertIn("ref: ${{ inputs.control_ref }}", text)
@@ -23,11 +23,23 @@ class ControlWorkflowBoundaryTest(unittest.TestCase):
         self.assertIn("control_ref must be an immutable commit SHA", text)
         self.assertNotIn("on:\n  push:", text)
 
+    def test_discovery_runtime_is_reusable_main_logic_only(self):
+        text = (ROOT / ".github/workflows/dynamic-candidate-runtime.yml").read_text(encoding="utf-8")
+        self.assertIn("workflow_call:", text)
+        self.assertIn("ref: ${{ inputs.control_ref }}", text)
+        self.assertIn("ref: main", text)
+        self.assertIn("discovery-requests", text)
+        self.assertNotIn("on:\n  push:", text)
+
     def test_dispatcher_template_contains_no_business_logic(self):
         text = (ROOT / "config/control-branch-dispatcher.yml").read_text(encoding="utf-8")
-        self.assertIn("branches: [collector-requests, maintenance-requests]", text)
+        self.assertIn("branches: [collector-requests, maintenance-requests, discovery-requests]", text)
         self.assertIn(
             "uses: yuatom/stock-market-data/.github/workflows/market-data-collector-runtime.yml@main",
+            text,
+        )
+        self.assertIn(
+            "uses: yuatom/stock-market-data/.github/workflows/dynamic-candidate-runtime.yml@main",
             text,
         )
         self.assertIn("control_ref: ${{ github.sha }}", text)
