@@ -53,6 +53,22 @@ class DynamicCandidateRequestTests(unittest.TestCase):
         with self.assertRaises(dynamic.DynamicCandidateCollectionError):
             dynamic._load_request(path)
 
+    def test_open60_carryover_validation_is_allowed(self):
+        value = self._request()
+        value.update({"stage": "open_60m", "request_purpose": "carryover_validation", "candidate_symbols": ["RDDT", "UMAC", "RCAT"]})
+        path = self._write(value)
+        loaded = dynamic._load_request(path)
+        self.assertEqual(loaded["stage"], "open_60m")
+        self.assertEqual(loaded["request_purpose"], "carryover_validation")
+
+    def test_open60_new_radar_is_rejected(self):
+        value = self._request()
+        value["stage"] = "open_60m"
+        value["request_purpose"] = "opportunity_discovery"
+        path = self._write(value)
+        with self.assertRaises(dynamic.DynamicCandidateCollectionError):
+            dynamic._load_request(path)
+
     def test_more_than_eight_symbols_rejected(self):
         value = self._request()
         value["candidate_symbols"] = [f"A{i}" for i in range(9)]
@@ -72,9 +88,9 @@ class DynamicCandidateRequestTests(unittest.TestCase):
         with self.assertRaises(dynamic.DynamicCandidateCollectionError):
             dynamic._load_request(path, expected_contract_sha="c" * 40)
 
-    def test_only_registered_stages_allowed(self):
+    def test_unregistered_stage_is_rejected(self):
         value = self._request()
-        value["stage"] = "open_60m"
+        value["stage"] = "premarket"
         path = self._write(value)
         with self.assertRaises(dynamic.DynamicCandidateCollectionError):
             dynamic._load_request(path)
@@ -84,6 +100,8 @@ class DynamicCandidateRequestTests(unittest.TestCase):
         self.assertIn("fixed_collection_universe_remains_default_baseline: true", text)
         self.assertIn("opportunity_qualification_forbidden: true", text)
         self.assertIn("open15_new_radar_forbidden: true", text)
+        self.assertIn("open60_new_radar_forbidden: true", text)
+        self.assertIn('open_60m_window: ["10:00", "10:30"]', text)
         self.assertIn("request_symbol_limit: 8", text)
 
 
