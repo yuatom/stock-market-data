@@ -1,7 +1,7 @@
 schema_version: 1
-contract_version: 1
+contract_version: 2
 purpose:
-  - collect bounded transaction-scoped regular-session market facts for opportunity-discovery candidates
+  - collect bounded transaction-scoped regular-session market facts for opportunity-discovery candidates and inherited non-Core lifecycle objects
   - keep the fixed collection universe unchanged as the normal supported baseline
   - allow research input resolution to request temporary non-watchlist equity symbols before the Store read SHA is pinned
 
@@ -15,6 +15,8 @@ principles:
   immutable_store_write_required: true
   research_decision_logic_forbidden: true
   opportunity_qualification_forbidden: true
+  open15_new_radar_forbidden: true
+  open15_dynamic_collection_only_for_inherited_due_entity_validation: true
   request_must_bind_stock_dairy_repository_sha: true
   request_must_bind_current_market_data_contract_sha: true
 
@@ -23,7 +25,12 @@ request:
   control_branch: discovery-requests
   path: requests/dynamic-candidate-request.json
   authorized_research_repository: yuatom/stock-dairy
-  allowed_stages: [open_30m, close]
+  allowed_stages: [open_15m, open_30m, close]
+  allowed_purposes: [carryover_validation, opportunity_discovery]
+  stage_purpose_rules:
+    open_15m: [carryover_validation]
+    open_30m: [opportunity_discovery, carryover_validation]
+    close: [opportunity_discovery, carryover_validation]
   symbol_limit: 8
 
 collection:
@@ -35,6 +42,7 @@ collection:
     existing_overlap_must_be_byte_equivalent: true
   intraday:
     provider_order: [nasdaq_public_intraday, twelve_data_basic]
+    open_15m_window: ["09:30", "09:45"]
     open_30m_window: ["09:30", "10:00"]
     close_window: ["15:45", "16:00"]
     session: regular
@@ -44,6 +52,7 @@ collection:
 
 result:
   snapshot_stage_templates:
+    open_15m: discovery_open_15m
     open_30m: discovery_open_30m
     close: discovery_close
   candidate_missing_is_explicit: true
