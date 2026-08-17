@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Collect request-scoped market facts for opportunity-discovery candidates.
+"""Collect request-scoped market facts for dynamic research objects.
 
-This deliberately does not mutate config/collection-universe.json. Candidate
-membership is bounded to one signed request and is never a research-priority or
-opportunity-qualification authority.
+Dynamic membership is bounded to one immutable request and is never a research
+priority or opportunity-qualification authority. Open15 is supported only for
+inherited due-entity validation; it does not authorize a new radar scan.
 """
 from __future__ import annotations
 
@@ -28,7 +28,8 @@ class DynamicCandidateCollectionError(RuntimeError):
 
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 SYMBOL = re.compile(r"^[A-Z][A-Z0-9.-]{0,9}$")
-ALLOWED_STAGES = {"open_30m", "close"}
+ALLOWED_STAGES = {"open_15m", "open_30m", "close"}
+ALLOWED_PURPOSES = {"carryover_validation", "opportunity_discovery"}
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -43,9 +44,8 @@ def _load_request(path: Path, *, expected_contract_sha: str | None = None) -> di
     if not isinstance(value, dict):
         raise DynamicCandidateCollectionError("request must be a JSON object")
     required = {
-        "schema_version", "request_id", "requested_at", "trade_date", "stage",
-        "research_repository", "research_repository_commit_sha", "market_data_contract_sha",
-        "candidate_symbols",
+        "schema_version", "request_id", "requested_at", "trade_date", "stage", "request_purpose",
+        "research_repository", "research_repository_commit_sha", "market_data_contract_sha", "candidate_symbols",
     }
     missing = sorted(required - set(value))
     if missing:
@@ -58,8 +58,14 @@ def _load_request(path: Path, *, expected_contract_sha: str | None = None) -> di
         raise DynamicCandidateCollectionError("schema_version must be 1")
     if value.get("research_repository") != "yuatom/stock-dairy":
         raise DynamicCandidateCollectionError("research_repository is unauthorized")
-    if value.get("stage") not in ALLOWED_STAGES:
-        raise DynamicCandidateCollectionError("stage must be open_30m or close")
+    stage = str(value.get("stage") or "")
+    purpose = str(value.get("request_purpose") or "")
+    if stage not in ALLOWED_STAGES:
+        raise DynamicCandidateCollectionError("stage must be open_15m, open_30m or close")
+    if purpose not in ALLOWED_PURPOSES:
+        raise DynamicCandidateCollectionError("invalid request_purpose")
+    if stage == "open_15m" and purpose != "carryover_validation":
+        raise DynamicCandidateCollectionError("Open15 dynamic collection is carryover_validation only")
     for field in ("research_repository_commit_sha", "market_data_contract_sha"):
         if not HEX40.fullmatch(str(value.get(field) or "")):
             raise DynamicCandidateCollectionError(f"{field} must be a 40-char SHA")
@@ -80,15 +86,7 @@ def _load_request(path: Path, *, expected_contract_sha: str | None = None) -> di
     return value
 
 
-def _ensure_daily_history(
-    *,
-    symbols: Sequence[str],
-    trade_date: str,
-    store_root: Path,
-    config: dict[str, Any],
-    access: dict[str, Any],
-    target_records: int,
-) -> tuple[list[str], list[dict[str, str]]]:
+def _ensure_daily_history(*, symbols: Sequence[str], trade_date: str, store_root: Path, config: dict[str, Any], access: dict[str, Any], target_records: int) -> tuple[list[str], list[dict[str, str]]]:
     key = os.environ.get(str((access.get("twelve_data_basic") or {}).get("api_key_env") or "TWELVE_DATA_API_KEY"))
     if not key:
         return [], [{"symbol": symbol, "reason": "TWELVE_DATA_API_KEY_missing"} for symbol in symbols]
@@ -97,20 +95,9 @@ def _ensure_daily_history(
     failures: list[dict[str, str]] = []
     for symbol in symbols:
         try:
-            collectors.wait_for_twelve_budget(
-                store_root,
-                trade_date,
-                per_day=int(budget["hard_credits_per_day"]),
-                per_minute=int(budget["hard_credits_per_minute"]),
-            )
+            collectors.wait_for_twelve_budget(store_root, trade_date, per_day=int(budget["hard_credits_per_day"]), per_minute=int(budget["hard_credits_per_minute"]))
             fetched = collectors.fetch_twelve_daily(symbol, key, access, outputsize=target_records)
-            collectors.consume_twelve_credit(
-                store_root,
-                trade_date,
-                amount=1,
-                per_day=int(budget["hard_credits_per_day"]),
-                per_minute=int(budget["hard_credits_per_minute"]),
-            )
+            collectors.consume_twelve_credit(store_root, trade_date, amount=1, per_day=int(budget["hard_credits_per_day"]), per_minute=int(budget["hard_credits_per_minute"]))
             eligible = [row for row in fetched if str(row.get("trade_date") or "") < trade_date]
             if not eligible:
                 failures.append({"symbol": symbol, "reason": "no_cutoff_valid_daily_history"})
@@ -124,11 +111,7 @@ def _ensure_daily_history(
                 identity_effective_from=None,
                 series_semantics="daily_regular_ohlcv",
                 adjustment_semantics="provider_reported",
-                lineage={
-                    "ingest_kind": "dynamic_opportunity_candidate_history",
-                    "ingest_trade_date": trade_date,
-                    "history_outputsize": target_records,
-                },
+                lineage={"ingest_kind": "dynamic_research_object_history", "ingest_trade_date": trade_date, "history_outputsize": target_records},
             )
             available.append(symbol)
         except Exception as exc:  # noqa: BLE001
@@ -136,14 +119,7 @@ def _ensure_daily_history(
     return available, failures
 
 
-def collect_request(
-    *,
-    request: dict[str, Any],
-    store_root: Path,
-    store_config_path: Path,
-    access_path: Path,
-    dynamic_config_path: Path,
-) -> dict[str, Any]:
+def collect_request(*, request: dict[str, Any], store_root: Path, store_config_path: Path, access_path: Path, dynamic_config_path: Path) -> dict[str, Any]:
     config = collectors.load_yaml(store_config_path)
     access = collectors.load_yaml(access_path)
     dynamic = _load_yaml(dynamic_config_path)
@@ -153,18 +129,15 @@ def collect_request(
     target_records = int((((dynamic.get("collection") or {}).get("daily_series") or {}).get("target_history_sessions") or 256))
 
     daily_available, daily_failures = _ensure_daily_history(
-        symbols=symbols,
-        trade_date=trade_date,
-        store_root=store_root,
-        config=config,
-        access=access,
-        target_records=target_records,
+        symbols=symbols, trade_date=trade_date, store_root=store_root, config=config, access=access, target_records=target_records
     )
 
-    if stage == "open_30m":
-        start_et, end_et = "09:30", "10:00"
-    else:
-        start_et, end_et = "15:45", "16:00"
+    windows = {
+        "open_15m": ("09:30", "09:45"),
+        "open_30m": ("09:30", "10:00"),
+        "close": ("15:45", "16:00"),
+    }
+    start_et, end_et = windows[stage]
 
     result = collect_regular_window(
         mode=f"discovery_{stage}",
@@ -181,6 +154,7 @@ def collect_request(
     result.update(
         {
             "request_id": request["request_id"],
+            "request_purpose": request["request_purpose"],
             "research_repository_commit_sha": request["research_repository_commit_sha"],
             "market_data_contract_sha": request["market_data_contract_sha"],
             "candidate_symbols": symbols,
