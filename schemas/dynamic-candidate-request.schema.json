@@ -9,7 +9,7 @@
     "request_id": {"type": "string", "minLength": 1, "maxLength": 160},
     "requested_at": {"type": "string", "format": "date-time"},
     "trade_date": {"type": "string", "format": "date"},
-    "stage": {"enum": ["open_15m", "open_30m", "close"]},
+    "stage": {"enum": ["open_15m", "open_30m", "open_60m", "close"]},
     "request_purpose": {"enum": ["carryover_validation", "opportunity_discovery"]},
     "research_repository": {"const": "yuatom/stock-dairy"},
     "research_repository_commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
@@ -18,7 +18,8 @@
     "transaction_id": {"type": ["string", "null"], "minLength": 1}
   },
   "allOf": [
-    {"if": {"properties": {"stage": {"const": "open_15m"}}, "required": ["stage"]}, "then": {"properties": {"request_purpose": {"const": "carryover_validation"}}}}
+    {"if": {"properties": {"stage": {"const": "open_15m"}}, "required": ["stage"]}, "then": {"properties": {"request_purpose": {"const": "carryover_validation"}}}},
+    {"if": {"properties": {"stage": {"const": "open_60m"}}, "required": ["stage"]}, "then": {"properties": {"request_purpose": {"const": "carryover_validation"}}}}
   ],
   "additionalProperties": false
 }

@@ -2,8 +2,8 @@
 """Collect request-scoped market facts for dynamic research objects.
 
 Dynamic membership is bounded to one immutable request and is never a research
-priority or opportunity-qualification authority. Open15 is supported only for
-inherited due-entity validation; it does not authorize a new radar scan.
+priority or opportunity-qualification authority. Open15/Open60 are supported
+only for inherited due-entity validation; they do not authorize a new radar scan.
 """
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ class DynamicCandidateCollectionError(RuntimeError):
 
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 SYMBOL = re.compile(r"^[A-Z][A-Z0-9.-]{0,9}$")
-ALLOWED_STAGES = {"open_15m", "open_30m", "close"}
+ALLOWED_STAGES = {"open_15m", "open_30m", "open_60m", "close"}
 ALLOWED_PURPOSES = {"carryover_validation", "opportunity_discovery"}
 
 
@@ -61,11 +61,11 @@ def _load_request(path: Path, *, expected_contract_sha: str | None = None) -> di
     stage = str(value.get("stage") or "")
     purpose = str(value.get("request_purpose") or "")
     if stage not in ALLOWED_STAGES:
-        raise DynamicCandidateCollectionError("stage must be open_15m, open_30m or close")
+        raise DynamicCandidateCollectionError("stage must be open_15m, open_30m, open_60m or close")
     if purpose not in ALLOWED_PURPOSES:
         raise DynamicCandidateCollectionError("invalid request_purpose")
-    if stage == "open_15m" and purpose != "carryover_validation":
-        raise DynamicCandidateCollectionError("Open15 dynamic collection is carryover_validation only")
+    if stage in {"open_15m", "open_60m"} and purpose != "carryover_validation":
+        raise DynamicCandidateCollectionError(f"{stage} dynamic collection is carryover_validation only")
     for field in ("research_repository_commit_sha", "market_data_contract_sha"):
         if not HEX40.fullmatch(str(value.get(field) or "")):
             raise DynamicCandidateCollectionError(f"{field} must be a 40-char SHA")
@@ -135,6 +135,7 @@ def collect_request(*, request: dict[str, Any], store_root: Path, store_config_p
     windows = {
         "open_15m": ("09:30", "09:45"),
         "open_30m": ("09:30", "10:00"),
+        "open_60m": ("10:00", "10:30"),
         "close": ("15:45", "16:00"),
     }
     start_et, end_et = windows[stage]
