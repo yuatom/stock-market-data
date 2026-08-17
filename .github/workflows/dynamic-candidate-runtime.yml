@@ -85,12 +85,12 @@ jobs:
               raise SystemExit('unauthorized research repository')
           stage = request.get('stage')
           purpose = request.get('request_purpose')
-          if stage not in {'open_15m','open_30m','close'}:
-              raise SystemExit('stage must be open_15m, open_30m or close')
+          if stage not in {'open_15m','open_30m','open_60m','close'}:
+              raise SystemExit('stage must be open_15m, open_30m, open_60m or close')
           if purpose not in {'carryover_validation','opportunity_discovery'}:
               raise SystemExit('invalid request_purpose')
-          if stage == 'open_15m' and purpose != 'carryover_validation':
-              raise SystemExit('Open15 dynamic collection is carryover_validation only')
+          if stage in {'open_15m','open_60m'} and purpose != 'carryover_validation':
+              raise SystemExit(f'{stage} dynamic collection is carryover_validation only')
           symbols = request.get('candidate_symbols')
           if not isinstance(symbols, list) or not (1 <= len(symbols) <= 8):
               raise SystemExit('candidate_symbols must contain 1-8 symbols')
