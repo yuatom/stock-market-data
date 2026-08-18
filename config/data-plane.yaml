@@ -1,17 +1,19 @@
 schema_version: 1
-contract_version: 10
+contract_version: 11
 repository: yuatom/stock-market-data
 purpose:
   - own reusable Market Data Plane code, contracts, collection and storage semantics
   - keep GitHub Actions collector/runtime public while persisted third-party market data remains private
   - expose independent commit-pinned data-contract and data-read identities to research consumers
-  - keep regular-session Market Fact acquisition and writes out of the research runtime
+  - keep all production Market Fact acquisition and writes out of the research runtime
+  - make qualified Premarket and regular-session facts persisted Data Plane capabilities
   - make cutoff-valid Close supported-baseline context a persisted Data Plane capability rather than a research-time side fetch
   - keep mutable control branches as data-only triggers while execution logic always resolves from current main
 
 boundaries:
   owns:
     - collection_universe
+    - qualified_premarket_trade_detail_semantics
     - cutoff_valid_cross_asset_proxy_semantics
     - cutoff_valid_close_sector_context
     - collector_transport_and_parser
@@ -89,6 +91,8 @@ principles:
   immutable_daily_append_requires_provider_settlement_maturity: true
   snapshot_immutable: true
   probe_is_not_market_fact: true
+  explicit_provider_promotion_does_not_promote_probe_artifacts_into_market_facts: true
+  production_premarket_facts_require_fresh_per_invocation_truth_validation: true
   store_presence_does_not_bypass_claim_qualification: true
   public_compute_repo_must_not_commit_third_party_market_payloads: true
   mutable_collector_requests_must_not_advance_compute_main: true
@@ -120,12 +124,13 @@ workflow_execution:
   rationale:
     - github_push_uses_workflow_definition_from_triggering_branch
     - mutable_control_branch_workflow_drift_must_not_change_runtime_semantics
-    - request_payload_is_read_from_immutable_trigger_commit_but_compute_and_runtime_logic_are_resolved_from_main
+    - request_payload_is_read_from_immutable_trigger_commit_but compute_and_runtime_logic_are_resolved_from_main
 
 collection_membership:
   owner: config/collection-universe.json
   loader: scripts/collection_universe.py
   research_watchlist_is_not_dependency: true
+  premarket_group_is_first_class: true
   live_collector_reads_first_class_universe_directly: true
   baseline_initializer_reads_first_class_universe_directly: true
   explicit_rebase_reads_first_class_universe_directly: true
@@ -133,6 +138,24 @@ collection_membership:
   live_intraday_universe_must_not_expand_only_for_historical_sector_repair: true
   runtime_compatibility_file_dependency: false
   generated_compatibility_membership_files_forbidden: true
+
+supported_premarket_baseline:
+  owner: config/collection-universe.json#premarket
+  provider_contract: config/market-data-collector-access.yaml#nasdaq_public_extended_premarket
+  target_window_et: {start: '04:00', end: '09:30'}
+  required_target_count: 12
+  required_core_count: 10
+  required_market_anchors: [QQQ, SPY]
+  target_trade_date_required: true
+  source_timestamp_required: true
+  security_identity_required: true
+  delayed_semantics_must_be_preserved: true
+  exact_realtime_claim_forbidden: true
+  per_trade_reported_share_volume_is_not_consolidated_session_volume: true
+  no_qualified_symbol_fact_behavior: claim_scoped_missing
+  partial_snapshot_is_valid_input_with_missing_symbols: true
+  scheduled_warmup_et: '07:20'
+  on_demand_request_allowed_before_read_sha_pin: true
 
 supported_close_baseline:
   owner: config/collection-universe.json
@@ -186,7 +209,7 @@ collector_request_interface:
   branch: collector-requests
   path: requests/collector-request.json
   schema: schemas/collector-request.schema.json
-  runtime_modes: [open_15m, open_30m, open_60m, close]
+  runtime_modes: [premarket, open_15m, open_30m, open_60m, close]
   producer: stock_dairy_chatgpt_runtime
   request_must_bind:
     - research_repository_commit_sha
@@ -258,6 +281,7 @@ consumer_interface:
   consumer_must_not_refresh_read_sha_after_research_input_freeze: true
   store_miss_may_trigger_collector_request: true
   store_miss_must_not_authorize_research_runtime_market_fetch_or_write: true
+  premarket_refs_are_first_class_market_data_refs: true
   cutoff_valid_context_proxy_refs_are_first_class_market_data_refs: true
   proxy_semantics_must_survive_into_frozen_research_input: true
 
