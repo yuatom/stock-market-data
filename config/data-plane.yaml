@@ -1,5 +1,5 @@
 schema_version: 1
-contract_version: 11
+contract_version: 12
 repository: yuatom/stock-market-data
 purpose:
   - own reusable Market Data Plane code, contracts, collection and storage semantics
@@ -9,6 +9,7 @@ purpose:
   - make qualified Premarket and regular-session facts persisted Data Plane capabilities
   - make cutoff-valid Close supported-baseline context a persisted Data Plane capability rather than a research-time side fetch
   - keep mutable control branches as data-only triggers while execution logic always resolves from current main
+  - permit owner-authorized historical Premarket probe sample replay only through exact source-probe identity and the normal private Store writer path
 
 boundaries:
   owns:
@@ -93,6 +94,9 @@ principles:
   probe_is_not_market_fact: true
   explicit_provider_promotion_does_not_promote_probe_artifacts_into_market_facts: true
   production_premarket_facts_require_fresh_per_invocation_truth_validation: true
+  historical_probe_replay_must_requalify_preserved_samples_with_production_normalizer: true
+  historical_probe_replay_must_bind_exact_probe_path_and_blob_sha: true
+  historical_probe_replay_must_not_reconstruct_unpersisted_rows: true
   store_presence_does_not_bypass_claim_qualification: true
   public_compute_repo_must_not_commit_third_party_market_payloads: true
   mutable_collector_requests_must_not_advance_compute_main: true
@@ -233,6 +237,7 @@ maintenance_request_interface:
   allowed_modes:
     daily_baseline_init: collection_universe_daily_baseline
     historical_context_repair: cutoff_valid_close_supported_baseline
+    premarket_probe_replay: historical_premarket_probe_sample
   authority: owner_authorized_data_plane_maintenance
   market_data_contract_sha_must_equal_current_compute_main: true
   future_trade_date_forbidden: true
@@ -242,6 +247,10 @@ maintenance_request_interface:
   request_branch_content_must_not_be_used_as_compute_code: true
   request_branch_workflow_must_be_thin_dispatcher_only: true
   research_runtime_implicit_historical_repair_forbidden: true
+  premarket_probe_replay_requires: [probe_path, probe_blob_sha]
+  premarket_probe_replay_source_must_be_private_store_shadow_probe: true
+  premarket_probe_replay_sample_only: true
+  premarket_probe_replay_network_fetch_forbidden: true
 
 payload_writers:
   scheduled_and_on_demand_collector:
@@ -256,6 +265,7 @@ payload_writers:
     explicit_mode_required: true
     recovery_and_revision_audit_required_when_mutating_persisted_history: true
     append_only_context_repair_may_add_new_immutable_capture_and_snapshot_refs: true
+    historical_premarket_probe_replay_may_add_new_immutable_sample_capture_and_snapshot_refs: true
   stock_dairy_research_runtime:
     executor: stock_dairy_chatgpt_runtime
     market_fact_write_allowed: false

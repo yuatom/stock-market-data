@@ -129,10 +129,12 @@ class CollectionUniverseTest(unittest.TestCase):
         )
         self.assertEqual(
             set(schema["properties"]["mode"]["enum"]),
-            {"daily_baseline_init", "historical_context_repair"},
+            {"daily_baseline_init", "historical_context_repair", "premarket_probe_replay"},
         )
         text = json.dumps(schema, sort_keys=True)
         self.assertIn("cutoff_valid_close_supported_baseline", text)
+        self.assertIn("historical_premarket_probe_sample", text)
+        self.assertIn("probe_blob_sha", text)
         self.assertNotIn("cutoff_valid_cross_asset_context_proxies_only", text)
         self.assertIn("owner_authorized_data_plane_maintenance", text)
 
