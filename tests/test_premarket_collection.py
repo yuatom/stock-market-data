@@ -81,8 +81,9 @@ class PremarketCollectionTest(unittest.TestCase):
             latest = root / "snapshots" / "2026-08" / "2026-08-17" / "premarket" / "latest.json"
             self.assertTrue(latest.exists())
             pointer = json.loads(latest.read_text(encoding="utf-8"))
-            snapshot = root / pointer["path"]
+            snapshot = root / pointer["snapshot_path"]
             doc = json.loads(snapshot.read_text(encoding="utf-8"))
+            self.assertEqual(pointer["snapshot_id"], doc["snapshot_id"])
             self.assertEqual(doc["stage"], "premarket")
             self.assertEqual(doc["missing"], ["PLTR"])
             self.assertEqual(doc["coverage"]["symbols_available_in_increment"], 1)
