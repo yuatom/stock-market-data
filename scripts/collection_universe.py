@@ -2,14 +2,14 @@
 """First-class collection-universe authority for the independent Data Plane.
 
 The collection universe is intentionally separate from stock-dairy research
-watchlists.  This module validates collection membership and the explicit
-semantics of cutoff-valid cross-asset proxy instruments before collectors run.
+watchlists. This module validates collection membership and explicit semantics
+before collectors run.
 """
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping
 
 CONTEXT_PROXY_ROLE = "cutoff_valid_cross_asset_proxy"
 REQUIRED_CONTEXT_CATEGORIES = ("rates", "volatility", "dollar", "commodities", "crypto")
@@ -35,8 +35,13 @@ def asset_classes(universe: Mapping[str, Any]) -> dict[str, str]:
 
 
 def daily_universe(universe: Mapping[str, Any]) -> list[tuple[str, str]]:
+    return sorted(asset_classes(universe).items())
+
+
+def premarket_universe(universe: Mapping[str, Any]) -> list[tuple[str, str]]:
     assets = asset_classes(universe)
-    return sorted(assets.items())
+    symbols = [str(symbol).upper() for symbol in universe.get("premarket") or []]
+    return sorted((symbol, assets[symbol]) for symbol in symbols)
 
 
 def intraday_universe(universe: Mapping[str, Any]) -> list[tuple[str, str]]:
@@ -91,12 +96,6 @@ def context_symbols(universe: Mapping[str, Any]) -> list[str]:
 
 
 def close_supported_baseline_symbols(universe: Mapping[str, Any]) -> list[str]:
-    """Return terminal Market Fact symbols required by the Close supported baseline.
-
-    Live Open15/Open30/Open60 membership remains owned by ``intraday``. Historical
-    Close maintenance intentionally adds the sector collection group without
-    mutating that live-stage universe.
-    """
     return sorted(set(context_symbols(universe)) | set(sector_symbols(universe)))
 
 
@@ -114,25 +113,41 @@ def decorate_fact(universe: Mapping[str, Any], fact: Mapping[str, Any]) -> dict[
     return value
 
 
+def _validated_group(universe: Mapping[str, Any], name: str, daily_symbols: set[str]) -> list[str]:
+    raw = universe.get(name) or []
+    if not isinstance(raw, list):
+        raise RuntimeError(f"{name} must be an array")
+    symbols = [str(symbol).upper() for symbol in raw]
+    if not symbols or any(not symbol for symbol in symbols):
+        raise RuntimeError(f"{name} must contain non-empty symbols")
+    if len(symbols) != len(set(symbols)):
+        raise RuntimeError(f"{name} symbols must be unique")
+    unknown = sorted(set(symbols) - daily_symbols)
+    if unknown:
+        raise RuntimeError(f"{name} symbols missing from daily_series: {unknown}")
+    return symbols
+
+
 def validate_collection_universe(universe: Mapping[str, Any]) -> None:
-    if int(universe.get("schema_version") or 0) != 3:
-        raise RuntimeError("collection universe schema_version must be 3")
+    if int(universe.get("schema_version") or 0) != 4:
+        raise RuntimeError("collection universe schema_version must be 4")
 
     entries = _daily_entries(universe)
-    daily_symbols = [str(entry.get("symbol") or "").upper() for entry in entries]
-    if not daily_symbols or any(not symbol for symbol in daily_symbols):
+    daily = [str(entry.get("symbol") or "").upper() for entry in entries]
+    if not daily or any(not symbol for symbol in daily):
         raise RuntimeError("daily_series contains an empty symbol")
-    if len(daily_symbols) != len(set(daily_symbols)):
+    if len(daily) != len(set(daily)):
         raise RuntimeError("daily_series symbols must be unique")
+    daily_set = set(daily)
 
-    intraday = [str(symbol).upper() for symbol in universe.get("intraday") or []]
-    sectors = [str(symbol).upper() for symbol in universe.get("sector_etfs") or []]
-    for group_name, symbols in (("intraday", intraday), ("sector_etfs", sectors)):
-        if len(symbols) != len(set(symbols)):
-            raise RuntimeError(f"{group_name} symbols must be unique")
-        unknown = sorted(set(symbols) - set(daily_symbols))
-        if unknown:
-            raise RuntimeError(f"{group_name} symbols missing from daily_series: {unknown}")
+    premarket = _validated_group(universe, "premarket", daily_set)
+    intraday = _validated_group(universe, "intraday", daily_set)
+    sectors = _validated_group(universe, "sector_etfs", daily_set)
+    if not set(premarket).issubset(intraday):
+        raise RuntimeError("premarket symbols must be a subset of intraday collection membership")
+    expected_premarket = {"TME","PLTR","SPCX","NVDA","TSLA","MU","META","ORCL","TSM","AMD","QQQ","SPY"}
+    if set(premarket) != expected_premarket:
+        raise RuntimeError("premarket collection group must contain exactly 10 Core plus QQQ/SPY")
 
     proxies = context_proxies(universe)
     if tuple(sorted(proxies)) != tuple(sorted(REQUIRED_CONTEXT_CATEGORIES)):
@@ -157,7 +172,7 @@ def validate_collection_universe(universe: Mapping[str, Any]) -> None:
             if symbol in seen:
                 raise RuntimeError(f"context proxy symbol belongs to multiple categories: {symbol}")
             seen.add(symbol)
-            if symbol not in daily_symbols or symbol not in intraday:
+            if symbol not in daily_set or symbol not in intraday:
                 raise RuntimeError(f"context proxy must be collected in daily and intraday paths: {symbol}")
 
     supported = close_supported_baseline_symbols(universe)
@@ -167,12 +182,7 @@ def validate_collection_universe(universe: Mapping[str, Any]) -> None:
 
 
 def compatibility_views(universe: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Return in-memory legacy shapes for old collector primitives only.
-
-    No file is written.  The authoritative membership remains collection-universe.json.
-    This adapter can be deleted after every maintenance primitive accepts the universe
-    object directly.
-    """
+    """Return in-memory legacy shapes for maintenance primitives only."""
     validate_collection_universe(universe)
     assets = asset_classes(universe)
     intraday = [symbol for symbol, _asset in intraday_universe(universe)]
@@ -184,9 +194,7 @@ def compatibility_views(universe: Mapping[str, Any]) -> tuple[dict[str, Any], di
         if effective:
             meta["ticker_effective_at"] = effective
         instruments[symbol] = meta
-    watchlist = {"core_watchlist": intraday, "instruments": instruments}
-    completeness = {
-        "minute_matrix_requirements": {"tracked_benchmarks": []},
-        "sector_close_capability": {"exact_sector_etfs": sectors},
-    }
-    return watchlist, completeness
+    return (
+        {"core_watchlist": intraday, "instruments": instruments},
+        {"minute_matrix_requirements": {"tracked_benchmarks": []}, "sector_close_capability": {"exact_sector_etfs": sectors}},
+    )

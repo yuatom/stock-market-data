@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "purpose": "Market-data collection membership, collection groups, asset class, security identity, and explicit cutoff-valid cross-asset proxy semantics only; this is not a research watchlist or research-priority authority.",
   "daily_series": [
     {"symbol":"AMD","asset_class":"stocks"},
@@ -36,6 +36,7 @@
     {"symbol":"XLV","asset_class":"etf"},
     {"symbol":"XLY","asset_class":"etf"}
   ],
+  "premarket": ["AMD","META","MU","NVDA","ORCL","PLTR","QQQ","SPCX","SPY","TME","TSLA","TSM"],
   "intraday": ["AMD","GLD","IBIT","IWM","KWEB","META","MU","NVDA","ORCL","PLTR","QQQ","RSP","SMH","SOXX","SPCX","SPY","TLT","TME","TSLA","TSM","UUP","VIXY"],
   "sector_etfs": ["XLB","XLC","XLE","XLF","XLI","XLK","XLP","XLRE","XLU","XLV","XLY"],
   "context_proxies": {
@@ -74,10 +75,10 @@
     "collection_membership_is_not_research_priority": true,
     "security_identity_effective_time_must_be_preserved": true,
     "silent_symbol_substitution_forbidden": true,
-    "intraday_symbols_must_exist_in_daily_series": true,
+    "premarket_symbols_must_exist_in_daily_and_intraday": true,
     "sector_etfs_must_exist_in_daily_series": true,
-    "sector_etfs_are_collection_group_metadata_only": true,
     "context_proxy_symbols_must_exist_in_daily_and_intraday": true,
+    "sector_etfs_are_collection_group_metadata_only": true,
     "context_proxy_semantics_must_be_preserved_in_market_facts": true,
     "context_proxy_must_not_be_relabelled_as_formal_underlying_metric": true
   }

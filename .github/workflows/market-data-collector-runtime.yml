@@ -115,7 +115,8 @@ jobs:
 
           schedules = {
               '5 7 * * 1-5': 'previous_session_eod',
-              '20 7 * * 1-5': 'nasdaq_extended_probe',
+              '10 7 * * 1-5': 'nasdaq_extended_probe',
+              '20 7 * * 1-5': 'premarket',
               '46 9 * * 1-5': 'open_15m',
               '1 10 * * 1-5': 'open_30m',
               '31 10 * * 1-5': 'open_60m',
@@ -127,9 +128,9 @@ jobs:
           }
           manual_modes = {
               'smoke_readonly', 'previous_session_eod', 'daily_baseline_init',
-              'daily_baseline_rebase', 'nasdaq_extended_probe', 'open_15m',
-              'open_30m', 'open_60m', 'close', 'close_retry', 'close_final',
-              'historical_context_repair',
+              'daily_baseline_rebase', 'nasdaq_extended_probe', 'premarket',
+              'open_15m', 'open_30m', 'open_60m', 'close', 'close_retry',
+              'close_final', 'historical_context_repair',
           }
 
           if event == 'push' and branch == 'collector-requests':
@@ -148,7 +149,7 @@ jobs:
                   raise SystemExit('collector request schema_version must be 1')
               if request.get('research_repository') != 'yuatom/stock-dairy':
                   raise SystemExit('collector request research_repository is unauthorized')
-              if request.get('mode') not in {'open_15m','open_30m','open_60m','close'}:
+              if request.get('mode') not in {'premarket','open_15m','open_30m','open_60m','close'}:
                   raise SystemExit('collector request mode is not a live-stage mode')
               if request.get('stage') != request.get('mode'):
                   raise SystemExit('collector request stage must equal mode')
@@ -255,7 +256,7 @@ jobs:
             exit 1
           fi
           case "$MODE" in
-            smoke_readonly|nasdaq_extended_probe) ;;
+            smoke_readonly|nasdaq_extended_probe|premarket) ;;
             *)
               if [[ -z "$TWELVE_KEY" ]]; then
                 echo 'TWELVE_DATA_API_KEY is not configured' >&2
@@ -332,6 +333,11 @@ jobs:
             python scripts/probe_nasdaq_extended.py \
               --config config/market-data-collector-access.yaml \
               --store-root "$store_root" --session auto > /tmp/collector-output.txt 2>/tmp/collector-error.txt
+          elif [[ "$MODE" == 'premarket' ]]; then
+            python scripts/premarket_collection.py \
+              --trade-date "$TRADE_DATE" \
+              "${universe_common[@]}" \
+              --access-config config/market-data-collector-access.yaml > /tmp/collector-output.txt 2>/tmp/collector-error.txt
           elif [[ "$MODE" == 'daily_baseline_init' ]]; then
             python scripts/initialize_market_data_baseline.py \
               --trade-date "$TRADE_DATE" \
@@ -380,7 +386,7 @@ jobs:
               'symbols_requested_in_increment','symbols_available_in_increment','symbols_missing_in_increment',
               'snapshot_written','target_records','request_id','path','result_count','target_count',
               'application_success_json','trade_detail_rows','repair_scope','context_categories_requested',
-              'sector_symbols_requested'
+              'sector_symbols_requested','actual_data_cutoff','source_contract'
           }
           safe = {k: result[k] for k in sorted(result) if k in allowed}
           if isinstance(result.get('failures'), list):
