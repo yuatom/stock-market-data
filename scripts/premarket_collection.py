@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Qualified Nasdaq Premarket collection into the private Market Data Store.
 
-This module promotes only the explicitly registered Premarket endpoint contract.
 Every invocation re-validates target trade date, 04:00-09:30 ET trade clocks,
 source timestamps, requested security identity and delayed/reference semantics
 before any fact reaches Store. Shadow probe/readiness artifacts are never read as
@@ -9,6 +8,8 @@ market facts by this collector.
 """
 from __future__ import annotations
 
+import argparse
+import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -204,3 +205,26 @@ def collect_premarket(
         "actual_data_cutoff": actual_cutoff,
         "source_contract": SOURCE_CONTRACT,
     }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--trade-date", required=True)
+    parser.add_argument("--store-root", default="sources/market-data")
+    parser.add_argument("--universe", default="config/collection-universe.json")
+    parser.add_argument("--access-config", default="config/market-data-collector-access.yaml")
+    args = parser.parse_args()
+    universe = collection.load_collection_universe(args.universe)
+    access = base.load_yaml(args.access_config)
+    result = collect_premarket(
+        trade_date=args.trade_date,
+        store_root=Path(args.store_root),
+        universe_config=universe,
+        access=access,
+    )
+    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
