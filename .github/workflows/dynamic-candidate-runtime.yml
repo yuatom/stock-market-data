@@ -21,7 +21,10 @@ permissions:
   contents: read
 
 concurrency:
-  group: dynamic-candidate-market-data
+  # Dynamic candidate writes and core stage collector writes both mutate the same
+  # private Store tree, including the derived inventory. A single writer queue
+  # prevents the inventory rebase conflict observed on 2026-08-17 Open30.
+  group: market-data-collector
   cancel-in-progress: false
 
 jobs:
