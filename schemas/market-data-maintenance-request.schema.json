@@ -18,15 +18,21 @@
     "request_id": {"type": "string", "minLength": 8},
     "requested_at": {"type": "string", "format": "date-time"},
     "trade_date": {"type": "string", "format": "date"},
-    "mode": {"enum": ["daily_baseline_init", "historical_context_repair"]},
+    "mode": {"enum": ["daily_baseline_init", "historical_context_repair", "premarket_probe_replay"]},
     "scope": {
       "enum": [
         "collection_universe_daily_baseline",
-        "cutoff_valid_close_supported_baseline"
+        "cutoff_valid_close_supported_baseline",
+        "historical_premarket_probe_sample"
       ]
     },
     "authority": {"const": "owner_authorized_data_plane_maintenance"},
-    "market_data_contract_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+    "market_data_contract_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "probe_path": {
+      "type": "string",
+      "pattern": "^collector-state/probes/nasdaq-extended/[0-9]{4}-[0-9]{2}/[0-9]{4}-[0-9]{2}-[0-9]{2}/[0-9]{6}-et\\.json$"
+    },
+    "probe_blob_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
   },
   "allOf": [
     {
@@ -36,6 +42,13 @@
     {
       "if": {"properties": {"mode": {"const": "historical_context_repair"}}},
       "then": {"properties": {"scope": {"const": "cutoff_valid_close_supported_baseline"}}}
+    },
+    {
+      "if": {"properties": {"mode": {"const": "premarket_probe_replay"}}},
+      "then": {
+        "required": ["probe_path", "probe_blob_sha"],
+        "properties": {"scope": {"const": "historical_premarket_probe_sample"}}
+      }
     }
   ]
 }
