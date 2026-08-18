@@ -111,6 +111,8 @@ jobs:
           mode = ''
           trade_date = ''
           request_id = ''
+          probe_path = ''
+          probe_blob_sha = ''
           maintenance_authorized = False
 
           schedules = {
@@ -188,6 +190,7 @@ jobs:
               expected_scope = {
                   'daily_baseline_init': 'collection_universe_daily_baseline',
                   'historical_context_repair': 'cutoff_valid_close_supported_baseline',
+                  'premarket_probe_replay': 'historical_premarket_probe_sample',
               }
               requested_mode = str(request.get('mode') or '')
               if requested_mode not in expected_scope:
@@ -204,6 +207,28 @@ jobs:
                   raise SystemExit('maintenance request trade_date is invalid')
               if requested_trade_date > datetime.now(et).date().isoformat():
                   raise SystemExit('maintenance request trade_date cannot be in the future')
+              if requested_mode == 'premarket_probe_replay':
+                  probe_path = str(request.get('probe_path') or '')
+                  probe_blob_sha = str(request.get('probe_blob_sha') or '')
+                  expected_prefix = (
+                      f'collector-state/probes/nasdaq-extended/'
+                      f'{requested_trade_date[:7]}/{requested_trade_date}/'
+                  )
+                  if not probe_path.startswith(expected_prefix) or not re.fullmatch(
+                      r'collector-state/probes/nasdaq-extended/\d{4}-\d{2}/\d{4}-\d{2}-\d{2}/\d{6}-et\.json',
+                      probe_path,
+                  ):
+                      raise SystemExit('maintenance request probe_path is invalid for target trade_date')
+                  if not re.fullmatch(r'[0-9a-f]{40}', probe_blob_sha):
+                      raise SystemExit('maintenance request probe_blob_sha is invalid')
+                  store_path = Path('store/data/market-data') / probe_path
+                  if not store_path.is_file():
+                      raise SystemExit('maintenance request source probe does not exist in private Store')
+                  actual_blob_sha = subprocess.check_output(
+                      ['git', '-C', 'store', 'hash-object', f'data/market-data/{probe_path}'], text=True
+                  ).strip()
+                  if actual_blob_sha != probe_blob_sha:
+                      raise SystemExit('maintenance request probe_blob_sha does not match private Store source')
               mode = requested_mode
               trade_date = requested_trade_date
               request_id = str(request['request_id'])
@@ -231,6 +256,8 @@ jobs:
               fh.write(f'mode={mode}\n')
               fh.write(f'trade_date={trade_date}\n')
               fh.write(f'request_id={request_id}\n')
+              fh.write(f'probe_path={probe_path}\n')
+              fh.write(f'probe_blob_sha={probe_blob_sha}\n')
               fh.write(f'market_data_contract_sha={compute_sha}\n')
               fh.write(f"maintenance_authorized={'true' if maintenance_authorized else 'false'}\n")
           print(json.dumps({
@@ -240,6 +267,8 @@ jobs:
               'mode': mode,
               'trade_date': trade_date,
               'request_id': request_id or None,
+              'probe_path': probe_path or None,
+              'probe_blob_sha': probe_blob_sha or None,
               'market_data_contract_sha': compute_sha,
               'maintenance_authorized': maintenance_authorized,
           }, sort_keys=True))
@@ -256,7 +285,7 @@ jobs:
             exit 1
           fi
           case "$MODE" in
-            smoke_readonly|nasdaq_extended_probe|premarket) ;;
+            smoke_readonly|nasdaq_extended_probe|premarket|premarket_probe_replay) ;;
             *)
               if [[ -z "$TWELVE_KEY" ]]; then
                 echo 'TWELVE_DATA_API_KEY is not configured' >&2
@@ -321,6 +350,7 @@ jobs:
           TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
           MODE: ${{ steps.invocation.outputs.mode }}
           TRADE_DATE: ${{ steps.invocation.outputs.trade_date }}
+          PROBE_PATH: ${{ steps.invocation.outputs.probe_path }}
           MAINTENANCE_AUTHORIZED: ${{ steps.invocation.outputs.maintenance_authorized }}
         run: |
           set -euo pipefail
@@ -338,6 +368,15 @@ jobs:
               --trade-date "$TRADE_DATE" \
               "${universe_common[@]}" \
               --access-config config/market-data-collector-access.yaml > /tmp/collector-output.txt 2>/tmp/collector-error.txt
+          elif [[ "$MODE" == 'premarket_probe_replay' ]]; then
+            if [[ "$MAINTENANCE_AUTHORIZED" != 'true' ]]; then
+              echo 'premarket_probe_replay lacks maintenance authorization' >&2
+              exit 1
+            fi
+            python scripts/replay_premarket_probe.py \
+              --trade-date "$TRADE_DATE" \
+              --probe-path "$PROBE_PATH" \
+              "${universe_common[@]}" > /tmp/collector-output.txt 2>/tmp/collector-error.txt
           elif [[ "$MODE" == 'daily_baseline_init' ]]; then
             python scripts/initialize_market_data_baseline.py \
               --trade-date "$TRADE_DATE" \
@@ -384,9 +423,10 @@ jobs:
           allowed = {
               'mode','status','changed','changed_series','bootstrapped_series','symbols_requested',
               'symbols_requested_in_increment','symbols_available_in_increment','symbols_missing_in_increment',
-              'snapshot_written','target_records','request_id','path','result_count','target_count',
-              'application_success_json','trade_detail_rows','repair_scope','context_categories_requested',
-              'sector_symbols_requested','actual_data_cutoff','source_contract'
+              'snapshot_written','snapshot_path','snapshot_latest_updated','target_records','request_id','path',
+              'result_count','target_count','application_success_json','trade_detail_rows','repair_scope',
+              'context_categories_requested','sector_symbols_requested','actual_data_cutoff','source_contract',
+              'probe_path','probe_blob_sha','sample_only'
           }
           safe = {k: result[k] for k in sorted(result) if k in allowed}
           if isinstance(result.get('failures'), list):
