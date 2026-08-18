@@ -1,5 +1,5 @@
 schema_version: 1
-contract_version: 9
+contract_version: 10
 ownership_authority: config/contract-ownership.yaml
 source_identity_authority: sources/registry.yaml
 store_authority: config/market-data-store.yaml
@@ -11,6 +11,7 @@ purpose:
   - keep provider identity in sources/registry.yaml and store/reuse semantics in config/market-data-store.yaml
   - make successful-http empty intraday responses diagnosable rather than silent missing
   - provide a free structured regular-session fallback when Nasdaq does not yield target-window facts
+  - persist qualified Nasdaq Premarket trade facts after explicit owner promotion without weakening per-fact truth gates
 
 principles:
   execution_plane: github_actions_market_data_collector
@@ -25,6 +26,8 @@ principles:
   probe_result_must_not_create_source_capability: true
   readiness_result_is_not_market_fact: true
   readiness_result_must_not_auto_promote_source_capability: true
+  explicit_owner_promotion_may_register_a_production_contract_without_reclassifying_probe_bytes_as_market_facts: true
+  every_production_premarket_fetch_must_revalidate_truth_independently: true
   cross_provider_bar_splice_for_same_symbol_window_forbidden: true
 
 http:
@@ -61,6 +64,48 @@ nasdaq_public_intraday:
     - sample_raw_timestamp
     - detected_timestamp_units
   prohibited_uses: [official_close, official_vwap, true_minute_ohlc, consolidated_full_market_volume, realtime_claim_without_provider_semantics]
+
+nasdaq_public_extended_premarket:
+  provider_identity: nasdaq_public_extended
+  role: production_premarket_trade_detail
+  source_contract: nasdaq_public_extended_trade_detail_v1
+  endpoint_id: extended_trading_pre
+  url_template: https://api.nasdaq.com/api/quote/{symbol}/extended-trading?assetclass={asset_class}&markettype=pre
+  allowed_sessions: [premarket]
+  target_window_et: ['04:00', '09:30']
+  collection_group: config/collection-universe.json#premarket
+  feed_scope: official_website_delayed_extended_trade_detail
+  formal_primary_feed: false
+  exact_realtime_claim_forbidden: true
+  required_fact_fields: [symbol, asset_class, session, event_time, source_timestamp, last_sale, reported_share_volume, observed_delay_seconds, security_identity, source_contract]
+  qualification:
+    application_rCode_must_equal: 200
+    explicit_last_update_et_required: true
+    target_trade_date_required: true
+    every_trade_clock_must_be_inside_target_session: true
+    requested_symbol_and_asset_class_must_match_fact_identity: true
+    security_identity_must_be_bound_from_collection_universe: true
+    ticker_effective_at_must_be_preserved_when_present: true
+    delayed_semantics_must_be_preserved: true
+    zero_qualified_trade_rows_for_symbol_is_missing_not_success: true
+  prohibited_uses:
+    - regular_session_quote
+    - official_or_consolidated_premarket_volume
+    - official_vwap
+    - sip_or_full_market_volume
+    - exact_realtime_claim
+    - after_hours_quote
+  promotion_record:
+    authority: explicit_owner_contract_change
+    evidence_trade_date: '2026-08-17'
+    evidence_probe_path: data/market-data/collector-state/probes/nasdaq-extended/2026-08/2026-08-17/074452-et.json
+    evidence_required_targets: 12
+    evidence_full_target_coverage: true
+    evidence_single_trade_date: true
+    evidence_stable_response_shape: true
+    shadow_minimum_distinct_sessions_remains_observability_not_per_fact_truth_gate: true
+    probe_bytes_must_not_be_consumed_directly_as_market_facts: true
+    production_runtime_revalidation_required: true
 
 nasdaq_extended_hours_probe:
   provider_identity_candidate: nasdaq_public_intraday
@@ -155,7 +200,6 @@ nasdaq_extended_hours_probe:
       - delayed_semantics_preserved
     automatic_promotion_forbidden: true
     report_route_registration_requires_explicit_contract_change: true
-
 
 twelve_data_basic:
   provider_identity: twelve_data_basic
