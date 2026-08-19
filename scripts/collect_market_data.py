@@ -28,8 +28,87 @@ from zoneinfo import ZoneInfo
 import collection_universe as collection
 import market_data_collectors as base
 import market_data_collection as runtime
+from collector_retry import call_with_transport_retry
 
 ET = ZoneInfo("America/New_York")
+_RETRY_INSTALLED = False
+
+
+def _install_transport_retries() -> None:
+    """Install bounded transport-only retries on the canonical live adapters.
+
+    Provider selection remains in ``market_data_collection``.  Nasdaq retries do
+    not consume a metered budget.  Every failed Twelve Data network/HTTP attempt
+    is conservatively charged before the next attempt (or before propagating a
+    terminal failure), while a successful attempt continues to be charged by
+    the canonical Twelve adapter itself.
+    """
+    global _RETRY_INSTALLED
+    if _RETRY_INSTALLED:
+        return
+
+    original_nasdaq = runtime.fetch_nasdaq_regular
+    original_twelve = runtime.fetch_twelve_regular
+
+    def retry_nasdaq(
+        symbol: str,
+        asset_class: str,
+        trade_date: str,
+        start_et: str,
+        end_et: str,
+        access: Mapping[str, Any],
+    ):
+        return call_with_transport_retry(
+            lambda: original_nasdaq(symbol, asset_class, trade_date, start_et, end_et, access),
+            access=access,
+        )
+
+    def retry_twelve(
+        symbol: str,
+        asset_class: str,
+        trade_date: str,
+        start_et: str,
+        end_et: str,
+        *,
+        store_root: Path,
+        config: Mapping[str, Any],
+        access: Mapping[str, Any],
+    ):
+        budget = config["collector"]["budgets"]["twelve_data_basic"]
+
+        def account_failed_transport_attempt() -> None:
+            base.wait_for_twelve_budget(
+                store_root,
+                trade_date,
+                per_day=int(budget["hard_credits_per_day"]),
+                per_minute=int(budget["hard_credits_per_minute"]),
+            )
+            base.consume_twelve_credit(
+                store_root,
+                trade_date,
+                amount=1,
+                per_day=int(budget["hard_credits_per_day"]),
+                per_minute=int(budget["hard_credits_per_minute"]),
+            )
+
+        return call_with_transport_retry(
+            lambda: original_twelve(
+                symbol,
+                asset_class,
+                trade_date,
+                start_et,
+                end_et,
+                store_root=store_root,
+                config=config,
+                access=access,
+            ),
+            access=access,
+            on_failed_transport_attempt=account_failed_transport_attempt,
+        )
+
+    runtime.fetch_nasdaq_regular = retry_nasdaq
+    runtime.fetch_twelve_regular = retry_twelve
+    _RETRY_INSTALLED = True
 
 
 def _arg_value(argv: list[str], flag: str, default: str | None = None) -> str | None:
@@ -206,6 +285,7 @@ def _run_live_close(argv: list[str]) -> int | None:
 
 def cli(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
+    _install_transport_retries()
     gate = _settlement_gate_result(args)
     if gate is not None:
         print(json.dumps(gate, ensure_ascii=False, sort_keys=True))
