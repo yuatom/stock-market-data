@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import sys
+import unittest
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
-
-import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -15,74 +14,93 @@ import collect_market_data as entrypoint
 ET = ZoneInfo("America/New_York")
 
 
-def test_regular_stage_cutoff_waits_only_inside_bounded_prewarm_window() -> None:
-    assert entrypoint.regular_stage_cutoff_wait_seconds(
-        mode="open_15m",
-        trade_date="2026-08-19",
-        now_et=datetime(2026, 8, 19, 9, 40, tzinfo=ET),
-    ) == 300
-    assert entrypoint.regular_stage_cutoff_wait_seconds(
-        mode="open_30m",
-        trade_date="2026-08-19",
-        now_et=datetime(2026, 8, 19, 9, 55, tzinfo=ET),
-    ) == 300
-    assert entrypoint.regular_stage_cutoff_wait_seconds(
-        mode="open_60m",
-        trade_date="2026-08-19",
-        now_et=datetime(2026, 8, 19, 10, 25, tzinfo=ET),
-    ) == 300
-
-
-def test_regular_stage_cutoff_allows_provider_access_at_or_after_cutoff() -> None:
-    assert entrypoint.regular_stage_cutoff_wait_seconds(
-        mode="open_15m",
-        trade_date="2026-08-19",
-        now_et=datetime(2026, 8, 19, 9, 45, tzinfo=ET),
-    ) == 0
-    assert entrypoint.regular_stage_cutoff_wait_seconds(
-        mode="open_60m",
-        trade_date="2026-08-19",
-        now_et=datetime(2026, 8, 19, 10, 31, tzinfo=ET),
-    ) == 0
-
-
-def test_regular_stage_cutoff_fails_closed_when_requested_too_early() -> None:
-    with pytest.raises(SystemExit, match="provider access is too early"):
-        entrypoint.regular_stage_cutoff_wait_seconds(
-            mode="open_15m",
-            trade_date="2026-08-19",
-            now_et=datetime(2026, 8, 19, 9, 30, tzinfo=ET),
+class IntradayCutoffPrewarmTest(unittest.TestCase):
+    def test_regular_stage_cutoff_waits_only_inside_bounded_prewarm_window(self) -> None:
+        self.assertEqual(
+            entrypoint.regular_stage_cutoff_wait_seconds(
+                mode="open_15m",
+                trade_date="2026-08-19",
+                now_et=datetime(2026, 8, 19, 9, 40, tzinfo=ET),
+            ),
+            300,
+        )
+        self.assertEqual(
+            entrypoint.regular_stage_cutoff_wait_seconds(
+                mode="open_30m",
+                trade_date="2026-08-19",
+                now_et=datetime(2026, 8, 19, 9, 55, tzinfo=ET),
+            ),
+            300,
+        )
+        self.assertEqual(
+            entrypoint.regular_stage_cutoff_wait_seconds(
+                mode="open_60m",
+                trade_date="2026-08-19",
+                now_et=datetime(2026, 8, 19, 10, 25, tzinfo=ET),
+            ),
+            300,
         )
 
-
-def test_regular_stage_cutoff_rejects_future_trade_date_but_allows_historical() -> None:
-    with pytest.raises(SystemExit, match="future relative to ET"):
-        entrypoint.regular_stage_cutoff_wait_seconds(
-            mode="open_15m",
-            trade_date="2026-08-20",
-            now_et=datetime(2026, 8, 19, 9, 45, tzinfo=ET),
+    def test_regular_stage_cutoff_allows_provider_access_at_or_after_cutoff(self) -> None:
+        self.assertEqual(
+            entrypoint.regular_stage_cutoff_wait_seconds(
+                mode="open_15m",
+                trade_date="2026-08-19",
+                now_et=datetime(2026, 8, 19, 9, 45, tzinfo=ET),
+            ),
+            0,
         )
-    assert entrypoint.regular_stage_cutoff_wait_seconds(
-        mode="open_15m",
-        trade_date="2026-08-18",
-        now_et=datetime(2026, 8, 19, 9, 30, tzinfo=ET),
-    ) == 0
+        self.assertEqual(
+            entrypoint.regular_stage_cutoff_wait_seconds(
+                mode="open_60m",
+                trade_date="2026-08-19",
+                now_et=datetime(2026, 8, 19, 10, 31, tzinfo=ET),
+            ),
+            0,
+        )
+
+    def test_regular_stage_cutoff_fails_closed_when_requested_too_early(self) -> None:
+        with self.assertRaisesRegex(SystemExit, "provider access is too early"):
+            entrypoint.regular_stage_cutoff_wait_seconds(
+                mode="open_15m",
+                trade_date="2026-08-19",
+                now_et=datetime(2026, 8, 19, 9, 30, tzinfo=ET),
+            )
+
+    def test_regular_stage_cutoff_rejects_future_trade_date_but_allows_historical(self) -> None:
+        with self.assertRaisesRegex(SystemExit, "future relative to ET"):
+            entrypoint.regular_stage_cutoff_wait_seconds(
+                mode="open_15m",
+                trade_date="2026-08-20",
+                now_et=datetime(2026, 8, 19, 9, 45, tzinfo=ET),
+            )
+        self.assertEqual(
+            entrypoint.regular_stage_cutoff_wait_seconds(
+                mode="open_15m",
+                trade_date="2026-08-18",
+                now_et=datetime(2026, 8, 19, 9, 30, tzinfo=ET),
+            ),
+            0,
+        )
+
+    def test_intraday_schedules_prestart_but_runtime_maps_same_stage(self) -> None:
+        caller = (ROOT / ".github/workflows/market-data-collector.yml").read_text(encoding="utf-8")
+        runtime = (ROOT / ".github/workflows/market-data-collector-runtime.yml").read_text(encoding="utf-8")
+
+        expected = {
+            "40 9 * * 1-5": "open_15m",
+            "55 9 * * 1-5": "open_30m",
+            "25 10 * * 1-5": "open_60m",
+        }
+        for schedule, mode in expected.items():
+            self.assertIn(f"cron: '{schedule}'", caller)
+            self.assertIn(f"'{schedule}': '{mode}'", runtime)
+
+        for obsolete in ("46 9 * * 1-5", "1 10 * * 1-5", "31 10 * * 1-5"):
+            self.assertNotIn(obsolete, caller)
+            self.assertNotIn(obsolete, runtime)
+        self.assertIn("timeout-minutes: 12", runtime)
 
 
-def test_intraday_schedules_prestart_but_runtime_maps_same_stage() -> None:
-    caller = (ROOT / ".github/workflows/market-data-collector.yml").read_text(encoding="utf-8")
-    runtime = (ROOT / ".github/workflows/market-data-collector-runtime.yml").read_text(encoding="utf-8")
-
-    expected = {
-        "40 9 * * 1-5": "open_15m",
-        "55 9 * * 1-5": "open_30m",
-        "25 10 * * 1-5": "open_60m",
-    }
-    for schedule, mode in expected.items():
-        assert f"cron: '{schedule}'" in caller
-        assert f"'{schedule}': '{mode}'" in runtime
-
-    for obsolete in ("46 9 * * 1-5", "1 10 * * 1-5", "31 10 * * 1-5"):
-        assert obsolete not in caller
-        assert obsolete not in runtime
-    assert "timeout-minutes: 12" in runtime
+if __name__ == "__main__":
+    unittest.main()
