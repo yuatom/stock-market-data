@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping
@@ -30,6 +31,15 @@ import market_data_collectors as base
 import market_data_collection as runtime
 
 ET = ZoneInfo("America/New_York")
+
+REGULAR_STAGE_CUTOFF_ET: dict[str, tuple[int, int]] = {
+    "open_15m": (9, 45),
+    "open_30m": (10, 0),
+    "open_60m": (10, 30),
+}
+# Scheduled jobs may prewarm the GitHub runner and dependency setup before the
+# semantic cutoff, but provider access is fail-closed until the cutoff itself.
+REGULAR_STAGE_PREWARM_MAX_SECONDS = 6 * 60
 
 
 def _arg_value(argv: list[str], flag: str, default: str | None = None) -> str | None:
@@ -55,6 +65,75 @@ def _replace_mode(argv: list[str], mode: str) -> list[str]:
 def _snapshot_complete(store_root: Path, trade_date: str, stage: str) -> bool:
     refs, missing = base._load_prior_snapshot(store_root, trade_date, stage)
     return bool(refs) and not missing
+
+
+def regular_stage_cutoff_wait_seconds(
+    *,
+    mode: str,
+    trade_date: str,
+    now_et: datetime,
+) -> float:
+    """Return bounded seconds to wait before a live regular-stage provider read.
+
+    Historical dates are already past their semantic boundary. Future dates are
+    invalid. For the current ET date, a request may arrive only within the
+    bounded prewarm window before the stage cutoff; anything earlier fails
+    closed rather than silently sleeping or collecting premature facts.
+    """
+    cutoff = REGULAR_STAGE_CUTOFF_ET.get(mode)
+    if cutoff is None:
+        return 0.0
+    if now_et.tzinfo is None:
+        now_et = now_et.replace(tzinfo=ET)
+    else:
+        now_et = now_et.astimezone(ET)
+    current_date = now_et.date().isoformat()
+    if trade_date > current_date:
+        raise SystemExit(f"{mode} trade_date {trade_date} is in the future relative to ET")
+    if trade_date < current_date:
+        return 0.0
+
+    cutoff_at = now_et.replace(
+        hour=cutoff[0], minute=cutoff[1], second=0, microsecond=0
+    )
+    wait_seconds = (cutoff_at - now_et).total_seconds()
+    if wait_seconds <= 0:
+        return 0.0
+    if wait_seconds > REGULAR_STAGE_PREWARM_MAX_SECONDS:
+        raise SystemExit(
+            f"{mode} provider access is too early: {wait_seconds:.0f}s before semantic cutoff"
+        )
+    return wait_seconds
+
+
+def _wait_until_regular_stage_cutoff(
+    argv: list[str], *, now_et: datetime | None = None
+) -> None:
+    mode = str(_arg_value(argv, "--mode") or "")
+    if mode not in REGULAR_STAGE_CUTOFF_ET:
+        return
+    now = (now_et or datetime.now(ET)).astimezone(ET)
+    trade_date = str(_arg_value(argv, "--trade-date") or now.date().isoformat())
+    wait_seconds = regular_stage_cutoff_wait_seconds(
+        mode=mode,
+        trade_date=trade_date,
+        now_et=now,
+    )
+    if wait_seconds <= 0:
+        return
+    print(
+        json.dumps(
+            {
+                "mode": mode,
+                "status": "prewarm_waiting_for_semantic_cutoff",
+                "trade_date": trade_date,
+                "observed_at_et": now.isoformat(),
+                "wait_seconds": round(wait_seconds, 3),
+            },
+            sort_keys=True,
+        )
+    )
+    time.sleep(wait_seconds)
 
 
 def daily_series_settlement_mature(
@@ -210,6 +289,7 @@ def cli(argv: list[str] | None = None) -> int:
     if gate is not None:
         print(json.dumps(gate, ensure_ascii=False, sort_keys=True))
         return 0
+    _wait_until_regular_stage_cutoff(args)
     _ensure_predecessors(args)
     close_result = _run_live_close(args)
     if close_result is not None:
