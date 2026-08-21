@@ -2,9 +2,11 @@
 """Stable entrypoint for the bounded market-data collector.
 
 Open30/Open60 are independently recoverable: if a required predecessor Stage
-Snapshot is absent or partial, the entrypoint materializes that exact prior
-window first, then runs the requested increment. This prevents the live
-on-demand handoff from depending on an earlier scheduled Task having succeeded.
+Snapshot is absent, the entrypoint materializes that exact prior window first,
+then runs the requested increment. A materialized partial predecessor is valid
+claim-scoped inherited context and must not be refetched merely to chase full
+coverage; doing so can starve the requested later-stage window when provider
+coverage is intentionally limited.
 
 Daily Series writes also pass the provider-settlement maturity policy owned by
 ``config/market-data-store.yaml`` before immutable append-only storage is
@@ -62,9 +64,9 @@ def _replace_mode(argv: list[str], mode: str) -> list[str]:
     return out
 
 
-def _snapshot_complete(store_root: Path, trade_date: str, stage: str) -> bool:
-    refs, missing = base._load_prior_snapshot(store_root, trade_date, stage)
-    return bool(refs) and not missing
+def _snapshot_materialized(store_root: Path, trade_date: str, stage: str) -> bool:
+    refs, _missing = base._load_prior_snapshot(store_root, trade_date, stage)
+    return bool(refs)
 
 
 def regular_stage_cutoff_wait_seconds(
@@ -216,16 +218,16 @@ def _ensure_predecessors(argv: list[str]) -> None:
         return
 
     for stage in required:
-        if _snapshot_complete(store_root, trade_date, stage):
+        if _snapshot_materialized(store_root, trade_date, stage):
             continue
-        print(f"dependency_snapshot_missing_or_partial stage={stage}; materializing exact predecessor window")
+        print(f"dependency_snapshot_absent stage={stage}; materializing exact predecessor window")
         rc = runtime.main(_replace_mode(argv, stage))
         if rc != 0:
             raise SystemExit(rc)
-        if not _snapshot_complete(store_root, trade_date, stage):
+        if not _snapshot_materialized(store_root, trade_date, stage):
             # Do not fabricate completeness. The requested later stage still
             # runs and will carry predecessor missing symbols into its snapshot.
-            print(f"dependency_snapshot_still_partial stage={stage}; continuing claim-scoped")
+            print(f"dependency_snapshot_still_absent stage={stage}; continuing claim-scoped")
 
 
 def _live_close_universe(universe_config: Mapping[str, Any]) -> list[tuple[str, str]]:
