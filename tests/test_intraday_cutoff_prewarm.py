@@ -4,6 +4,7 @@ import sys
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest import mock
 from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -82,6 +83,42 @@ class IntradayCutoffPrewarmTest(unittest.TestCase):
             ),
             0,
         )
+
+    def test_partial_predecessors_are_reused_without_refetch(self) -> None:
+        argv = [
+            "--mode",
+            "open_60m",
+            "--trade-date",
+            "2026-08-20",
+            "--store-root",
+            "unused-store",
+        ]
+        with mock.patch.object(
+            entrypoint.base,
+            "_load_prior_snapshot",
+            side_effect=[([{"path": "open15"}], ["META"]), ([{"path": "open30"}], ["QQQ"])],
+        ), mock.patch.object(entrypoint.runtime, "main") as runtime_main:
+            entrypoint._ensure_predecessors(argv)
+        runtime_main.assert_not_called()
+
+    def test_absent_predecessor_is_recovered_once(self) -> None:
+        argv = [
+            "--mode",
+            "open_30m",
+            "--trade-date",
+            "2026-08-20",
+            "--store-root",
+            "unused-store",
+        ]
+        with mock.patch.object(
+            entrypoint.base,
+            "_load_prior_snapshot",
+            side_effect=[([], ["all"]), ([{"path": "open15"}], ["META"])],
+        ), mock.patch.object(entrypoint.runtime, "main", return_value=0) as runtime_main:
+            entrypoint._ensure_predecessors(argv)
+        runtime_main.assert_called_once()
+        recovered_argv = runtime_main.call_args.args[0]
+        self.assertEqual(recovered_argv[recovered_argv.index("--mode") + 1], "open_15m")
 
     def test_intraday_schedules_prestart_but_runtime_maps_same_stage(self) -> None:
         caller = (ROOT / ".github/workflows/market-data-collector.yml").read_text(encoding="utf-8")
