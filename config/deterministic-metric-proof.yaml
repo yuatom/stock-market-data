@@ -45,6 +45,7 @@ source_identity:
   proof_and_all_source_refs_must_resolve_under_one_consumer_market_data_read_sha: true
   proof_self_embedded_store_commit_sha_forbidden_due_self_reference: true
   consumer_market_data_read_sha_is_enclosing_store_commit_identity: true
+  data_plane_commit_sha_is_part_of_immutable_proof_path: true
   proof_must_bind:
     - data_plane_commit_sha
     - immutable_stage_snapshot_path_and_blob_sha
@@ -61,7 +62,7 @@ source_identity:
 
 persistence:
   schema: schemas/deterministic-metric-proof.schema.json
-  proof_path: proofs/deterministic-metrics/{YYYY-MM}/{trade_date}/{stage}/{snapshot_id}.json
+  proof_path: proofs/deterministic-metrics/{YYYY-MM}/{trade_date}/{stage}/{data_plane_commit_sha}/{snapshot_id}.json
   latest_pointer: proofs/deterministic-metrics/{YYYY-MM}/{trade_date}/{stage}/latest.json
   proof_is_market_data_derived_provenance_not_research_evidence: true
   proof_is_not_report_or_finalization_authority: true
@@ -81,6 +82,7 @@ execution:
 consumer_contract:
   consumer_must_verify_proof_blob_at_frozen_market_data_read_sha: true
   consumer_must_verify_all_source_blob_refs_at_same_market_data_read_sha: true
+  consumer_must_verify_proof_data_plane_commit_sha_equals_market_data_contract_sha: true
   consumer_must_compare_materialized_metric_values_to_proof_results: true
   consumer_model_recalculation_is_not_proof: true
   missing_or_conflicting_proof_blocks_metric_bearing_canonical_publication: true
