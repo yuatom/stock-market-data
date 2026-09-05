@@ -315,16 +315,6 @@ def _build_metric_proof_if_applicable(argv: list[str]) -> None:
     )
     latest.parent.mkdir(parents=True, exist_ok=True)
     latest.write_bytes(metric_proof.canonical_bytes(pointer) + b"\n")
-    print(
-        json.dumps(
-            {
-                "metric_proof_status": "written",
-                "metric_proof_path": rel,
-                "metric_proof_blob_sha": blob,
-            },
-            sort_keys=True,
-        )
-    )
 
 
 def cli(argv: list[str] | None = None) -> int:
