@@ -21,6 +21,7 @@ at every intraday stage.
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import time
 from datetime import datetime
@@ -28,6 +29,7 @@ from pathlib import Path
 from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
+import build_deterministic_metric_proof as metric_proof
 import collection_universe as collection
 import market_data_collectors as base
 import market_data_collection as runtime
@@ -285,6 +287,36 @@ def _run_live_close(argv: list[str]) -> int | None:
     return 0
 
 
+def _build_metric_proof_if_applicable(argv: list[str]) -> None:
+    mode = str(_arg_value(argv, "--mode") or "")
+    stage = "close" if mode in {"close", "close_retry", "close_final"} else mode
+    if stage not in {"open_30m", "open_60m", "close"}:
+        return
+    trade_date = str(_arg_value(argv, "--trade-date") or datetime.now(ET).date().isoformat())
+    store_root = Path(str(_arg_value(argv, "--store-root", "sources/market-data")))
+    compute_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    proof, rel = metric_proof.build_proof(
+        store_root,
+        trade_date=trade_date,
+        stage=stage,
+        data_plane_commit_sha=compute_sha,
+    )
+    blob = metric_proof._write_json(store_root / rel, proof)
+    pointer = {
+        "schema_version": 1,
+        "proof_path": rel,
+        "proof_blob_sha": blob,
+        "snapshot_path": proof["snapshot"]["path"],
+        "snapshot_blob_sha": proof["snapshot"]["blob_sha"],
+        "snapshot_id": proof["snapshot"]["snapshot_id"],
+    }
+    latest = store_root / (
+        f"proofs/deterministic-metrics/{trade_date[:7]}/{trade_date}/{stage}/latest.json"
+    )
+    latest.parent.mkdir(parents=True, exist_ok=True)
+    latest.write_bytes(metric_proof.canonical_bytes(pointer) + b"\n")
+
+
 def cli(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     gate = _settlement_gate_result(args)
@@ -295,8 +327,13 @@ def cli(argv: list[str] | None = None) -> int:
     _ensure_predecessors(args)
     close_result = _run_live_close(args)
     if close_result is not None:
+        if close_result == 0:
+            _build_metric_proof_if_applicable(args)
         return close_result
-    return runtime.main(args)
+    rc = runtime.main(args)
+    if rc == 0:
+        _build_metric_proof_if_applicable(args)
+    return rc
 
 
 if __name__ == "__main__":

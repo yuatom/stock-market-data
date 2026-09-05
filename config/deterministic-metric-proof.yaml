@@ -1,0 +1,96 @@
+schema_version: 1
+contract_version: 1
+parent_authority: config/data-plane.yaml
+consumer: yuatom/stock-dairy
+issue_anchor: 28
+
+role: deterministic_market_data_arithmetic_proof
+purpose:
+  - compute stock-dairy requested deterministic price metrics where Python and exact private Store bytes are available
+  - persist exact-operand and result proof before the consumer freezes one market_data_read_sha
+  - let no-script consumers verify proof and source blob identities without model arithmetic
+
+ownership:
+  owns:
+    - arithmetic_implementation_for_stock_dairy_deterministic_metric_proof
+    - proof_artifact_shape_and_store_identity_binding
+  must_not_own:
+    - research_interpretation
+    - direction_or_risk
+    - opportunity_or_action
+    - report_projection
+    - stock_dairy_evidence_semantics
+    - stock_dairy_finalization_cas_or_receipt
+
+scope:
+  stages: [open_30m, open_60m, close]
+  formula_contract: stock_dairy_calculation_policy_v2
+  provider_affine_daily_series_provider: twelve_data_basic
+  benchmarks: [SPY, QQQ]
+  target_observation_source: latest_qualified_stage_snapshot_fact
+  target_volume_compatibility: unavailable_for_intraday_nasdaq_chart_reported_volume
+
+formulas:
+  returns_sessions: [1, 3, 5]
+  return_formula: target_close / prior_close_N_sessions_before_target - 1
+  percentage_scale: 100
+  persisted_decimal_places: 6
+  moving_average_windows: [20, 50]
+  moving_average_baseline: prior_completed_sessions_only
+  target_close_must_not_be_appended_to_prior_ma: true
+  relative_strength_formula: subject_horizon_return_pct - benchmark_horizon_return_pct
+  benchmark_baseline_trade_date_alignment_required: true
+
+source_identity:
+  proof_and_all_source_refs_must_resolve_under_one_consumer_market_data_read_sha: true
+  proof_self_embedded_store_commit_sha_forbidden_due_self_reference: true
+  consumer_market_data_read_sha_is_enclosing_store_commit_identity: true
+  data_plane_commit_sha_is_part_of_immutable_proof_path: true
+  proof_must_bind:
+    - data_plane_commit_sha
+    - immutable_stage_snapshot_path_and_blob_sha
+    - immutable_capture_path_and_blob_sha_for_target
+    - provider_affine_daily_series_index_path_and_blob_sha
+    - every_declared_daily_series_shard_path_and_blob_sha
+    - trade_date
+    - stage
+    - symbol
+    - target_event_time
+    - target_last_sale
+  mixed_store_blob_identity_forbidden: true
+  post_proof_source_mutation_inside_same_store_commit_forbidden: true
+
+persistence:
+  schema: schemas/deterministic-metric-proof.schema.json
+  proof_path: proofs/deterministic-metrics/{YYYY-MM}/{trade_date}/{stage}/{data_plane_commit_sha}/{snapshot_id}.json
+  latest_pointer: proofs/deterministic-metrics/{YYYY-MM}/{trade_date}/{stage}/latest.json
+  proof_is_market_data_derived_provenance_not_research_evidence: true
+  proof_is_not_report_or_finalization_authority: true
+  immutable_proof_conflict_behavior: fail
+  normal_writer: existing_market_data_collector_store_commit
+
+execution:
+  entrypoint: scripts/build_deterministic_metric_proof.py
+  integrated_caller: scripts/collect_market_data.py
+  network_fetch_forbidden: true
+  new_provider_resolution_forbidden: true
+  public_compute_repo_payload_persistence_forbidden: true
+  private_store_only: true
+  failure_behavior: fail_data_plane_invocation_before_store_commit
+  missing_subject_daily_series_behavior: record_explicit_missing_no_fabrication
+
+consumer_contract:
+  consumer_must_verify_proof_blob_at_frozen_market_data_read_sha: true
+  consumer_must_verify_all_source_blob_refs_at_same_market_data_read_sha: true
+  consumer_must_verify_proof_data_plane_commit_sha_equals_market_data_contract_sha: true
+  consumer_must_compare_materialized_metric_values_to_proof_results: true
+  consumer_model_recalculation_is_not_proof: true
+  missing_or_conflicting_proof_blocks_metric_bearing_canonical_publication: true
+  consumer_may_treat_unavailable_metric_as_unavailable_only_when_proof_records_missing_or_null_by_formula_rules: true
+
+forbidden:
+  - provider_fetch_from_proof_builder
+  - mixed_store_sha_proof
+  - model_asserted_arithmetic_as_proof
+  - research_or_strategy_inference
+  - writing_stock_dairy_repository_state
