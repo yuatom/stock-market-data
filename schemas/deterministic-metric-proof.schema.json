@@ -3,7 +3,7 @@
   "$id": "deterministic-metric-proof.schema.json",
   "title": "Frozen-Input-bound deterministic metric proof",
   "type": "object",
-  "required": ["schema_version", "proof_kind", "formula_contract", "data_plane_commit_sha", "trade_date", "stage", "snapshot", "generated_at", "subjects"],
+  "required": ["schema_version", "proof_kind", "formula_contract", "data_plane_commit_sha", "trade_date", "stage", "snapshot", "generated_at", "subjects", "missing"],
   "properties": {
     "schema_version": {"const": 1},
     "proof_kind": {"const": "stock_dairy_deterministic_metrics"},
@@ -61,6 +61,15 @@
             "additionalProperties": false
           }
         },
+        "additionalProperties": false
+      }
+    },
+    "missing": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["symbol", "reason"],
+        "properties": {"symbol": {"type": "string", "minLength": 1}, "reason": {"type": "string", "minLength": 1}},
         "additionalProperties": false
       }
     }
