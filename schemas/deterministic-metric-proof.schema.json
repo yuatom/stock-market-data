@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "deterministic-metric-proof.schema.json",
+  "title": "Frozen-Input-bound deterministic metric proof",
+  "type": "object",
+  "required": ["schema_version", "proof_kind", "formula_contract", "data_plane_commit_sha", "trade_date", "stage", "snapshot", "generated_at", "subjects"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "proof_kind": {"const": "stock_dairy_deterministic_metrics"},
+    "formula_contract": {"const": "stock_dairy_calculation_policy_v2"},
+    "data_plane_commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "trade_date": {"type": "string", "format": "date"},
+    "stage": {"enum": ["open_30m", "open_60m", "close"]},
+    "snapshot": {
+      "type": "object",
+      "required": ["path", "blob_sha", "snapshot_id"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "blob_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "snapshot_id": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    },
+    "generated_at": {"type": "string", "format": "date-time"},
+    "subjects": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["symbol", "target", "daily_series", "metrics", "benchmark_metrics"],
+        "properties": {
+          "symbol": {"type": "string", "minLength": 1},
+          "target": {
+            "type": "object",
+            "required": ["capture_path", "capture_blob_sha", "event_time", "last_sale"],
+            "properties": {
+              "capture_path": {"type": "string", "minLength": 1},
+              "capture_blob_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+              "event_time": {"type": "string", "format": "date-time"},
+              "last_sale": {"type": "number", "exclusiveMinimum": 0}
+            },
+            "additionalProperties": false
+          },
+          "daily_series": {
+            "type": "object",
+            "required": ["provider", "index_path", "index_blob_sha", "shards", "prior_record_count", "prior_last_trade_date"],
+            "properties": {
+              "provider": {"const": "twelve_data_basic"},
+              "index_path": {"type": "string", "minLength": 1},
+              "index_blob_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+              "shards": {"type": "array", "items": {"type": "object", "required": ["path", "blob_sha"], "properties": {"path": {"type": "string"}, "blob_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}}, "additionalProperties": false}},
+              "prior_record_count": {"type": "integer", "minimum": 1},
+              "prior_last_trade_date": {"type": "string", "format": "date"}
+            },
+            "additionalProperties": false
+          },
+          "metrics": {"type": "object"},
+          "benchmark_metrics": {
+            "type": "object",
+            "required": ["SPY", "QQQ"],
+            "properties": {"SPY": {"type": ["object", "null"]}, "QQQ": {"type": ["object", "null"]}},
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}
