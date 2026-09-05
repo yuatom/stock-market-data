@@ -13,7 +13,6 @@ import hashlib
 import json
 import math
 import re
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -287,6 +286,9 @@ def build_proof(root: Path, *, trade_date: str, stage: str, data_plane_commit_sh
                 "benchmark_metrics": benchmark_metrics,
             }
         )
+    snapshot_generated_at = str(snapshot.get("generated_at") or "")
+    if not snapshot_generated_at:
+        raise MetricProofError("snapshot generated_at is required for deterministic proof identity")
     proof = {
         "schema_version": 1,
         "proof_kind": "stock_dairy_deterministic_metrics",
@@ -295,11 +297,14 @@ def build_proof(root: Path, *, trade_date: str, stage: str, data_plane_commit_sh
         "trade_date": trade_date,
         "stage": stage,
         "snapshot": {"path": snapshot_rel, "blob_sha": snapshot_blob, "snapshot_id": str(snapshot["snapshot_id"])},
-        "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "generated_at": snapshot_generated_at,
         "subjects": subjects,
         "missing": missing,
     }
-    rel = f"proofs/deterministic-metrics/{trade_date[:7]}/{trade_date}/{stage}/{snapshot['snapshot_id']}.json"
+    rel = (
+        f"proofs/deterministic-metrics/{trade_date[:7]}/{trade_date}/{stage}/"
+        f"{data_plane_commit_sha}/{snapshot['snapshot_id']}.json"
+    )
     return proof, rel
 
 
