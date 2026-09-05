@@ -1,5 +1,5 @@
 schema_version: 1
-contract_version: 12
+contract_version: 13
 repository: yuatom/stock-market-data
 purpose:
   - own reusable Market Data Plane code, contracts, collection and storage semantics
@@ -8,6 +8,7 @@ purpose:
   - keep all production Market Fact acquisition and writes out of the research runtime
   - make qualified Premarket and regular-session facts persisted Data Plane capabilities
   - make cutoff-valid Close supported-baseline context a persisted Data Plane capability rather than a research-time side fetch
+  - provide deterministic market-data arithmetic proof on exact private Store bytes without taking research/decision/report authority
   - keep mutable control branches as data-only triggers while execution logic always resolves from current main
   - permit owner-authorized historical Premarket probe sample replay only through exact source-probe identity and the normal private Store writer path
 
@@ -22,6 +23,7 @@ boundaries:
     - daily_series_semantics
     - session_capture_semantics
     - stage_snapshot_semantics
+    - deterministic_metric_proof_arithmetic_and_identity_semantics
     - recovery_and_explicit_rebase_semantics
     - collector_state_semantics
     - source_probe_semantics
@@ -85,6 +87,9 @@ principles:
   market_fact_contract_authority_in_compute_repo: true
   market_fact_payload_authority_in_private_store_repo: true
   research_contract_authority_stays_in_stock_dairy: true
+  deterministic_metric_proof_is_data_derived_provenance_not_research_semantics: true
+  deterministic_metric_proof_must_bind_exact_store_blobs: true
+  model_asserted_arithmetic_is_not_deterministic_metric_proof: true
   provider_affine_series: true
   cross_provider_series_splice_forbidden: true
   append_only_normal_operation: true
@@ -257,7 +262,7 @@ payload_writers:
     executor: stock_market_data_github_actions
     allowed_repository: yuatom/stock-market-data-store
     allowed_prefix: data/market-data
-    allowed_write_kinds: [daily_series, session_capture, stage_snapshot, collector_state, probe_state, inventory]
+    allowed_write_kinds: [daily_series, session_capture, stage_snapshot, deterministic_metric_proof, collector_state, probe_state, inventory]
   explicit_data_maintenance:
     executor: stock_market_data_github_actions_or_local_recovery
     allowed_repository: yuatom/stock-market-data-store
@@ -294,6 +299,13 @@ consumer_interface:
   premarket_refs_are_first_class_market_data_refs: true
   cutoff_valid_context_proxy_refs_are_first_class_market_data_refs: true
   proxy_semantics_must_survive_into_frozen_research_input: true
+  deterministic_metric_proof:
+    authority: config/deterministic-metric-proof.yaml
+    stages: [open_30m, open_60m, close]
+    proof_is_data_derived_provenance_not_research_authority: true
+    proof_and_source_refs_must_use_same_market_data_read_sha: true
+    consumer_must_verify_proof_and_source_blob_identities: true
+    model_recalculation_does_not_substitute_for_proof: true
 
 migration:
   source_repository: yuatom/stock-dairy
