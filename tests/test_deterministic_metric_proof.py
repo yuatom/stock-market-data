@@ -1,9 +1,9 @@
 import importlib.util
 import json
+import tempfile
+import unittest
 from datetime import date, timedelta
 from pathlib import Path
-
-import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -88,58 +88,66 @@ def _seed(tmp_path: Path):
     return root, capture_path
 
 
-def test_proof_matches_stock_dairy_formula_semantics_and_binds_exact_blobs(tmp_path):
-    root, _ = _seed(tmp_path)
-    proof, rel = proofmod.build_proof(
-        root,
-        trade_date="2026-09-05",
-        stage="open_30m",
-        data_plane_commit_sha="a" * 40,
-    )
-    assert rel.endswith("/open30-proof-fixture.json")
-    aaa = next(item for item in proof["subjects"] if item["symbol"] == "AAA")
-    assert aaa["metrics"]["returns_pct"]["1session"] == round((170.0 / 159.0 - 1.0) * 100.0, 6)
-    assert aaa["metrics"]["returns_pct"]["3session"] == round((170.0 / 157.0 - 1.0) * 100.0, 6)
-    assert aaa["metrics"]["moving_averages"]["ma20"] == round(sum(float(x) for x in range(140, 160)) / 20.0, 6)
-    assert aaa["metrics"]["volume"]["status"] == "unavailable"
-    assert aaa["benchmark_metrics"]["SPY"]["status"] == "available"
-    assert aaa["benchmark_metrics"]["QQQ"]["status"] == "available"
-    assert len(aaa["daily_series"]["index_blob_sha"]) == 40
-    assert aaa["daily_series"]["shards"]
-    assert len(aaa["target"]["capture_blob_sha"]) == 40
-    assert proof["missing"] == []
+class DeterministicMetricProofTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.tmp_path = Path(self.temp.name)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_proof_matches_stock_dairy_formula_semantics_and_binds_exact_blobs(self):
+        root, _ = _seed(self.tmp_path)
+        proof, rel = proofmod.build_proof(
+            root,
+            trade_date="2026-09-05",
+            stage="open_30m",
+            data_plane_commit_sha="a" * 40,
+        )
+        self.assertTrue(rel.endswith("/open30-proof-fixture.json"))
+        aaa = next(item for item in proof["subjects"] if item["symbol"] == "AAA")
+        self.assertEqual(aaa["metrics"]["returns_pct"]["1session"], round((170.0 / 159.0 - 1.0) * 100.0, 6))
+        self.assertEqual(aaa["metrics"]["returns_pct"]["3session"], round((170.0 / 157.0 - 1.0) * 100.0, 6))
+        self.assertEqual(aaa["metrics"]["moving_averages"]["ma20"], round(sum(float(x) for x in range(140, 160)) / 20.0, 6))
+        self.assertEqual(aaa["metrics"]["volume"]["status"], "unavailable")
+        self.assertEqual(aaa["benchmark_metrics"]["SPY"]["status"], "available")
+        self.assertEqual(aaa["benchmark_metrics"]["QQQ"]["status"], "available")
+        self.assertEqual(len(aaa["daily_series"]["index_blob_sha"]), 40)
+        self.assertTrue(aaa["daily_series"]["shards"])
+        self.assertEqual(len(aaa["target"]["capture_blob_sha"]), 40)
+        self.assertEqual(proof["missing"], [])
+
+    def test_proof_rejects_tampered_snapshot_capture_blob(self):
+        root, capture_path = _seed(self.tmp_path)
+        path = root / capture_path
+        value = json.loads(path.read_text(encoding="utf-8"))
+        value["qualified_facts"][0]["last_sale"] = 999.0
+        path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+        with self.assertRaisesRegex(proofmod.MetricProofError, "blob mismatch"):
+            proofmod.build_proof(root, trade_date="2026-09-05", stage="open_30m", data_plane_commit_sha="a" * 40)
+
+    def test_missing_daily_series_is_explicit_not_fabricated(self):
+        root, _ = _seed(self.tmp_path)
+        aaa_dir = root / "series" / "daily" / "twelve_data_basic" / "AAA"
+        for path in sorted(aaa_dir.glob("*")):
+            path.unlink()
+        aaa_dir.rmdir()
+        proof, _ = proofmod.build_proof(root, trade_date="2026-09-05", stage="open_30m", data_plane_commit_sha="b" * 40)
+        self.assertEqual({item["symbol"] for item in proof["subjects"]}, {"QQQ", "SPY"})
+        self.assertEqual({item["symbol"] for item in proof["missing"]}, {"AAA"})
+
+    def test_builder_has_no_network_or_provider_fetch_surface(self):
+        text = (ROOT / "scripts/build_deterministic_metric_proof.py").read_text(encoding="utf-8")
+        for forbidden in ("urllib", "requests.", "TWELVE_DATA_API_KEY", "urlopen", "fetch_"):
+            self.assertNotIn(forbidden, text)
+
+    def test_schema_requires_exact_identity_and_missing_accounting(self):
+        schema = json.loads((ROOT / "schemas/deterministic-metric-proof.schema.json").read_text(encoding="utf-8"))
+        self.assertIn("snapshot", schema["required"])
+        self.assertIn("subjects", schema["required"])
+        self.assertIn("missing", schema["required"])
+        self.assertEqual(schema["properties"]["data_plane_commit_sha"]["pattern"], "^[0-9a-f]{40}$")
 
 
-def test_proof_rejects_tampered_snapshot_capture_blob(tmp_path):
-    root, capture_path = _seed(tmp_path)
-    path = root / capture_path
-    value = json.loads(path.read_text(encoding="utf-8"))
-    value["qualified_facts"][0]["last_sale"] = 999.0
-    path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
-    with pytest.raises(proofmod.MetricProofError, match="blob mismatch"):
-        proofmod.build_proof(root, trade_date="2026-09-05", stage="open_30m", data_plane_commit_sha="a" * 40)
-
-
-def test_missing_daily_series_is_explicit_not_fabricated(tmp_path):
-    root, _ = _seed(tmp_path)
-    aaa_dir = root / "series" / "daily" / "twelve_data_basic" / "AAA"
-    for path in sorted(aaa_dir.glob("*")):
-        path.unlink()
-    aaa_dir.rmdir()
-    proof, _ = proofmod.build_proof(root, trade_date="2026-09-05", stage="open_30m", data_plane_commit_sha="b" * 40)
-    assert {item["symbol"] for item in proof["subjects"]} == {"QQQ", "SPY"}
-    assert {item["symbol"] for item in proof["missing"]} == {"AAA"}
-
-
-def test_builder_has_no_network_or_provider_fetch_surface():
-    text = (ROOT / "scripts/build_deterministic_metric_proof.py").read_text(encoding="utf-8")
-    for forbidden in ("urllib", "requests.", "TWELVE_DATA_API_KEY", "urlopen", "fetch_"):
-        assert forbidden not in text
-
-
-def test_schema_requires_exact_identity_and_missing_accounting():
-    schema = json.loads((ROOT / "schemas/deterministic-metric-proof.schema.json").read_text(encoding="utf-8"))
-    assert "snapshot" in schema["required"]
-    assert "subjects" in schema["required"]
-    assert "missing" in schema["required"]
-    assert schema["properties"]["data_plane_commit_sha"]["pattern"] == "^[0-9a-f]{40}$"
+if __name__ == "__main__":
+    unittest.main()
