@@ -1,3 +1,4 @@
+import copy
 import importlib.util
 import json
 import shutil
@@ -20,6 +21,7 @@ def _load(name, rel):
 
 
 store = _load("metric_proof_store", "scripts/market_data_store.py")
+sys.modules["market_data_store"] = store
 proofmod = _load("metric_proof_builder", "scripts/build_deterministic_metric_proof.py")
 
 
@@ -92,6 +94,21 @@ def _seed(tmp_path: Path, *, spy_event_time=None):
     return root, capture_path
 
 
+def _materialize_proof(root: Path, data_plane_commit_sha: str):
+    proof, rel = proofmod.build_proof(
+        root,
+        trade_date="2026-09-05",
+        stage="open_30m",
+        data_plane_commit_sha=data_plane_commit_sha,
+    )
+    blob = proofmod._write_json(root / rel, proof)
+    pointer = proofmod._proof_pointer(proof, rel=rel, blob=blob)
+    latest = root / "proofs/deterministic-metrics/2026-09/2026-09-05/open_30m/latest.json"
+    latest.parent.mkdir(parents=True, exist_ok=True)
+    latest.write_bytes(proofmod.canonical_bytes(pointer) + b"\n")
+    return proof, rel
+
+
 class DeterministicMetricProofTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -139,8 +156,35 @@ class DeterministicMetricProofTest(unittest.TestCase):
         value = json.loads(shard_path.read_text(encoding="utf-8"))
         value["records"][0]["close"] = 9999.0
         shard_path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
-        with self.assertRaisesRegex(proofmod.MetricProofError, "blob mismatch"):
+        with self.assertRaisesRegex(proofmod.MetricProofError, "daily-series canonical integrity failure"):
             proofmod.build_proof(root, trade_date="2026-09-05", stage="open_30m", data_plane_commit_sha="a" * 40)
+
+    def test_daily_series_canonical_metadata_corruption_fails_closed(self):
+        cases = {
+            "start": lambda value: int(value) + 1,
+            "end": lambda value: int(value) + 1,
+            "count": lambda value: int(value) + 1,
+            "byte_length": lambda value: int(value) + 1,
+            "json_sha256": lambda _value: "0" * 64,
+            "record_count": lambda value: int(value) + 1,
+        }
+        for field, mutate in cases.items():
+            with self.subTest(field=field):
+                root, _ = _seed(self.tmp_path / field)
+                index_path = root / "series" / "daily" / "twelve_data_basic" / "AAA" / "_index.json"
+                index = json.loads(index_path.read_text(encoding="utf-8"))
+                if field == "record_count":
+                    index[field] = mutate(index[field])
+                else:
+                    index["shards"][0][field] = mutate(index["shards"][0][field])
+                index_path.write_bytes(store.canonical_bytes(index) + b"\n")
+                with self.assertRaisesRegex(proofmod.MetricProofError, "daily-series canonical integrity failure"):
+                    proofmod.build_proof(
+                        root,
+                        trade_date="2026-09-05",
+                        stage="open_30m",
+                        data_plane_commit_sha="1" * 40,
+                    )
 
     def test_missing_daily_series_is_explicit_not_fabricated(self):
         root, _ = _seed(self.tmp_path)
@@ -175,8 +219,117 @@ class DeterministicMetricProofTest(unittest.TestCase):
         value = json.loads(shard_path.read_text(encoding="utf-8"))
         value["records"][0]["close"] = 1234.0
         shard_path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
-        with self.assertRaisesRegex(proofmod.MetricProofError, "blob mismatch"):
+        with self.assertRaisesRegex(proofmod.MetricProofError, "daily-series canonical integrity failure"):
             proofmod.verify_proof_source_blobs(other_root, proof)
+
+    def test_reference_verifier_rejects_valid_capture_not_in_snapshot(self):
+        root, _ = _seed(self.tmp_path)
+        proof, _ = proofmod.build_proof(root, trade_date="2026-09-05", stage="open_30m", data_plane_commit_sha="2" * 40)
+        event_time = "2026-09-05T10:00:00-04:00"
+        capture_path, capture_blob = store.write_capture(
+            root,
+            trade_date="2026-09-05",
+            session="regular",
+            provider="nasdaq_public_intraday",
+            capture_id="unbound-capture",
+            generated_at=event_time,
+            actual_data_cutoff=event_time,
+            window={"start": "09:30", "end": "10:00"},
+            feed_scope="fixture",
+            qualified_facts=[{
+                "symbol": "AAA",
+                "asset_class": "stocks",
+                "session": "regular",
+                "event_time": event_time,
+                "source_timestamp": event_time,
+                "last_sale": 170.0,
+                "reported_volume": 12345.0,
+            }],
+        )
+        bad = copy.deepcopy(proof)
+        aaa = next(item for item in bad["subjects"] if item["symbol"] == "AAA")
+        aaa["target"].update({"capture_path": capture_path, "capture_blob_sha": capture_blob})
+        with self.assertRaisesRegex(proofmod.MetricProofError, "not the snapshot-selected observation"):
+            proofmod.verify_proof_source_blobs(root, bad)
+
+    def test_reference_verifier_rejects_stale_snapshot_referenced_observation(self):
+        root, current_capture_path = _seed(self.tmp_path)
+        current_capture_blob = proofmod.git_blob_sha_bytes((root / current_capture_path).read_bytes())
+        old_time = "2026-09-05T09:59:00-04:00"
+        old_path, old_blob = store.write_capture(
+            root,
+            trade_date="2026-09-05",
+            session="regular",
+            provider="nasdaq_public_intraday",
+            capture_id="open30-stale-fixture",
+            generated_at=old_time,
+            actual_data_cutoff=old_time,
+            window={"start": "09:30", "end": "10:00"},
+            feed_scope="fixture",
+            qualified_facts=[{
+                "symbol": "AAA",
+                "asset_class": "stocks",
+                "session": "regular",
+                "event_time": old_time,
+                "source_timestamp": old_time,
+                "last_sale": 169.0,
+                "reported_volume": 12000.0,
+            }],
+        )
+        store.write_snapshot(
+            root,
+            stage="open_30m",
+            trade_date="2026-09-05",
+            snapshot_id="open30-proof-with-history",
+            generated_at="2026-09-05T10:01:00-04:00",
+            data_refs=[
+                {"path": old_path, "blob_sha": old_blob, "kind": "regular_intraday_capture"},
+                {"path": current_capture_path, "blob_sha": current_capture_blob, "kind": "regular_intraday_capture"},
+            ],
+            coverage={"available": 3},
+            missing=[],
+            target_window={"start": "09:30", "end": "10:00"},
+            actual_data_cutoff="2026-09-05T10:00:00-04:00",
+        )
+        proof, _ = proofmod.build_proof(root, trade_date="2026-09-05", stage="open_30m", data_plane_commit_sha="3" * 40)
+        bad = copy.deepcopy(proof)
+        aaa = next(item for item in bad["subjects"] if item["symbol"] == "AAA")
+        aaa["target"] = {
+            "capture_path": old_path,
+            "capture_blob_sha": old_blob,
+            "event_time": old_time,
+            "last_sale": 169.0,
+        }
+        with self.assertRaisesRegex(proofmod.MetricProofError, "not the snapshot-selected observation"):
+            proofmod.verify_proof_source_blobs(root, bad)
+
+    def test_final_tree_verifier_rejects_source_advance_after_proof_materialization(self):
+        root, _ = _seed(self.tmp_path)
+        sha = "e" * 40
+        _materialize_proof(root, sha)
+        store.append_daily_bars(
+            root,
+            provider="twelve_data_basic",
+            symbol="AAA",
+            asset_class="stocks",
+            bars=[{
+                "trade_date": "2026-08-01",
+                "open": 160.5,
+                "high": 162.0,
+                "low": 160.0,
+                "close": 161.0,
+                "volume": 2000.0,
+            }],
+            series_semantics="daily_regular_ohlcv",
+            adjustment_semantics="provider_reported",
+        )
+        with self.assertRaisesRegex(proofmod.MetricProofError, "persisted proof does not match the final Store tree"):
+            proofmod.verify_existing_proof(
+                root,
+                trade_date="2026-09-05",
+                stage="open_30m",
+                data_plane_commit_sha=sha,
+            )
 
     def test_builder_has_no_network_or_provider_fetch_surface(self):
         text = (ROOT / "scripts/build_deterministic_metric_proof.py").read_text(encoding="utf-8")
@@ -190,16 +343,26 @@ class DeterministicMetricProofTest(unittest.TestCase):
         self.assertIn("missing", schema["required"])
         self.assertEqual(schema["properties"]["data_plane_commit_sha"]["pattern"], "^[0-9a-f]{40}$")
 
-    def test_contract_declares_single_pinned_store_tree_and_timestamp_alignment(self):
+    def test_contract_declares_final_tree_snapshot_and_canonical_series_closure(self):
         import yaml
 
         contract = yaml.safe_load((ROOT / "config/deterministic-metric-proof.yaml").read_text(encoding="utf-8"))
-        self.assertTrue(contract["source_identity"]["consumer_verification_must_use_one_exact_pinned_store_tree"])
-        self.assertTrue(contract["source_identity"]["source_blob_mismatch_or_tamper_is_integrity_failure_not_unavailable"])
+        source = contract["source_identity"]
+        self.assertTrue(source["consumer_verification_must_use_one_exact_pinned_store_tree"])
+        self.assertTrue(source["source_blob_mismatch_or_tamper_is_integrity_failure_not_unavailable"])
+        self.assertTrue(source["store_publication_must_be_exact_base_cas_bound"])
+        self.assertTrue(source["post_proof_remote_rebase_or_merge_forbidden"])
+        self.assertTrue(source["target_capture_must_be_exact_member_of_verified_snapshot_data_refs"])
+        self.assertTrue(source["target_observation_must_match_snapshot_wide_selected_observation"])
+        self.assertTrue(source["daily_series_integrity_must_reuse_canonical_store_reader"])
         self.assertTrue(contract["formulas"]["benchmark_target_event_time_must_equal_subject_target_event_time_for_intraday_rs"])
         self.assertEqual(
-            contract["source_identity"]["executable_reference_verifier"],
+            source["executable_reference_verifier"],
             "scripts/build_deterministic_metric_proof.py#verify_proof_source_blobs",
+        )
+        self.assertEqual(
+            source["final_tree_verifier"],
+            "scripts/build_deterministic_metric_proof.py#verify_existing_proof",
         )
 
 
