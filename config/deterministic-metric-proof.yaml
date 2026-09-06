@@ -40,11 +40,14 @@ formulas:
   target_close_must_not_be_appended_to_prior_ma: true
   relative_strength_formula: subject_horizon_return_pct - benchmark_horizon_return_pct
   benchmark_baseline_trade_date_alignment_required: true
+  benchmark_target_event_time_must_equal_subject_target_event_time_for_intraday_rs: true
 
 source_identity:
   proof_and_all_source_refs_must_resolve_under_one_consumer_market_data_read_sha: true
   proof_self_embedded_store_commit_sha_forbidden_due_self_reference: true
   consumer_market_data_read_sha_is_enclosing_store_commit_identity: true
+  consumer_verification_must_use_one_exact_pinned_store_tree: true
+  executable_reference_verifier: scripts/build_deterministic_metric_proof.py#verify_proof_source_blobs
   data_plane_commit_sha_is_part_of_immutable_proof_path: true
   proof_must_bind:
     - data_plane_commit_sha
@@ -58,6 +61,7 @@ source_identity:
     - target_event_time
     - target_last_sale
   mixed_store_blob_identity_forbidden: true
+  source_blob_mismatch_or_tamper_is_integrity_failure_not_unavailable: true
   post_proof_source_mutation_inside_same_store_commit_forbidden: true
 
 persistence:
@@ -78,6 +82,7 @@ execution:
   private_store_only: true
   failure_behavior: fail_data_plane_invocation_before_store_commit
   missing_subject_daily_series_behavior: record_explicit_missing_no_fabrication
+  malformed_or_identity_conflicting_daily_series_behavior: fail_integrity_not_missing
 
 consumer_contract:
   consumer_must_verify_proof_blob_at_frozen_market_data_read_sha: true
@@ -85,6 +90,7 @@ consumer_contract:
   consumer_must_verify_proof_data_plane_commit_sha_equals_market_data_contract_sha: true
   consumer_must_compare_materialized_metric_values_to_proof_results: true
   consumer_model_recalculation_is_not_proof: true
+  mixed_store_or_source_blob_identity_conflict_blocks_metric_bearing_canonical_publication: true
   missing_or_conflicting_proof_blocks_metric_bearing_canonical_publication: true
   consumer_may_treat_unavailable_metric_as_unavailable_only_when_proof_records_missing_or_null_by_formula_rules: true
 
