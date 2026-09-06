@@ -485,17 +485,27 @@ jobs:
               --stage "$proof_stage" \
               --data-plane-commit-sha "$MARKET_DATA_CONTRACT_SHA" \
               --verify-existing
-          fi
 
-          git fetch origin main
-          remote_main_sha="$(git rev-parse origin/main)"
-          if [[ "$remote_main_sha" != "$store_base_sha" ]]; then
-            echo "Store main advanced from $store_base_sha to $remote_main_sha after proof construction; refusing post-proof integration" >&2
+            git fetch origin main
+            remote_main_sha="$(git rev-parse origin/main)"
+            if [[ "$remote_main_sha" != "$store_base_sha" ]]; then
+              echo "Store main advanced from $store_base_sha to $remote_main_sha after proof construction; refusing post-proof integration" >&2
+              exit 1
+            fi
+            if git push origin HEAD:main; then
+              echo "{\"status\":\"store_persisted\",\"changed_paths\":$changed_count,\"store_commit_sha\":\"$(git rev-parse HEAD)\"}"
+              exit 0
+            fi
+            echo 'Store push rejected by exact-base CAS; refusing to rebase a proof-bearing commit' >&2
             exit 1
           fi
-          if git push origin HEAD:main; then
-            echo "{\"status\":\"store_persisted\",\"changed_paths\":$changed_count,\"store_commit_sha\":\"$(git rev-parse HEAD)\"}"
-            exit 0
-          fi
-          echo 'Store push rejected by exact-base CAS; refusing to rebase a proof-bearing commit' >&2
+
+          for attempt in 1 2 3; do
+            git pull --rebase origin main
+            if git push origin HEAD:main; then
+              echo "{\"status\":\"store_persisted\",\"changed_paths\":$changed_count,\"store_commit_sha\":\"$(git rev-parse HEAD)\"}"
+              exit 0
+            fi
+            sleep $((attempt * 2))
+          done
           exit 1
