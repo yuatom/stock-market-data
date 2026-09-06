@@ -38,7 +38,7 @@ def _bars(base: float, count: int = 60):
     ]
 
 
-def _seed(tmp_path: Path, *, spy_event_time: str | None = None):
+def _seed(tmp_path: Path, *, spy_event_time=None):
     root = tmp_path / "data" / "market-data"
     for symbol, base in (("AAA", 100.0), ("SPY", 400.0), ("QQQ", 500.0)):
         store.append_daily_bars(
