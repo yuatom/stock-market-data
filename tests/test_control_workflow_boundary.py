@@ -23,6 +23,22 @@ class ControlWorkflowBoundaryTest(unittest.TestCase):
         self.assertIn("control_ref must be an immutable commit SHA", text)
         self.assertNotIn("on:\n  push:", text)
 
+    def test_store_proof_publication_is_exact_base_cas_bound(self):
+        text = (ROOT / ".github/workflows/market-data-collector-runtime.yml").read_text(encoding="utf-8")
+        persist = text.split("- name: Persist private Store only", 1)[1]
+        self.assertNotIn("git pull --rebase", persist)
+        self.assertIn("store_base_sha=\"$(git rev-parse HEAD)\"", persist)
+        self.assertIn("git fetch origin main", persist)
+        self.assertIn("remote_main_sha=\"$(git rev-parse origin/main)\"", persist)
+        self.assertIn("--verify-existing", persist)
+        verify_pos = persist.index("--verify-existing")
+        fetch_pos = persist.index("git fetch origin main")
+        push_pos = persist.index("git push origin HEAD:main")
+        self.assertLess(verify_pos, fetch_pos)
+        self.assertLess(fetch_pos, push_pos)
+        self.assertIn("refusing post-proof integration", persist)
+        self.assertIn("refusing to rebase a proof-bearing commit", persist)
+
     def test_discovery_runtime_is_reusable_main_logic_only(self):
         text = (ROOT / ".github/workflows/dynamic-candidate-runtime.yml").read_text(encoding="utf-8")
         self.assertIn("workflow_call:", text)
