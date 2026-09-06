@@ -44,8 +44,12 @@ class PremarketReplayControlContractTest(unittest.TestCase):
         self.assertIn("python scripts/replay_premarket_probe.py", runtime)
         self.assertIn("--probe-path \"$PROBE_PATH\"", runtime)
         self.assertIn("python scripts/build_market_data_inventory.py", runtime)
-        self.assertIn("git pull --rebase origin main", runtime)
+        self.assertNotIn("git pull --rebase origin main", runtime)
+        self.assertIn("store_base_sha=\"$(git rev-parse HEAD)\"", runtime)
+        self.assertIn("git fetch origin main", runtime)
+        self.assertIn("remote_main_sha=\"$(git rev-parse origin/main)\"", runtime)
         self.assertIn("git push origin HEAD:main", runtime)
+        self.assertIn("refusing post-proof integration", runtime)
 
     def test_replay_does_not_require_twelve_data_secret(self):
         runtime = (ROOT / ".github/workflows/market-data-collector-runtime.yml").read_text(encoding="utf-8")
