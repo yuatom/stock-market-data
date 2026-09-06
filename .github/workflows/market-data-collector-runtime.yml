@@ -456,8 +456,13 @@ jobs:
         if: steps.invocation.outputs.mode != 'smoke_readonly'
         working-directory: store
         shell: bash
+        env:
+          MODE: ${{ steps.invocation.outputs.mode }}
+          TRADE_DATE: ${{ steps.invocation.outputs.trade_date }}
+          MARKET_DATA_CONTRACT_SHA: ${{ steps.invocation.outputs.market_data_contract_sha }}
         run: |
           set -euo pipefail
+          store_base_sha="$(git rev-parse HEAD)"
           git add -- data/market-data
           if git diff --cached --quiet; then
             echo '{"status":"no_store_change","changed_paths":0}'
@@ -466,7 +471,35 @@ jobs:
           changed_count="$(git diff --cached --name-only -- data/market-data | wc -l | tr -d ' ')"
           git config user.name 'stock-market-data-bot'
           git config user.email 'stock-market-data-bot@users.noreply.github.com'
-          git commit -m "data: collect ${{ steps.invocation.outputs.mode }} qualified market facts"
+          git commit -m "data: collect $MODE qualified market facts"
+
+          proof_stage=''
+          case "$MODE" in
+            open_30m|open_60m) proof_stage="$MODE" ;;
+            close|close_retry|close_final) proof_stage='close' ;;
+          esac
+          if [[ -n "$proof_stage" ]]; then
+            python ../compute/scripts/build_deterministic_metric_proof.py \
+              --store-root data/market-data \
+              --trade-date "$TRADE_DATE" \
+              --stage "$proof_stage" \
+              --data-plane-commit-sha "$MARKET_DATA_CONTRACT_SHA" \
+              --verify-existing
+
+            git fetch origin main
+            remote_main_sha="$(git rev-parse origin/main)"
+            if [[ "$remote_main_sha" != "$store_base_sha" ]]; then
+              echo "Store main advanced from $store_base_sha to $remote_main_sha after proof construction; refusing post-proof integration" >&2
+              exit 1
+            fi
+            if git push origin HEAD:main; then
+              echo "{\"status\":\"store_persisted\",\"changed_paths\":$changed_count,\"store_commit_sha\":\"$(git rev-parse HEAD)\"}"
+              exit 0
+            fi
+            echo 'Store push rejected by exact-base CAS; refusing to rebase a proof-bearing commit' >&2
+            exit 1
+          fi
+
           for attempt in 1 2 3; do
             git pull --rebase origin main
             if git push origin HEAD:main; then
