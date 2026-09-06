@@ -48,6 +48,15 @@ source_identity:
   consumer_market_data_read_sha_is_enclosing_store_commit_identity: true
   consumer_verification_must_use_one_exact_pinned_store_tree: true
   executable_reference_verifier: scripts/build_deterministic_metric_proof.py#verify_proof_source_blobs
+  final_tree_verifier: scripts/build_deterministic_metric_proof.py#verify_existing_proof
+  store_publication_must_be_exact_base_cas_bound: true
+  post_proof_remote_rebase_or_merge_forbidden: true
+  remote_advance_before_push_behavior: fail_closed_retry_from_fresh_invocation
+  verified_stage_snapshot_is_target_capture_authority: true
+  target_capture_must_be_exact_member_of_verified_snapshot_data_refs: true
+  target_observation_must_match_snapshot_wide_selected_observation: true
+  daily_series_integrity_must_reuse_canonical_store_reader: true
+  daily_series_integrity_fields_required: [series_id, start, end, count, byte_length, json_sha256, blob_sha, record_count, unique_ascending_trade_dates]
   data_plane_commit_sha_is_part_of_immutable_proof_path: true
   proof_must_bind:
     - data_plane_commit_sha
@@ -81,6 +90,7 @@ execution:
   public_compute_repo_payload_persistence_forbidden: true
   private_store_only: true
   failure_behavior: fail_data_plane_invocation_before_store_commit
+  final_store_push_must_not_integrate_remote_changes_after_proof_generation: true
   missing_subject_daily_series_behavior: record_explicit_missing_no_fabrication
   malformed_or_identity_conflicting_daily_series_behavior: fail_integrity_not_missing
 
@@ -97,6 +107,8 @@ consumer_contract:
 forbidden:
   - provider_fetch_from_proof_builder
   - mixed_store_sha_proof
+  - post_proof_remote_rebase_or_merge_before_store_push
+  - out_of_snapshot_target_capture
   - model_asserted_arithmetic_as_proof
   - research_or_strategy_inference
   - writing_stock_dairy_repository_state
