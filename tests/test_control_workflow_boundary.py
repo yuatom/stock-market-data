@@ -26,18 +26,31 @@ class ControlWorkflowBoundaryTest(unittest.TestCase):
     def test_store_proof_publication_is_exact_base_cas_bound(self):
         text = (ROOT / ".github/workflows/market-data-collector-runtime.yml").read_text(encoding="utf-8")
         persist = text.split("- name: Persist private Store only", 1)[1]
-        self.assertNotIn("git pull --rebase", persist)
+        proof_branch = persist.split('if [[ -n "$proof_stage" ]]; then', 1)[1].split(
+            "          fi\n\n          for attempt in 1 2 3; do", 1
+        )[0]
+        self.assertNotIn("git pull --rebase", proof_branch)
         self.assertIn("store_base_sha=\"$(git rev-parse HEAD)\"", persist)
-        self.assertIn("git fetch origin main", persist)
-        self.assertIn("remote_main_sha=\"$(git rev-parse origin/main)\"", persist)
-        self.assertIn("--verify-existing", persist)
-        verify_pos = persist.index("--verify-existing")
-        fetch_pos = persist.index("git fetch origin main")
-        push_pos = persist.index("git push origin HEAD:main")
+        self.assertIn("git fetch origin main", proof_branch)
+        self.assertIn("remote_main_sha=\"$(git rev-parse origin/main)\"", proof_branch)
+        self.assertIn("--verify-existing", proof_branch)
+        verify_pos = proof_branch.index("--verify-existing")
+        fetch_pos = proof_branch.index("git fetch origin main")
+        push_pos = proof_branch.index("git push origin HEAD:main")
         self.assertLess(verify_pos, fetch_pos)
         self.assertLess(fetch_pos, push_pos)
-        self.assertIn("refusing post-proof integration", persist)
-        self.assertIn("refusing to rebase a proof-bearing commit", persist)
+        self.assertIn("refusing post-proof integration", proof_branch)
+        self.assertIn("refusing to rebase a proof-bearing commit", proof_branch)
+
+    def test_non_proof_store_publication_preserves_base_retry_semantics(self):
+        text = (ROOT / ".github/workflows/market-data-collector-runtime.yml").read_text(encoding="utf-8")
+        persist = text.split("- name: Persist private Store only", 1)[1]
+        non_proof_branch = persist.split("          fi\n\n          for attempt in 1 2 3; do", 1)[1]
+        self.assertIn("git pull --rebase origin main", non_proof_branch)
+        self.assertIn("git push origin HEAD:main", non_proof_branch)
+        self.assertIn("sleep $((attempt * 2))", non_proof_branch)
+        self.assertNotIn("--verify-existing", non_proof_branch)
+        self.assertNotIn("remote_main_sha", non_proof_branch)
 
     def test_discovery_runtime_is_reusable_main_logic_only(self):
         text = (ROOT / ".github/workflows/dynamic-candidate-runtime.yml").read_text(encoding="utf-8")
