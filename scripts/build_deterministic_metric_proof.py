@@ -25,6 +25,10 @@ class MetricProofError(RuntimeError):
     pass
 
 
+class MetricProofUnavailable(RuntimeError):
+    """The required provider-affine series does not exist at all."""
+
+
 def canonical_bytes(value: Any) -> bytes:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
@@ -81,7 +85,10 @@ def _mean(values: Iterable[float]) -> float:
 
 def _load_daily_series(root: Path, symbol: str, target_trade_date: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     index_rel = f"series/daily/{PROVIDER}/{symbol.upper()}/_index.json"
-    index, index_blob = _read_json_exact(root, index_rel)
+    try:
+        index, index_blob = _read_json_exact(root, index_rel)
+    except FileNotFoundError as exc:
+        raise MetricProofUnavailable(f"provider-affine daily series unavailable: {symbol}") from exc
     if index.get("provider") != PROVIDER or index.get("symbol") != symbol.upper():
         raise MetricProofError(f"series affinity mismatch: {symbol}")
     records: list[dict[str, Any]] = []
@@ -89,7 +96,10 @@ def _load_daily_series(root: Path, symbol: str, target_trade_date: str) -> tuple
     series_dir = Path(index_rel).parent
     for meta in index.get("shards") or []:
         rel = str(series_dir / str(meta["path"]))
-        shard, blob = _read_json_exact(root, rel, str(meta["blob_sha"]))
+        try:
+            shard, blob = _read_json_exact(root, rel, str(meta["blob_sha"]))
+        except FileNotFoundError as exc:
+            raise MetricProofError(f"declared series shard missing: {rel}") from exc
         if shard.get("series_id") != index.get("series_id"):
             raise MetricProofError(f"series id mismatch: {rel}")
         rows = shard.get("records") or []
@@ -239,6 +249,80 @@ def _target_observations(root: Path, snapshot: Mapping[str, Any]) -> dict[str, d
     return targets
 
 
+def verify_proof_source_blobs(root: Path, proof: Mapping[str, Any]) -> None:
+    """Re-verify every proof source against one caller-pinned Store tree.
+
+    The enclosing Store commit SHA cannot be embedded inside a file that is part
+    of that same commit without creating a self-reference. The caller therefore
+    pins one Store tree/read SHA, materializes that exact tree at ``root``, and
+    this verifier rejects any proof whose declared source identities do not
+    resolve exactly inside that one tree.
+    """
+    trade_date = str(proof.get("trade_date") or "")
+    stage = str(proof.get("stage") or "")
+    snapshot_ref = proof.get("snapshot") or {}
+    snapshot_rel = str(snapshot_ref.get("path") or "")
+    snapshot_blob = str(snapshot_ref.get("blob_sha") or "")
+    if not snapshot_rel or not HEX40.fullmatch(snapshot_blob):
+        raise MetricProofError("proof snapshot identity is incomplete")
+    snapshot, _ = _read_json_exact(root, snapshot_rel, snapshot_blob)
+    if snapshot.get("trade_date") != trade_date or snapshot.get("stage") != stage:
+        raise MetricProofError("proof snapshot identity mismatch")
+    if str(snapshot.get("snapshot_id") or "") != str(snapshot_ref.get("snapshot_id") or ""):
+        raise MetricProofError("proof snapshot id mismatch")
+
+    for subject in proof.get("subjects") or []:
+        if not isinstance(subject, Mapping):
+            raise MetricProofError("proof subject must be an object")
+        symbol = str(subject.get("symbol") or "").upper()
+        target = subject.get("target") or {}
+        capture_rel = str(target.get("capture_path") or "")
+        capture_blob = str(target.get("capture_blob_sha") or "")
+        event_time = str(target.get("event_time") or "")
+        last_sale = _number(target.get("last_sale"), f"proof target last_sale[{symbol}]")
+        if not symbol or not capture_rel or not HEX40.fullmatch(capture_blob) or not event_time:
+            raise MetricProofError(f"proof target identity is incomplete: {symbol}")
+        capture, _ = _read_json_exact(root, capture_rel, capture_blob)
+        matches = [
+            fact
+            for fact in (capture.get("qualified_facts") or [])
+            if isinstance(fact, Mapping)
+            and str(fact.get("symbol") or "").upper() == symbol
+            and str(fact.get("event_time") or fact.get("source_timestamp") or "") == event_time
+            and _number(fact.get("last_sale"), f"capture last_sale[{symbol}]") == last_sale
+        ]
+        if len(matches) != 1:
+            raise MetricProofError(f"proof target does not resolve uniquely in capture: {symbol}")
+
+        daily = subject.get("daily_series") or {}
+        index_rel = str(daily.get("index_path") or "")
+        index_blob = str(daily.get("index_blob_sha") or "")
+        if not index_rel or not HEX40.fullmatch(index_blob):
+            raise MetricProofError(f"proof daily-series index identity is incomplete: {symbol}")
+        index, _ = _read_json_exact(root, index_rel, index_blob)
+        if index.get("provider") != PROVIDER or str(index.get("symbol") or "").upper() != symbol:
+            raise MetricProofError(f"proof daily-series affinity mismatch: {symbol}")
+        declared_shards = daily.get("shards") or []
+        if not isinstance(declared_shards, list):
+            raise MetricProofError(f"proof shard list is invalid: {symbol}")
+        expected_shards: list[dict[str, str]] = []
+        series_dir = Path(index_rel).parent
+        for meta in index.get("shards") or []:
+            rel = str(series_dir / str(meta.get("path") or ""))
+            blob = str(meta.get("blob_sha") or "")
+            if not rel or not HEX40.fullmatch(blob):
+                raise MetricProofError(f"series index shard identity is incomplete: {symbol}")
+            _read_json_exact(root, rel, blob)
+            expected_shards.append({"path": rel, "blob_sha": blob})
+        normalized_declared = [
+            {"path": str(item.get("path") or ""), "blob_sha": str(item.get("blob_sha") or "")}
+            for item in declared_shards
+            if isinstance(item, Mapping)
+        ]
+        if normalized_declared != expected_shards:
+            raise MetricProofError(f"proof shard identity set mismatch: {symbol}")
+
+
 def build_proof(root: Path, *, trade_date: str, stage: str, data_plane_commit_sha: str) -> tuple[dict[str, Any], str]:
     if stage not in {"open_30m", "open_60m", "close"}:
         raise MetricProofError(f"unsupported metric-proof stage: {stage}")
@@ -250,7 +334,7 @@ def build_proof(root: Path, *, trade_date: str, stage: str, data_plane_commit_sh
     for symbol in sorted(set(targets) | {"SPY", "QQQ"}):
         try:
             daily_cache[symbol] = _load_daily_series(root, symbol, trade_date)
-        except (FileNotFoundError, MetricProofError):
+        except MetricProofUnavailable:
             continue
 
     subjects: list[dict[str, Any]] = []
@@ -267,6 +351,9 @@ def build_proof(root: Path, *, trade_date: str, stage: str, data_plane_commit_sh
             benchmark_target = targets.get(benchmark)
             benchmark_daily = daily_cache.get(benchmark)
             if benchmark_target is None or benchmark_daily is None:
+                benchmark_metrics[benchmark] = None
+                continue
+            if benchmark_target["event_time"] != target["event_time"]:
                 benchmark_metrics[benchmark] = None
                 continue
             benchmark_prior, _ = benchmark_daily
@@ -301,6 +388,7 @@ def build_proof(root: Path, *, trade_date: str, stage: str, data_plane_commit_sh
         "subjects": subjects,
         "missing": missing,
     }
+    verify_proof_source_blobs(root, proof)
     rel = (
         f"proofs/deterministic-metrics/{trade_date[:7]}/{trade_date}/{stage}/"
         f"{data_plane_commit_sha}/{snapshot['snapshot_id']}.json"
