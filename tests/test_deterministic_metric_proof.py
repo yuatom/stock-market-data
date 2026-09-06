@@ -1,5 +1,7 @@
 import importlib.util
 import json
+import shutil
+import sys
 import tempfile
 import unittest
 from datetime import date, timedelta
@@ -12,6 +14,7 @@ def _load(name, rel):
     spec = importlib.util.spec_from_file_location(name, ROOT / rel)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -35,7 +38,7 @@ def _bars(base: float, count: int = 60):
     ]
 
 
-def _seed(tmp_path: Path):
+def _seed(tmp_path: Path, *, spy_event_time: str | None = None):
     root = tmp_path / "data" / "market-data"
     for symbol, base in (("AAA", 100.0), ("SPY", 400.0), ("QQQ", 500.0)):
         store.append_daily_bars(
@@ -50,13 +53,14 @@ def _seed(tmp_path: Path):
     generated = "2026-09-05T10:00:00-04:00"
     facts = []
     for symbol, price in (("AAA", 170.0), ("SPY", 470.0), ("QQQ", 580.0)):
+        event_time = spy_event_time if symbol == "SPY" and spy_event_time else generated
         facts.append(
             {
                 "symbol": symbol,
                 "asset_class": "stocks" if symbol == "AAA" else "etf",
                 "session": "regular",
-                "event_time": generated,
-                "source_timestamp": generated,
+                "event_time": event_time,
+                "source_timestamp": event_time,
                 "last_sale": price,
                 "reported_volume": 12345.0,
             }
@@ -116,6 +120,7 @@ class DeterministicMetricProofTest(unittest.TestCase):
         self.assertTrue(aaa["daily_series"]["shards"])
         self.assertEqual(len(aaa["target"]["capture_blob_sha"]), 40)
         self.assertEqual(proof["missing"], [])
+        proofmod.verify_proof_source_blobs(root, proof)
 
     def test_proof_rejects_tampered_snapshot_capture_blob(self):
         root, capture_path = _seed(self.tmp_path)
@@ -123,6 +128,17 @@ class DeterministicMetricProofTest(unittest.TestCase):
         value = json.loads(path.read_text(encoding="utf-8"))
         value["qualified_facts"][0]["last_sale"] = 999.0
         path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+        with self.assertRaisesRegex(proofmod.MetricProofError, "blob mismatch"):
+            proofmod.build_proof(root, trade_date="2026-09-05", stage="open_30m", data_plane_commit_sha="a" * 40)
+
+    def test_proof_rejects_tampered_declared_daily_series_shard(self):
+        root, _ = _seed(self.tmp_path)
+        index_path = root / "series" / "daily" / "twelve_data_basic" / "AAA" / "_index.json"
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+        shard_path = index_path.parent / index["shards"][0]["path"]
+        value = json.loads(shard_path.read_text(encoding="utf-8"))
+        value["records"][0]["close"] = 9999.0
+        shard_path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
         with self.assertRaisesRegex(proofmod.MetricProofError, "blob mismatch"):
             proofmod.build_proof(root, trade_date="2026-09-05", stage="open_30m", data_plane_commit_sha="a" * 40)
 
@@ -136,6 +152,32 @@ class DeterministicMetricProofTest(unittest.TestCase):
         self.assertEqual({item["symbol"] for item in proof["subjects"]}, {"QQQ", "SPY"})
         self.assertEqual({item["symbol"] for item in proof["missing"]}, {"AAA"})
 
+    def test_intraday_relative_strength_requires_exact_target_timestamp_alignment(self):
+        root, _ = _seed(self.tmp_path, spy_event_time="2026-09-05T09:59:00-04:00")
+        proof, _ = proofmod.build_proof(root, trade_date="2026-09-05", stage="open_30m", data_plane_commit_sha="c" * 40)
+        aaa = next(item for item in proof["subjects"] if item["symbol"] == "AAA")
+        self.assertIsNone(aaa["benchmark_metrics"]["SPY"])
+        self.assertEqual(aaa["benchmark_metrics"]["QQQ"]["status"], "available")
+
+    def test_reference_verifier_rejects_sources_from_a_different_store_tree(self):
+        source_root, _ = _seed(self.tmp_path / "source")
+        proof, _ = proofmod.build_proof(
+            source_root,
+            trade_date="2026-09-05",
+            stage="open_30m",
+            data_plane_commit_sha="d" * 40,
+        )
+        other_root = self.tmp_path / "other" / "data" / "market-data"
+        shutil.copytree(source_root, other_root)
+        index_path = other_root / "series" / "daily" / "twelve_data_basic" / "AAA" / "_index.json"
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+        shard_path = index_path.parent / index["shards"][0]["path"]
+        value = json.loads(shard_path.read_text(encoding="utf-8"))
+        value["records"][0]["close"] = 1234.0
+        shard_path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+        with self.assertRaisesRegex(proofmod.MetricProofError, "blob mismatch"):
+            proofmod.verify_proof_source_blobs(other_root, proof)
+
     def test_builder_has_no_network_or_provider_fetch_surface(self):
         text = (ROOT / "scripts/build_deterministic_metric_proof.py").read_text(encoding="utf-8")
         for forbidden in ("urllib", "requests.", "TWELVE_DATA_API_KEY", "urlopen", "fetch_"):
@@ -147,6 +189,18 @@ class DeterministicMetricProofTest(unittest.TestCase):
         self.assertIn("subjects", schema["required"])
         self.assertIn("missing", schema["required"])
         self.assertEqual(schema["properties"]["data_plane_commit_sha"]["pattern"], "^[0-9a-f]{40}$")
+
+    def test_contract_declares_single_pinned_store_tree_and_timestamp_alignment(self):
+        import yaml
+
+        contract = yaml.safe_load((ROOT / "config/deterministic-metric-proof.yaml").read_text(encoding="utf-8"))
+        self.assertTrue(contract["source_identity"]["consumer_verification_must_use_one_exact_pinned_store_tree"])
+        self.assertTrue(contract["source_identity"]["source_blob_mismatch_or_tamper_is_integrity_failure_not_unavailable"])
+        self.assertTrue(contract["formulas"]["benchmark_target_event_time_must_equal_subject_target_event_time_for_intraday_rs"])
+        self.assertEqual(
+            contract["source_identity"]["executable_reference_verifier"],
+            "scripts/build_deterministic_metric_proof.py#verify_proof_source_blobs",
+        )
 
 
 if __name__ == "__main__":
