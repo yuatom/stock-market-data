@@ -2,8 +2,9 @@
 """Collect request-scoped market facts for dynamic research objects.
 
 Dynamic membership is bounded to one immutable request and is never a research
-priority or opportunity-qualification authority. Open15/Open60 are supported
-only for inherited due-entity validation; they do not authorize a new radar scan.
+priority or opportunity-qualification authority. Personal-membership requests
+are a distinct data-acquisition purpose and never mutate durable membership or
+the fixed collection universe. Open15/Open60 still forbid new radar discovery.
 """
 from __future__ import annotations
 
@@ -29,7 +30,7 @@ class DynamicCandidateCollectionError(RuntimeError):
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 SYMBOL = re.compile(r"^[A-Z][A-Z0-9.-]{0,9}$")
 ALLOWED_STAGES = {"open_15m", "open_30m", "open_60m", "close"}
-ALLOWED_PURPOSES = {"carryover_validation", "opportunity_discovery"}
+ALLOWED_PURPOSES = {"carryover_validation", "opportunity_discovery", "personal_membership"}
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -64,8 +65,8 @@ def _load_request(path: Path, *, expected_contract_sha: str | None = None) -> di
         raise DynamicCandidateCollectionError("stage must be open_15m, open_30m, open_60m or close")
     if purpose not in ALLOWED_PURPOSES:
         raise DynamicCandidateCollectionError("invalid request_purpose")
-    if stage in {"open_15m", "open_60m"} and purpose != "carryover_validation":
-        raise DynamicCandidateCollectionError(f"{stage} dynamic collection is carryover_validation only")
+    if stage in {"open_15m", "open_60m"} and purpose not in {"carryover_validation", "personal_membership"}:
+        raise DynamicCandidateCollectionError(f"{stage} dynamic collection forbids new opportunity discovery")
     for field in ("research_repository_commit_sha", "market_data_contract_sha"):
         if not HEX40.fullmatch(str(value.get(field) or "")):
             raise DynamicCandidateCollectionError(f"{field} must be a 40-char SHA")
@@ -162,6 +163,8 @@ def collect_request(*, request: dict[str, Any], store_root: Path, store_config_p
             "daily_history_available": sorted(daily_available),
             "daily_history_failures": daily_failures,
             "snapshot_stage": f"discovery_{stage}",
+            "persistent_collection_membership": False,
+            "opportunity_discovery_authority": request["request_purpose"] == "opportunity_discovery",
         }
     )
     state = store_root / "collector-state" / trade_date[:7] / f"{trade_date}-dynamic-candidate-{stage}.json"
