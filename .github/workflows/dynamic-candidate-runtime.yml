@@ -90,10 +90,10 @@ jobs:
           purpose = request.get('request_purpose')
           if stage not in {'open_15m','open_30m','open_60m','close'}:
               raise SystemExit('stage must be open_15m, open_30m, open_60m or close')
-          if purpose not in {'carryover_validation','opportunity_discovery'}:
+          if purpose not in {'carryover_validation','opportunity_discovery','personal_membership'}:
               raise SystemExit('invalid request_purpose')
-          if stage in {'open_15m','open_60m'} and purpose != 'carryover_validation':
-              raise SystemExit(f'{stage} dynamic collection is carryover_validation only')
+          if stage in {'open_15m','open_60m'} and purpose not in {'carryover_validation','personal_membership'}:
+              raise SystemExit(f'{stage} dynamic collection forbids new opportunity discovery')
           symbols = request.get('candidate_symbols')
           if not isinstance(symbols, list) or not (1 <= len(symbols) <= 8):
               raise SystemExit('candidate_symbols must contain 1-8 symbols')
