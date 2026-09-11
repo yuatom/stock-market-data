@@ -23,8 +23,8 @@
           "type": "object",
           "additionalProperties": {"type": "integer", "minimum": 0}
         },
-        "increment": {"$ref": "#/$defs/coverage_scope"},
-        "stage_snapshot": {"$ref": "#/$defs/coverage_scope"},
+        "increment": {"$ref": "#/$defs/increment_coverage"},
+        "stage_snapshot": {"$ref": "#/$defs/stage_snapshot_coverage"},
         "readiness": {"$ref": "#/$defs/readiness"}
       },
       "additionalProperties": true
@@ -46,11 +46,27 @@
     "missing": {"type": "array"}
   },
   "$defs": {
-    "coverage_scope": {
+    "increment_coverage": {
       "type": "object",
       "required": ["symbols_requested", "symbols_available", "symbols_missing", "missing_symbols", "complete"],
       "properties": {
         "symbols_requested": {"type": "integer", "minimum": 0},
+        "symbols_available": {"type": "integer", "minimum": 0},
+        "symbols_missing": {"type": "integer", "minimum": 0},
+        "missing_symbols": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        },
+        "complete": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "stage_snapshot_coverage": {
+      "type": "object",
+      "required": ["symbols_required", "symbols_available", "symbols_missing", "missing_symbols", "complete"],
+      "properties": {
+        "symbols_required": {"type": "integer", "minimum": 0},
         "symbols_available": {"type": "integer", "minimum": 0},
         "symbols_missing": {"type": "integer", "minimum": 0},
         "missing_symbols": {
