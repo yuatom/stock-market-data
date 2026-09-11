@@ -270,6 +270,65 @@ def _decorate_context_facts(universe: Mapping[str, Any], facts: Sequence[Mapping
     return [collection.decorate_fact(universe, fact) for fact in facts]
 
 
+def _readiness_observability(
+    *,
+    trade_date: str,
+    end_et: str,
+    collection_started_at: str,
+    collection_completed_at: str,
+) -> dict[str, Any]:
+    _, target_end = _window_bounds(trade_date, end_et, end_et)
+    started = datetime.fromisoformat(collection_started_at)
+    completed = datetime.fromisoformat(collection_completed_at)
+    return {
+        "semantics": "collector_observed_after_prewarm_not_github_queue_or_remote_store_commit_ready",
+        "target_window_end": target_end.isoformat(),
+        "collection_started_at": collection_started_at,
+        "collection_completed_at": collection_completed_at,
+        "collection_started_after_target_seconds": round((started - target_end).total_seconds(), 3),
+        "collection_completed_after_target_seconds": round((completed - target_end).total_seconds(), 3),
+    }
+
+
+def _coverage_observability(
+    *,
+    full_universe: Sequence[tuple[str, str]],
+    increment_universe: Sequence[tuple[str, str]],
+    capture_refs: Sequence[Mapping[str, Any]],
+    missing: Sequence[str],
+    snapshot_missing: Sequence[str],
+    prior_refs: Sequence[Mapping[str, Any]],
+    provider_counts: Mapping[str, int],
+    readiness: Mapping[str, Any],
+) -> dict[str, Any]:
+    increment_missing = sorted(set(str(symbol) for symbol in missing))
+    cumulative_missing = sorted(set(str(symbol) for symbol in snapshot_missing))
+    required_count = len(full_universe)
+    return {
+        "symbols_requested_in_increment": len(increment_universe),
+        "symbols_available_in_increment": len(capture_refs),
+        "symbols_missing_in_increment": len(increment_missing),
+        "inherited_ref_count": len(prior_refs),
+        "total_ref_count": len(prior_refs) + len(capture_refs),
+        "provider_counts": dict(provider_counts),
+        "increment": {
+            "symbols_requested": len(increment_universe),
+            "symbols_available": len(capture_refs),
+            "symbols_missing": len(increment_missing),
+            "missing_symbols": increment_missing,
+            "complete": len(increment_missing) == 0,
+        },
+        "stage_snapshot": {
+            "symbols_required": required_count,
+            "symbols_available": max(0, required_count - len(cumulative_missing)),
+            "symbols_missing": len(cumulative_missing),
+            "missing_symbols": cumulative_missing,
+            "complete": len(cumulative_missing) == 0,
+        },
+        "readiness": dict(readiness),
+    }
+
+
 def collect_regular_window(
     *,
     mode: str,
@@ -295,7 +354,8 @@ def collect_regular_window(
             raise RuntimeError(f"symbols_override outside eligible collection universe: {unknown}")
         universe = [(symbol, by_symbol[symbol]) for symbol in requested]
 
-    generated = datetime.now(ET).isoformat()
+    collection_started_at = datetime.now(ET).isoformat()
+    generated = collection_started_at
     facts_by_symbol: dict[str, tuple[str, list[dict[str, Any]]]] = {}
     diagnostics: dict[str, list[dict[str, Any]]] = {}
     failures: dict[str, list[str]] = {}
@@ -417,6 +477,24 @@ def collect_regular_window(
     if stage_name == "close" and mode in ("close", "close_retry", "close_final"):
         _write_close_state(store_root, trade_date, mode, snapshot_missing)
 
+    collection_completed_at = datetime.now(ET).isoformat()
+    readiness = _readiness_observability(
+        trade_date=trade_date,
+        end_et=end_et,
+        collection_started_at=collection_started_at,
+        collection_completed_at=collection_completed_at,
+    )
+    coverage = _coverage_observability(
+        full_universe=full_universe,
+        increment_universe=universe,
+        capture_refs=capture_refs,
+        missing=missing,
+        snapshot_missing=snapshot_missing,
+        prior_refs=prior_refs,
+        provider_counts=provider_counts,
+        readiness=readiness,
+    )
+
     if not capture_refs:
         return {
             "mode": mode,
@@ -428,6 +506,8 @@ def collect_regular_window(
             "provider_counts": provider_counts,
             "failures": failures,
             "diagnostics": diagnostics,
+            "coverage": coverage,
+            "collection_timing": readiness,
             "snapshot_written": False,
         }
 
@@ -441,14 +521,7 @@ def collect_regular_window(
         snapshot_id=sid,
         generated_at=generated,
         data_refs=all_refs,
-        coverage={
-            "symbols_requested_in_increment": len(universe),
-            "symbols_available_in_increment": len(capture_refs),
-            "symbols_missing_in_increment": len(missing),
-            "inherited_ref_count": len(prior_refs),
-            "total_ref_count": len(all_refs),
-            "provider_counts": provider_counts,
-        },
+        coverage=coverage,
         missing=snapshot_missing,
         target_window={"start": target_start, "end": end_et},
         actual_data_cutoff=_actual_cutoff(store_root, all_refs),
@@ -464,6 +537,8 @@ def collect_regular_window(
         "provider_counts": provider_counts,
         "failures": failures,
         "diagnostics": diagnostics,
+        "coverage": coverage,
+        "collection_timing": readiness,
         "refs": len(all_refs),
         "snapshot_written": True,
         "context_categories_requested": sorted(
