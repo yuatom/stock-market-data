@@ -347,7 +347,7 @@ def _reason_from_diagnostic(diag: Mapping[str, Any]) -> str | None:
         return "outside_window"
     if diag.get("raw_row_count", 0) == 0 or diag.get("timestamp_parseable_count", 0) == 0:
         return "no_rows"
-    return "outside_window"
+    return "stale_rows"
 
 
 def _scope_coverage(
@@ -730,8 +730,28 @@ def collect_regular_window(
         if stage_name in ("open_30m", "open_60m") and not prior_refs and not prior_missing:
             prior_missing = [symbol for symbol, _asset in full_universe]
 
+    increment_facts = {
+        symbol: facts for symbol, (_provider, facts) in facts_by_symbol.items()
+    }
+    prior_facts = _capture_facts(store_root, prior_refs) if prior_refs else {}
+    stage_facts = dict(prior_facts)
+    for symbol, facts in increment_facts.items():
+        stage_facts.setdefault(symbol, []).extend(facts)
+
     if stage_name in ("open_30m", "open_60m"):
-        snapshot_missing = sorted(set(prior_missing) | set(missing))
+        requested_stage_symbols = {symbol for symbol, _asset in full_universe}
+        prior_missing_set = {str(symbol).upper() for symbol in prior_missing}
+        if not prior_missing_set <= requested_stage_symbols:
+            raise CoverageContractError("prior snapshot missing symbols must be requested symbols")
+        prior_qualified_symbols = {
+            symbol for symbol in requested_stage_symbols if prior_facts.get(symbol)
+        }
+        if prior_missing_set & prior_qualified_symbols:
+            raise CoverageContractError("prior snapshot cannot mark a qualified symbol missing")
+        stage_qualified_symbols = {
+            symbol for symbol in requested_stage_symbols if stage_facts.get(symbol)
+        }
+        snapshot_missing = sorted(requested_stage_symbols - stage_qualified_symbols)
     elif stage_name == "close" and mode in ("close_retry", "close_final", HISTORICAL_CONTEXT_REPAIR):
         snapshot_missing = sorted((set(prior_missing) - successful) | set(missing))
     else:
@@ -744,13 +764,6 @@ def collect_regular_window(
     target_start = "09:30" if stage_name.startswith("open_") else start_et
     increment_window = {"start": start_et, "end": end_et}
     stage_window = {"start": target_start, "end": end_et}
-    increment_facts = {
-        symbol: facts for symbol, (_provider, facts) in facts_by_symbol.items()
-    }
-    prior_facts = _capture_facts(store_root, prior_refs) if prior_refs else {}
-    stage_facts = dict(prior_facts)
-    for symbol, facts in increment_facts.items():
-        stage_facts.setdefault(symbol, []).extend(facts)
     readiness = _readiness_observability(
         trade_date=trade_date,
         end_et=end_et,
