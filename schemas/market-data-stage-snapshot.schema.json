@@ -23,6 +23,7 @@
           "type": "object",
           "additionalProperties": {"type": "integer", "minimum": 0}
         },
+        "reason_classes": {"$ref": "#/$defs/reason_classes"},
         "increment": {"$ref": "#/$defs/increment_coverage"},
         "stage_snapshot": {"$ref": "#/$defs/stage_snapshot_coverage"},
         "readiness": {"$ref": "#/$defs/readiness"}
@@ -48,8 +49,25 @@
   "$defs": {
     "increment_coverage": {
       "type": "object",
-      "required": ["symbols_requested", "symbols_available", "symbols_missing", "missing_symbols", "complete"],
+      "required": [
+        "requested_symbol_count",
+        "capture_object_count",
+        "qualified_symbol_count",
+        "full_window_symbol_count",
+        "terminal_observation_symbol_count",
+        "missing_symbols",
+        "partial_symbols",
+        "symbols_requested",
+        "symbols_available",
+        "symbols_missing",
+        "complete"
+      ],
       "properties": {
+        "requested_symbol_count": {"type": "integer", "minimum": 0},
+        "capture_object_count": {"type": "integer", "minimum": 0},
+        "qualified_symbol_count": {"type": "integer", "minimum": 0},
+        "full_window_symbol_count": {"type": "integer", "minimum": 0},
+        "terminal_observation_symbol_count": {"type": "integer", "minimum": 0},
         "symbols_requested": {"type": "integer", "minimum": 0},
         "symbols_available": {"type": "integer", "minimum": 0},
         "symbols_missing": {"type": "integer", "minimum": 0},
@@ -58,14 +76,38 @@
           "items": {"type": "string", "minLength": 1},
           "uniqueItems": true
         },
+        "partial_symbols": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        },
+        "reason_classes": {"$ref": "#/$defs/reason_classes"},
         "complete": {"type": "boolean"}
       },
       "additionalProperties": false
     },
     "stage_snapshot_coverage": {
       "type": "object",
-      "required": ["symbols_required", "symbols_available", "symbols_missing", "missing_symbols", "complete"],
+      "required": [
+        "requested_symbol_count",
+        "capture_object_count",
+        "qualified_symbol_count",
+        "full_window_symbol_count",
+        "terminal_observation_symbol_count",
+        "missing_symbols",
+        "partial_symbols",
+        "symbols_required",
+        "symbols_available",
+        "symbols_missing",
+        "complete"
+      ],
       "properties": {
+        "requested_symbol_count": {"type": "integer", "minimum": 0},
+        "capture_object_count": {"type": "integer", "minimum": 0},
+        "qualified_symbol_count": {"type": "integer", "minimum": 0},
+        "full_window_symbol_count": {"type": "integer", "minimum": 0},
+        "terminal_observation_symbol_count": {"type": "integer", "minimum": 0},
+        "symbols_requested": {"type": "integer", "minimum": 0},
         "symbols_required": {"type": "integer", "minimum": 0},
         "symbols_available": {"type": "integer", "minimum": 0},
         "symbols_missing": {"type": "integer", "minimum": 0},
@@ -74,6 +116,12 @@
           "items": {"type": "string", "minLength": 1},
           "uniqueItems": true
         },
+        "partial_symbols": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        },
+        "reason_classes": {"$ref": "#/$defs/reason_classes"},
         "complete": {"type": "boolean"}
       },
       "additionalProperties": false
@@ -86,7 +134,10 @@
         "collection_started_at",
         "collection_completed_at",
         "collection_started_after_target_seconds",
-        "collection_completed_after_target_seconds"
+        "collection_completed_after_target_seconds",
+        "snapshot_generated_at",
+        "snapshot_ready_at",
+        "window_end_to_snapshot_ready_seconds"
       ],
       "properties": {
         "semantics": {
@@ -96,9 +147,31 @@
         "collection_started_at": {"type": "string", "format": "date-time"},
         "collection_completed_at": {"type": "string", "format": "date-time"},
         "collection_started_after_target_seconds": {"type": "number"},
-        "collection_completed_after_target_seconds": {"type": "number"}
+        "collection_completed_after_target_seconds": {"type": "number"},
+        "snapshot_generated_at": {"type": ["string", "null"], "format": "date-time"},
+        "snapshot_ready_at": {"type": ["string", "null"], "format": "date-time"},
+        "window_end_to_snapshot_ready_seconds": {"type": ["number", "null"]}
       },
       "additionalProperties": false
+    },
+    "reason_classes": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "enum": [
+            "success",
+            "no_rows",
+            "stale_rows",
+            "outside_window",
+            "rate_limited",
+            "transport_error",
+            "qualification_rejected",
+            "budget_exhausted"
+          ]
+        },
+        "uniqueItems": true
+      }
     }
   },
   "additionalProperties": true
