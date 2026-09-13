@@ -30,6 +30,18 @@ class RegularSessionReadinessObservabilityTest(unittest.TestCase):
             "reported_volume": 1.0,
         }
 
+    @staticmethod
+    def _fact_at(symbol: str, hour: str, minute: str, *, second: int = 0) -> dict[str, object]:
+        return {
+            "symbol": symbol,
+            "asset_class": "stocks",
+            "session": "regular",
+            "event_time": f"2026-09-10T{hour}:{minute}:{second:02d}-04:00",
+            "source_timestamp": f"2026-09-10T{hour}:{minute}:{second:02d}-04:00",
+            "last_sale": 100.0,
+            "reported_volume": 1.0,
+        }
+
     def _run_real_collection(self, facts: list[dict[str, object]]) -> tuple[dict[str, object], dict[str, object]]:
         access = {"nasdaq_public_intraday": {"max_workers": 1}}
         universe = {"daily_series": [], "context_proxies": {}}
@@ -120,6 +132,7 @@ class RegularSessionReadinessObservabilityTest(unittest.TestCase):
             "BBB": "no_rows",
             "CCC": "outside_window",
             "DDD": "transport_error",
+            "EEE": "stale_rows",
         }
 
         def fake_nasdaq(symbol, *_args, **_kwargs):
@@ -129,6 +142,8 @@ class RegularSessionReadinessObservabilityTest(unittest.TestCase):
                 return [], {"provider": collection.NASDAQ, "raw_row_count": 0, "timestamp_parseable_count": 0, "trade_date_match_count": 0, "window_row_count": 0, "target_window_match_count": 0}
             if symbol == "CCC":
                 return [], {"provider": collection.NASDAQ, "raw_row_count": 3, "timestamp_parseable_count": 3, "trade_date_match_count": 3, "window_row_count": 0, "target_window_match_count": 0}
+            if symbol == "EEE":
+                return [], {"provider": collection.NASDAQ, "raw_row_count": 3, "timestamp_parseable_count": 3, "trade_date_match_count": 0, "window_row_count": 0, "target_window_match_count": 0}
             raise RuntimeError("connection refused")
 
         def fake_twelve(symbol, *_args, **_kwargs):
@@ -169,6 +184,18 @@ class RegularSessionReadinessObservabilityTest(unittest.TestCase):
             ),
             "qualification_rejected",
         )
+        self.assertEqual(
+            collection._reason_from_diagnostic(
+                {"raw_row_count": 2, "timestamp_parseable_count": 2, "trade_date_match_count": 2, "window_row_count": 0, "target_window_match_count": 0}
+            ),
+            "outside_window",
+        )
+        self.assertEqual(
+            collection._reason_from_diagnostic(
+                {"raw_row_count": 2, "timestamp_parseable_count": 2, "trade_date_match_count": 0, "window_row_count": 0, "target_window_match_count": 0}
+            ),
+            "stale_rows",
+        )
         self.assertEqual(collection._reason_from_exception(RuntimeError("HTTP 429")), "rate_limited")
         self.assertEqual(collection._reason_from_exception(RuntimeError("credit budget exhausted")), "budget_exhausted")
 
@@ -189,6 +216,90 @@ class RegularSessionReadinessObservabilityTest(unittest.TestCase):
         self.assertIn("not_github_queue_or_remote_store_commit_ready", timing["semantics"])
         self.assertNotIn("remote_store_commit_ready", timing)
         self.assertNotIn("github_queue_ready", timing)
+
+    def test_prior_gap_repaired_by_current_increment_becomes_cumulative_partial(self) -> None:
+        access = {"nasdaq_public_intraday": {"max_workers": 1}}
+        universe = {"daily_series": [], "context_proxies": {}}
+        eligible = [("AAA", "stocks"), ("BBB", "stocks")]
+        prior_aaa = [self._fact_at("AAA", "09", f"{minute:02d}") for minute in range(30, 45)]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prior_path, prior_blob = collection.write_capture(
+                root,
+                trade_date="2026-09-10",
+                session="regular",
+                provider=collection.NASDAQ,
+                capture_id="open_15m-aaa-prior",
+                generated_at="2026-09-10T09:45:05-04:00",
+                actual_data_cutoff="2026-09-10T09:44:00-04:00",
+                window={"start": "09:30", "end": "09:45"},
+                feed_scope="nasdaq_public_chart_last_sale_volume_v1",
+                qualified_facts=prior_aaa,
+                missing_symbols=[],
+            )
+            prior_ref = {
+                "path": prior_path,
+                "blob_sha": prior_blob,
+                "kind": "regular_intraday_capture",
+                "window": "09:30-09:45",
+                "provider": collection.NASDAQ,
+                "symbol": "AAA",
+                "reason_class": "success",
+            }
+            collection.write_snapshot(
+                root,
+                stage="open_15m",
+                trade_date="2026-09-10",
+                snapshot_id="open_15m-prior-gap",
+                generated_at="2026-09-10T09:45:30-04:00",
+                data_refs=[prior_ref],
+                coverage={},
+                missing=["BBB"],
+                target_window={"start": "09:30", "end": "09:45"},
+                actual_data_cutoff="2026-09-10T09:44:00-04:00",
+            )
+
+            def fake_nasdaq(symbol, *_args, **_kwargs):
+                facts = [self._fact_at(symbol, "09", f"{minute:02d}") for minute in range(45, 60)]
+                return facts, {
+                    "provider": collection.NASDAQ,
+                    "raw_row_count": len(facts),
+                    "timestamp_parseable_count": len(facts),
+                    "trade_date_match_count": len(facts),
+                    "window_row_count": len(facts),
+                    "target_window_match_count": len(facts),
+                }
+
+            with mock.patch.object(collection, "fetch_nasdaq_regular", side_effect=fake_nasdaq):
+                result = collection.collect_regular_window(
+                    mode="open_30m",
+                    stage=None,
+                    trade_date="2026-09-10",
+                    start_et="09:45",
+                    end_et="10:00",
+                    store_root=root,
+                    universe_config=universe,
+                    config={},
+                    access=access,
+                    eligible_universe=eligible,
+                )
+
+            persisted = json.loads((root / str(result["snapshot_path"])).read_text(encoding="utf-8"))
+            increment = result["coverage"]["increment"]
+            cumulative = result["coverage"]["stage_snapshot"]
+            self.assertTrue(increment["complete"])
+            self.assertEqual(increment["partial_symbols"], [])
+            self.assertEqual(result["snapshot_missing"], [])
+            self.assertEqual(cumulative["missing_symbols"], [])
+            self.assertEqual(cumulative["partial_symbols"], ["BBB"])
+            self.assertEqual(cumulative["qualified_symbol_count"], 2)
+            self.assertEqual(cumulative["full_window_symbol_count"], 1)
+            self.assertEqual(cumulative["terminal_observation_symbol_count"], 2)
+            self.assertFalse(cumulative["complete"])
+            self.assertEqual(result["status"], "partial")
+            self.assertEqual(persisted["missing"], [])
+            self.assertEqual(persisted["coverage"]["stage_snapshot"]["partial_symbols"], ["BBB"])
 
     def test_increment_complete_can_coexist_with_incomplete_cumulative_stage_snapshot(self) -> None:
         full_universe = [("AAA", "stocks"), ("BBB", "stocks"), ("CCC", "stocks")]
