@@ -14,7 +14,7 @@ import json
 import os
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 from zoneinfo import ZoneInfo
@@ -27,6 +27,20 @@ ET = ZoneInfo("America/New_York")
 NASDAQ = "nasdaq_public_intraday"
 TWELVE = "twelve_data_basic"
 HISTORICAL_CONTEXT_REPAIR = "historical_context_repair"
+NORMALIZED_REASON_CLASSES = (
+    "success",
+    "no_rows",
+    "stale_rows",
+    "outside_window",
+    "rate_limited",
+    "transport_error",
+    "qualification_rejected",
+    "budget_exhausted",
+)
+
+
+class CoverageContractError(RuntimeError):
+    """Raised when coverage inputs cannot be reconciled deterministically."""
 
 
 def _number(value: Any) -> float | None:
@@ -88,6 +102,7 @@ def fetch_nasdaq_regular(
     facts: list[dict[str, Any]] = []
     parseable = 0
     date_match = 0
+    window_rows = 0
     units: set[str] = set()
     sample_raw = None
     ts_field = str(spec.get("timestamp_field") or spec.get("timestamp_ms_field") or "x")
@@ -109,6 +124,7 @@ def fetch_nasdaq_regular(
         date_match += 1
         if not (start <= ts < end):
             continue
+        window_rows += 1
         price = _number(row.get(price_field))
         volume = _number(row.get(volume_field))
         if price is None:
@@ -132,6 +148,7 @@ def fetch_nasdaq_regular(
         "raw_row_count": len(rows),
         "timestamp_parseable_count": parseable,
         "trade_date_match_count": date_match,
+        "window_row_count": window_rows,
         "target_window_match_count": len(facts),
         "sample_raw_timestamp": sample_raw,
         "detected_timestamp_units": sorted(units),
@@ -193,6 +210,7 @@ def fetch_twelve_regular(
     facts: list[dict[str, Any]] = []
     parseable = 0
     date_match = 0
+    window_rows = 0
     for row in payload.get("values") or []:
         if not isinstance(row, dict):
             continue
@@ -207,6 +225,7 @@ def fetch_twelve_regular(
         date_match += 1
         if not (start <= ts < end):
             continue
+        window_rows += 1
         close = _number(row.get("close"))
         if close is None:
             continue
@@ -230,6 +249,7 @@ def fetch_twelve_regular(
         "raw_row_count": len(payload.get("values") or []),
         "timestamp_parseable_count": parseable,
         "trade_date_match_count": date_match,
+        "window_row_count": window_rows,
         "target_window_match_count": len(facts),
         "feed_scope": "twelve_data_basic_us_equities_limited_realtime_coverage",
     }
@@ -270,6 +290,293 @@ def _decorate_context_facts(universe: Mapping[str, Any], facts: Sequence[Mapping
     return [collection.decorate_fact(universe, fact) for fact in facts]
 
 
+def _minute_grid(trade_date: str, start_et: str, end_et: str) -> set[str]:
+    start, end = _window_bounds(trade_date, start_et, end_et)
+    if end <= start:
+        raise CoverageContractError(f"invalid target window: {start_et}-{end_et}")
+    expected: set[str] = set()
+    current = start
+    while current < end:
+        expected.add(current.isoformat())
+        current += timedelta(minutes=1)
+    return expected
+
+
+def _fact_timestamp(
+    fact: Mapping[str, Any], trade_date: str, start_et: str, end_et: str
+) -> datetime | None:
+    raw = fact.get("event_time") or fact.get("source_timestamp")
+    if not isinstance(raw, str):
+        return None
+    try:
+        normalized = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+        timestamp = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if timestamp.tzinfo is None:
+        return None
+    timestamp = timestamp.astimezone(ET)
+    start, end = _window_bounds(trade_date, start_et, end_et)
+    if timestamp.date().isoformat() != trade_date or not (start <= timestamp < end):
+        return None
+    return timestamp
+
+
+def _fact_minute(fact: Mapping[str, Any], trade_date: str, start_et: str, end_et: str) -> str | None:
+    timestamp = _fact_timestamp(fact, trade_date, start_et, end_et)
+    return timestamp.replace(second=0, microsecond=0).isoformat() if timestamp else None
+
+
+def _reason_from_exception(exc: BaseException) -> str:
+    detail = f"{type(exc).__name__}:{exc}".lower()
+    if "rate" in detail or "429" in detail or "too many requests" in detail:
+        return "rate_limited"
+    if "budget" in detail or "credit" in detail or "quota" in detail:
+        return "budget_exhausted"
+    return "transport_error"
+
+
+def _reason_from_diagnostic(diag: Mapping[str, Any]) -> str | None:
+    if diag.get("target_window_match_count", 0) > 0:
+        return "success"
+    if diag.get("status") == "secret_missing":
+        return None
+    if diag.get("window_row_count", 0) > 0:
+        return "qualification_rejected"
+    if diag.get("trade_date_match_count", 0) > 0:
+        return "outside_window"
+    if diag.get("raw_row_count", 0) == 0 or diag.get("timestamp_parseable_count", 0) == 0:
+        return "no_rows"
+    return "stale_rows"
+
+
+def _scope_coverage(
+    *,
+    requested_symbols: Sequence[str],
+    capture_refs: Sequence[Mapping[str, Any]],
+    facts_by_symbol: Mapping[str, Sequence[Mapping[str, Any]]] | None,
+    missing_hint: Sequence[str],
+    trade_date: str | None,
+    target_window: Mapping[str, Any] | None,
+    legacy_available: int | None = None,
+    reason_classes: Mapping[str, Sequence[str]] | None = None,
+) -> dict[str, Any]:
+    requested = [str(symbol).upper() for symbol in requested_symbols]
+    requested_set = set(requested)
+    if len(requested) != len(requested_set):
+        raise CoverageContractError("requested symbols must be unique")
+    hinted_missing = {str(symbol).upper() for symbol in missing_hint}
+    if not hinted_missing <= requested_set:
+        raise CoverageContractError("missing symbols must be requested symbols")
+
+    # The old unit contract passed opaque refs without a target window. Keep
+    # that compatibility surface, while every production call supplies facts
+    # and the canonical one-minute window below.
+    legacy = target_window is None and facts_by_symbol is None
+    if legacy:
+        missing = sorted(hinted_missing)
+        qualified_count = min(
+            legacy_available if legacy_available is not None else len(capture_refs),
+            len(requested),
+        )
+        full_count = qualified_count if not missing else 0
+        terminal_count = qualified_count if not missing else 0
+        partial: list[str] = []
+        available = qualified_count
+    else:
+        if not trade_date or not isinstance(target_window, Mapping):
+            raise CoverageContractError("target window and trade date are required for semantic coverage")
+        start_et = str(target_window.get("start") or "")
+        end_et = str(target_window.get("end") or "")
+        expected = _minute_grid(trade_date, start_et, end_et)
+        window_start, window_end = _window_bounds(trade_date, start_et, end_et)
+        facts_map = {str(symbol).upper(): list(facts) for symbol, facts in (facts_by_symbol or {}).items()}
+        if not set(facts_map) <= requested_set:
+            raise CoverageContractError("facts contain symbols outside requested scope")
+        qualified_timestamps: dict[str, list[datetime]] = {}
+        for symbol in requested:
+            timestamps = [
+                _fact_timestamp(fact, trade_date, start_et, end_et)
+                for fact in facts_map.get(symbol, [])
+            ]
+            in_window = [timestamp for timestamp in timestamps if timestamp is not None]
+            if in_window:
+                qualified_timestamps[symbol] = in_window
+        qualified = set(qualified_timestamps)
+        missing_set = requested_set - qualified
+        if missing_set != hinted_missing:
+            raise CoverageContractError(
+                f"missing symbols disagree with qualified facts: {sorted(hinted_missing)} != {sorted(missing_set)}"
+            )
+        full: set[str] = set()
+        terminal: set[str] = set()
+        for symbol in qualified:
+            timestamps = qualified_timestamps[symbol]
+            minutes = [timestamp.replace(second=0, microsecond=0).isoformat() for timestamp in timestamps]
+            valid_minutes = [minute for minute in minutes if minute is not None]
+            minute_set = set(valid_minutes)
+            # Full-window means every expected one-minute interval in [start,
+            # end) has exactly one qualified observation. Terminality is the
+            # separate exact final-interval-boundary observation.
+            is_full = len(valid_minutes) == len(expected) and minute_set == expected
+            terminal_start = max(window_start, window_end - timedelta(minutes=1))
+            has_terminal = terminal_start in set(timestamps)
+            if is_full:
+                full.add(symbol)
+            if has_terminal:
+                terminal.add(symbol)
+        # A full-window symbol without the required terminal observation is
+        # partial too; full and terminal counts remain distinct.
+        partial = sorted(qualified - (full & terminal))
+        qualified_count = len(qualified)
+        full_count = len(full)
+        terminal_count = len(terminal)
+        missing = sorted(missing_set)
+        available = qualified_count
+
+    if not (full_count <= qualified_count <= len(requested)):
+        raise CoverageContractError("full-window/qualified/requested coverage inequality failed")
+    if terminal_count > qualified_count:
+        raise CoverageContractError("terminal-observation/qualified coverage inequality failed")
+    if set(missing) & set(partial):
+        raise CoverageContractError("symbol cannot be both missing and partial")
+    if len(missing) + qualified_count > len(requested):
+        raise CoverageContractError("missing plus qualified coverage inequality failed")
+    reason_payload = {
+        str(symbol).upper(): sorted(set(classes))
+        for symbol, classes in (reason_classes or {}).items()
+    }
+    if not set(reason_payload) <= requested_set:
+        raise CoverageContractError("reason classes contain symbols outside requested scope")
+    complete = (
+        not missing
+        and not partial
+        and qualified_count == len(requested)
+        and full_count == len(requested)
+        and terminal_count == len(requested)
+    )
+    return {
+        "requested_symbol_count": len(requested),
+        "capture_object_count": len(capture_refs),
+        "qualified_symbol_count": qualified_count,
+        "full_window_symbol_count": full_count,
+        "terminal_observation_symbol_count": terminal_count,
+        "missing_symbols": missing,
+        "partial_symbols": partial,
+        "symbols_requested": len(requested),
+        "symbols_available": available,
+        "symbols_missing": len(missing),
+        "complete": complete,
+        "reason_classes": reason_payload,
+    }
+
+
+def _capture_facts(store_root: Path, refs: Sequence[Mapping[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    facts_by_symbol: dict[str, list[dict[str, Any]]] = {}
+    for ref in refs:
+        doc = base._verify_local_blob(store_root, str(ref["path"]), str(ref["blob_sha"]))
+        for fact in doc.get("qualified_facts") or []:
+            if not isinstance(fact, Mapping) or not fact.get("symbol"):
+                raise CoverageContractError("qualified capture fact requires symbol")
+            symbol = str(fact["symbol"]).upper()
+            facts_by_symbol.setdefault(symbol, []).append(dict(fact))
+    return facts_by_symbol
+
+
+def _readiness_observability(
+    *,
+    trade_date: str,
+    end_et: str,
+    collection_started_at: str,
+    collection_completed_at: str,
+    snapshot_generated_at: str | None = None,
+    snapshot_ready_at: str | None = None,
+) -> dict[str, Any]:
+    _, target_end = _window_bounds(trade_date, end_et, end_et)
+    started = datetime.fromisoformat(collection_started_at)
+    completed = datetime.fromisoformat(collection_completed_at)
+    generated = datetime.fromisoformat(snapshot_generated_at) if snapshot_generated_at else None
+    ready = datetime.fromisoformat(snapshot_ready_at) if snapshot_ready_at else None
+    if generated and completed > generated:
+        raise CoverageContractError("snapshot generation precedes collection completion")
+    if ready and generated and generated > ready:
+        raise CoverageContractError("snapshot ready precedes snapshot generation")
+    return {
+        "semantics": "collector_observed_after_prewarm_not_github_queue_or_remote_store_commit_ready",
+        "target_window_end": target_end.isoformat(),
+        "collection_started_at": collection_started_at,
+        "collection_completed_at": collection_completed_at,
+        "collection_started_after_target_seconds": round((started - target_end).total_seconds(), 3),
+        "collection_completed_after_target_seconds": round((completed - target_end).total_seconds(), 3),
+        "snapshot_generated_at": snapshot_generated_at,
+        "snapshot_ready_at": snapshot_ready_at,
+        "window_end_to_snapshot_ready_seconds": (
+            round((ready - target_end).total_seconds(), 3) if ready else None
+        ),
+    }
+
+
+def _coverage_observability(
+    *,
+    full_universe: Sequence[tuple[str, str]],
+    increment_universe: Sequence[tuple[str, str]],
+    capture_refs: Sequence[Mapping[str, Any]],
+    missing: Sequence[str],
+    snapshot_missing: Sequence[str],
+    prior_refs: Sequence[Mapping[str, Any]],
+    provider_counts: Mapping[str, int],
+    readiness: Mapping[str, Any],
+    trade_date: str | None = None,
+    target_window: Mapping[str, Any] | None = None,
+    increment_window: Mapping[str, Any] | None = None,
+    increment_facts_by_symbol: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
+    stage_facts_by_symbol: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
+    reason_classes: Mapping[str, Sequence[str]] | None = None,
+) -> dict[str, Any]:
+    increment_missing = sorted(set(str(symbol) for symbol in missing))
+    cumulative_missing = sorted(set(str(symbol) for symbol in snapshot_missing))
+    required_count = len(full_universe)
+    increment_scope = _scope_coverage(
+        requested_symbols=[symbol for symbol, _asset in increment_universe],
+        capture_refs=capture_refs,
+        facts_by_symbol=increment_facts_by_symbol,
+        missing_hint=increment_missing,
+        trade_date=trade_date,
+        target_window=increment_window or target_window,
+        legacy_available=len(capture_refs),
+        reason_classes=reason_classes,
+    )
+    stage_scope = _scope_coverage(
+        requested_symbols=[symbol for symbol, _asset in full_universe],
+        capture_refs=list(prior_refs) + list(capture_refs),
+        facts_by_symbol=(
+            stage_facts_by_symbol
+            if stage_facts_by_symbol is not None
+            else increment_facts_by_symbol
+        ),
+        missing_hint=cumulative_missing,
+        trade_date=trade_date,
+        target_window=target_window,
+        legacy_available=len(prior_refs) + len(capture_refs),
+        reason_classes=reason_classes,
+    )
+    return {
+        "symbols_requested_in_increment": len(increment_universe),
+        "symbols_available_in_increment": len(capture_refs),
+        "symbols_missing_in_increment": len(increment_missing),
+        "inherited_ref_count": len(prior_refs),
+        "total_ref_count": len(prior_refs) + len(capture_refs),
+        "provider_counts": dict(provider_counts),
+        "reason_classes": dict(reason_classes or {}),
+        "increment": dict(increment_scope),
+        "stage_snapshot": {
+            **stage_scope,
+            "symbols_required": required_count,
+        },
+        "readiness": dict(readiness),
+    }
+
+
 def collect_regular_window(
     *,
     mode: str,
@@ -295,10 +602,20 @@ def collect_regular_window(
             raise RuntimeError(f"symbols_override outside eligible collection universe: {unknown}")
         universe = [(symbol, by_symbol[symbol]) for symbol in requested]
 
-    generated = datetime.now(ET).isoformat()
+    collection_started_at = datetime.now(ET).isoformat()
     facts_by_symbol: dict[str, tuple[str, list[dict[str, Any]]]] = {}
     diagnostics: dict[str, list[dict[str, Any]]] = {}
     failures: dict[str, list[str]] = {}
+    reason_classes: dict[str, list[str]] = {}
+    unmapped_reason_details: dict[str, list[str]] = {}
+
+    def record_reason(symbol: str, reason: str | None, detail: str) -> None:
+        if reason is None:
+            unmapped_reason_details.setdefault(symbol, []).append(detail[:240])
+            return
+        if reason not in NORMALIZED_REASON_CLASSES:
+            raise CoverageContractError(f"unknown normalized reason class: {reason}")
+        reason_classes.setdefault(symbol, []).append(reason)
 
     def nasdaq_job(symbol: str, asset: str):
         return symbol, fetch_nasdaq_regular(symbol, asset, trade_date, start_et, end_et, access)
@@ -310,13 +627,18 @@ def collect_regular_window(
             symbol = futures[future]
             try:
                 _symbol, (facts, diag) = future.result()
+                reason = "success" if facts else _reason_from_diagnostic(diag)
+                diag = dict(diag)
+                diag["reason_class"] = reason
                 diagnostics.setdefault(symbol, []).append(diag)
+                record_reason(symbol, reason, f"{NASDAQ}:{diag}")
                 if facts:
                     facts_by_symbol[symbol] = (NASDAQ, _decorate_context_facts(universe_config, facts))
                 else:
                     failures.setdefault(symbol, []).append("nasdaq_no_qualified_target_window_facts")
             except Exception as exc:  # noqa: BLE001
                 failures.setdefault(symbol, []).append(f"nasdaq:{type(exc).__name__}:{exc}")
+                record_reason(symbol, _reason_from_exception(exc), f"{NASDAQ}:{type(exc).__name__}:{exc}")
 
     for symbol, asset in universe:
         if symbol in facts_by_symbol:
@@ -332,13 +654,18 @@ def collect_regular_window(
                 config=config,
                 access=access,
             )
+            reason = "success" if facts else _reason_from_diagnostic(diag)
+            diag = dict(diag)
+            diag["reason_class"] = reason
             diagnostics.setdefault(symbol, []).append(diag)
+            record_reason(symbol, reason, f"{TWELVE}:{diag}")
             if facts:
                 facts_by_symbol[symbol] = (TWELVE, _decorate_context_facts(universe_config, facts))
             else:
                 failures.setdefault(symbol, []).append("twelve_no_qualified_target_window_facts")
         except Exception as exc:  # noqa: BLE001
             failures.setdefault(symbol, []).append(f"twelve:{type(exc).__name__}:{exc}")
+            record_reason(symbol, _reason_from_exception(exc), f"{TWELVE}:{type(exc).__name__}:{exc}")
 
     context_specs = collection.context_by_symbol(universe_config)
     sector_symbols = set(collection.sector_symbols(universe_config))
@@ -365,7 +692,7 @@ def collect_regular_window(
             session="regular",
             provider=provider,
             capture_id=f"{mode}-{symbol.lower()}-{datetime.now(ET).strftime('%H%M%S-et')}",
-            generated_at=generated,
+            generated_at=collection_started_at,
             actual_data_cutoff=facts[-1]["source_timestamp"],
             window={"start": start_et, "end": end_et},
             feed_scope=feed_scope,
@@ -385,6 +712,8 @@ def collect_regular_window(
                 "kind": kind,
                 "window": f"{start_et}-{end_et}",
                 "provider": provider,
+                "symbol": symbol,
+                "reason_class": "success",
             }
         )
 
@@ -407,8 +736,28 @@ def collect_regular_window(
         if stage_name in ("open_30m", "open_60m") and not prior_refs and not prior_missing:
             prior_missing = [symbol for symbol, _asset in full_universe]
 
+    increment_facts = {
+        symbol: facts for symbol, (_provider, facts) in facts_by_symbol.items()
+    }
+    prior_facts = _capture_facts(store_root, prior_refs) if prior_refs else {}
+    stage_facts = dict(prior_facts)
+    for symbol, facts in increment_facts.items():
+        stage_facts.setdefault(symbol, []).extend(facts)
+
     if stage_name in ("open_30m", "open_60m"):
-        snapshot_missing = sorted(set(prior_missing) | set(missing))
+        requested_stage_symbols = {symbol for symbol, _asset in full_universe}
+        prior_missing_set = {str(symbol).upper() for symbol in prior_missing}
+        if not prior_missing_set <= requested_stage_symbols:
+            raise CoverageContractError("prior snapshot missing symbols must be requested symbols")
+        prior_qualified_symbols = {
+            symbol for symbol in requested_stage_symbols if prior_facts.get(symbol)
+        }
+        if prior_missing_set & prior_qualified_symbols:
+            raise CoverageContractError("prior snapshot cannot mark a qualified symbol missing")
+        stage_qualified_symbols = {
+            symbol for symbol in requested_stage_symbols if stage_facts.get(symbol)
+        }
+        snapshot_missing = sorted(requested_stage_symbols - stage_qualified_symbols)
     elif stage_name == "close" and mode in ("close_retry", "close_final", HISTORICAL_CONTEXT_REPAIR):
         snapshot_missing = sorted((set(prior_missing) - successful) | set(missing))
     else:
@@ -416,6 +765,34 @@ def collect_regular_window(
 
     if stage_name == "close" and mode in ("close", "close_retry", "close_final"):
         _write_close_state(store_root, trade_date, mode, snapshot_missing)
+
+    collection_completed_at = datetime.now(ET).isoformat()
+    target_start = "09:30" if stage_name.startswith("open_") else start_et
+    increment_window = {"start": start_et, "end": end_et}
+    stage_window = {"start": target_start, "end": end_et}
+    readiness = _readiness_observability(
+        trade_date=trade_date,
+        end_et=end_et,
+        collection_started_at=collection_started_at,
+        collection_completed_at=collection_completed_at,
+    )
+    coverage = _coverage_observability(
+        full_universe=full_universe,
+        increment_universe=universe,
+        capture_refs=capture_refs,
+        missing=missing,
+        snapshot_missing=snapshot_missing,
+        prior_refs=prior_refs,
+        provider_counts=provider_counts,
+        readiness=readiness,
+        trade_date=trade_date,
+        target_window=stage_window,
+        increment_window=increment_window,
+        increment_facts_by_symbol=increment_facts,
+        stage_facts_by_symbol=stage_facts,
+        reason_classes=reason_classes,
+    )
+    coverage["unmapped_reason_details"] = dict(unmapped_reason_details)
 
     if not capture_refs:
         return {
@@ -428,34 +805,52 @@ def collect_regular_window(
             "provider_counts": provider_counts,
             "failures": failures,
             "diagnostics": diagnostics,
+            "reason_classes": reason_classes,
+            "coverage": coverage,
+            "collection_timing": readiness,
             "snapshot_written": False,
         }
 
     all_refs = prior_refs + capture_refs
     sid = f"{mode}-{datetime.now(ET).strftime('%H%M%S-et')}"
-    target_start = "09:30" if stage_name.startswith("open_") else start_et
-    write_snapshot(
+    snapshot_generated_at = datetime.now(ET).isoformat()
+    readiness = _readiness_observability(
+        trade_date=trade_date,
+        end_et=end_et,
+        collection_started_at=collection_started_at,
+        collection_completed_at=collection_completed_at,
+        snapshot_generated_at=snapshot_generated_at,
+    )
+    coverage["readiness"] = readiness
+    snapshot_path, _latest_changed = write_snapshot(
         store_root,
         stage=stage_name,
         trade_date=trade_date,
         snapshot_id=sid,
-        generated_at=generated,
+        generated_at=snapshot_generated_at,
         data_refs=all_refs,
-        coverage={
-            "symbols_requested_in_increment": len(universe),
-            "symbols_available_in_increment": len(capture_refs),
-            "symbols_missing_in_increment": len(missing),
-            "inherited_ref_count": len(prior_refs),
-            "total_ref_count": len(all_refs),
-            "provider_counts": provider_counts,
-        },
+        coverage=coverage,
         missing=snapshot_missing,
         target_window={"start": target_start, "end": end_et},
         actual_data_cutoff=_actual_cutoff(store_root, all_refs),
     )
+    snapshot_ready_at = datetime.now(ET).isoformat()
+    readiness = _readiness_observability(
+        trade_date=trade_date,
+        end_et=end_et,
+        collection_started_at=collection_started_at,
+        collection_completed_at=collection_completed_at,
+        snapshot_generated_at=snapshot_generated_at,
+        snapshot_ready_at=snapshot_ready_at,
+    )
+    coverage["readiness"] = readiness
     return {
         "mode": mode,
-        "status": "ok" if not snapshot_missing else "partial",
+        "status": (
+            "ok"
+            if coverage["increment"]["complete"] and coverage["stage_snapshot"]["complete"]
+            else "partial"
+        ),
         "symbols_requested_in_increment": len(universe),
         "symbols_available_in_increment": len(capture_refs),
         "symbols_missing_in_increment": len(missing),
@@ -464,7 +859,12 @@ def collect_regular_window(
         "provider_counts": provider_counts,
         "failures": failures,
         "diagnostics": diagnostics,
+        "reason_classes": reason_classes,
+        "unmapped_reason_details": unmapped_reason_details,
+        "coverage": coverage,
+        "collection_timing": readiness,
         "refs": len(all_refs),
+        "snapshot_path": snapshot_path,
         "snapshot_written": True,
         "context_categories_requested": sorted(
             {context_specs[symbol]["category"] for symbol, _asset in universe if symbol in context_specs}
