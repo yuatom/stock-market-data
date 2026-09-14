@@ -1,6 +1,10 @@
 import json
+import os
 import sys
+import tempfile
+import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -62,178 +66,213 @@ def _access():
     }
 
 
-def test_daily_universe_combines_core_benchmarks_and_sectors_without_duplicates():
-    universe = collectors._daily_universe(
-        _watchlist(["AMD"]),
-        _completeness(benchmarks=["SPY", "QQQ"], sectors=["XLK", "SPY"]),
-    )
-    assert {symbol for symbol, _asset in universe} == {"AMD", "SPY", "QQQ", "XLK"}
-
-
-def test_twelve_bootstrap_filters_pre_identity_rows_and_builds_provider_affine_series(tmp_path, monkeypatch):
-    monkeypatch.setenv("TWELVE_DATA_API_KEY", "test-key")
-    monkeypatch.setattr(collectors, "wait_for_twelve_budget", lambda *args, **kwargs: None)
-    monkeypatch.setattr(collectors, "consume_twelve_credit", lambda *args, **kwargs: None)
-
-    rows = []
-    for day in range(1, 31):
-        month = 6 if day <= 20 else 7
-        dom = day if day <= 20 else day - 20
-        date = f"2026-{month:02d}-{dom:02d}"
-        rows.append(
-            {
-                "trade_date": date,
-                "open": float(day),
-                "high": float(day) + 1,
-                "low": float(day) - 1,
-                "close": float(day) + 0.5,
-                "volume": float(day * 100),
-            }
+class MarketDataCollectorsRegressionTest(unittest.TestCase):
+    def test_daily_universe_combines_core_benchmarks_and_sectors_without_duplicates(self):
+        universe = collectors._daily_universe(
+            _watchlist(["AMD"]),
+            _completeness(benchmarks=["SPY", "QQQ"], sectors=["XLK", "SPY"]),
+        )
+        self.assertEqual(
+            {symbol for symbol, _asset in universe},
+            {"AMD", "SPY", "QQQ", "XLK"},
         )
 
-    monkeypatch.setattr(
-        collectors,
-        "fetch_twelve_daily",
-        lambda symbol, api_key, access, outputsize: rows,
-    )
-
-    result = collectors.collect_previous_session_eod(
-        trade_date="2026-08-14",
-        store_root=tmp_path,
-        watchlist=_watchlist(["SPCX"]),
-        completeness=_completeness(),
-        config=_store_config(),
-        access=_access(),
-    )
-    assert result["bootstrapped_series"] == 1
-    series = read_daily_series(tmp_path, provider="twelve_data_basic", symbol="SPCX")
-    assert len(series) >= 20
-    assert series[0]["trade_date"] >= "2026-06-12"
-
-
-def test_zero_qualified_intraday_facts_do_not_create_snapshot(tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        collectors,
-        "fetch_nasdaq_regular",
-        lambda *args, **kwargs: [],
-    )
-    result = collectors.collect_regular_window(
-        mode="open_15m",
-        stage=None,
-        trade_date="2026-08-14",
-        start_et="09:30",
-        end_et="09:45",
-        store_root=tmp_path,
-        watchlist=_watchlist(["AMD"]),
-        completeness=_completeness(),
-        access=_access(),
-    )
-    assert result["status"] == "no_new_qualified_facts"
-    assert result["snapshot_written"] is False
-    assert not (tmp_path / "snapshots/2026-08/2026-08-14/open_15m/latest.json").exists()
-
-
-def test_close_first_pass_inherits_open60_and_retry_inherits_close(tmp_path, monkeypatch):
-    prior_rel, prior_blob = write_capture(
-        tmp_path,
-        trade_date="2026-08-14",
-        session="regular",
-        provider="nasdaq_public_intraday",
-        capture_id="open60-amd",
-        generated_at="2026-08-14T10:31:00-04:00",
-        actual_data_cutoff="2026-08-14T10:29:00-04:00",
-        window={"start": "10:00", "end": "10:30"},
-        feed_scope="nasdaq_public_chart_last_sale_volume_v1",
-        qualified_facts=[
-            {
-                "symbol": "AMD",
-                "session": "regular",
-                "event_time": "2026-08-14T10:29:00-04:00",
-                "source_timestamp": "2026-08-14T10:29:00-04:00",
-                "last_sale": 100.0,
-                "reported_volume": 10.0,
-            }
-        ],
-    )
-    write_snapshot(
-        tmp_path,
-        stage="open_60m",
-        trade_date="2026-08-14",
-        snapshot_id="open60-prior",
-        generated_at="2026-08-14T10:31:05-04:00",
-        data_refs=[{"path": prior_rel, "blob_sha": prior_blob, "kind": "regular_intraday_capture"}],
-        coverage={},
-        missing=["NVDA"],
-        target_window={"start": "09:30", "end": "10:30"},
-        actual_data_cutoff="2026-08-14T10:29:00-04:00",
-    )
-
-    def first_fetch(symbol, *_args, **_kwargs):
-        if symbol == "AMD":
-            return [
+    def test_twelve_bootstrap_filters_pre_identity_rows_and_builds_provider_affine_series(self):
+        rows = []
+        for day in range(1, 32):
+            month = 6 if day <= 20 else 7
+            dom = day if day <= 20 else day - 20
+            date = f"2026-{month:02d}-{dom:02d}"
+            rows.append(
                 {
-                    "symbol": "AMD",
-                    "asset_class": "stocks",
-                    "session": "regular",
-                    "event_time": "2026-08-14T15:59:00-04:00",
-                    "source_timestamp": "2026-08-14T15:59:00-04:00",
-                    "last_sale": 101.0,
-                    "reported_volume": 20.0,
+                    "trade_date": date,
+                    "open": float(day),
+                    "high": float(day) + 1,
+                    "low": float(day) - 1,
+                    "close": float(day) + 0.5,
+                    "volume": float(day * 100),
                 }
-            ]
-        return []
+            )
 
-    monkeypatch.setattr(collectors, "fetch_nasdaq_regular", first_fetch)
-    first = collectors.collect_regular_window(
-        mode="close",
-        stage="close",
-        trade_date="2026-08-14",
-        start_et="15:45",
-        end_et="16:00",
-        store_root=tmp_path,
-        watchlist=_watchlist(["AMD", "NVDA"]),
-        completeness=_completeness(),
-        access=_access(),
-    )
-    assert first["snapshot_written"] is True
-    latest = json.loads(
-        (tmp_path / "snapshots/2026-08/2026-08-14/close/latest.json").read_text()
-    )
-    first_snapshot = json.loads((tmp_path / latest["snapshot_path"]).read_text())
-    assert len(first_snapshot["data_refs"]) == 2
-    assert "NVDA" in first_snapshot["missing"]
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ,
+            {"TWELVE_DATA_API_KEY": "test-key"},
+            clear=False,
+        ), mock.patch.object(
+            collectors,
+            "wait_for_twelve_budget",
+            return_value=None,
+        ), mock.patch.object(
+            collectors,
+            "consume_twelve_credit",
+            return_value=None,
+        ), mock.patch.object(
+            collectors,
+            "fetch_twelve_daily",
+            side_effect=lambda symbol, api_key, access, outputsize: rows,
+        ):
+            root = Path(tmp)
+            result = collectors.collect_previous_session_eod(
+                trade_date="2026-08-14",
+                store_root=root,
+                watchlist=_watchlist(["SPCX"]),
+                completeness=_completeness(),
+                config=_store_config(),
+                access=_access(),
+            )
+            self.assertEqual(result["bootstrapped_series"], 1)
+            series = read_daily_series(root, provider="twelve_data_basic", symbol="SPCX")
 
-    monkeypatch.setattr(
-        collectors,
-        "fetch_nasdaq_regular",
-        lambda symbol, *_args, **_kwargs: [
-            {
-                "symbol": symbol,
-                "asset_class": "stocks",
-                "session": "regular",
-                "event_time": "2026-08-14T15:59:30-04:00",
-                "source_timestamp": "2026-08-14T15:59:30-04:00",
-                "last_sale": 202.0,
-                "reported_volume": 30.0,
-            }
-        ],
-    )
-    retry = collectors.collect_regular_window(
-        mode="close_retry",
-        stage="close",
-        trade_date="2026-08-14",
-        start_et="15:45",
-        end_et="16:00",
-        store_root=tmp_path,
-        watchlist=_watchlist(["AMD", "NVDA"]),
-        completeness=_completeness(),
-        access=_access(),
-        symbols_override=["NVDA"],
-    )
-    assert retry["snapshot_written"] is True
-    latest = json.loads(
-        (tmp_path / "snapshots/2026-08/2026-08-14/close/latest.json").read_text()
-    )
-    retry_snapshot = json.loads((tmp_path / latest["snapshot_path"]).read_text())
-    assert len(retry_snapshot["data_refs"]) == 3
-    assert retry_snapshot["missing"] == []
+        self.assertEqual(len(series), 20)
+        self.assertGreaterEqual(series[0]["trade_date"], "2026-06-12")
+        self.assertEqual(series[0]["trade_date"], "2026-06-12")
+
+    def test_zero_qualified_intraday_facts_do_not_create_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            collectors,
+            "fetch_nasdaq_regular",
+            return_value=[],
+        ):
+            root = Path(tmp)
+            result = collectors.collect_regular_window(
+                mode="open_15m",
+                stage=None,
+                trade_date="2026-08-14",
+                start_et="09:30",
+                end_et="09:45",
+                store_root=root,
+                watchlist=_watchlist(["AMD"]),
+                completeness=_completeness(),
+                access=_access(),
+            )
+            self.assertEqual(result["status"], "no_new_qualified_facts")
+            self.assertFalse(result["snapshot_written"])
+            self.assertFalse(
+                (root / "snapshots/2026-08/2026-08-14/open_15m/latest.json").exists()
+            )
+
+    def test_close_first_pass_inherits_open60_and_retry_inherits_close(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prior_rel, prior_blob = write_capture(
+                root,
+                trade_date="2026-08-14",
+                session="regular",
+                provider="nasdaq_public_intraday",
+                capture_id="open60-amd",
+                generated_at="2026-08-14T10:31:00-04:00",
+                actual_data_cutoff="2026-08-14T10:29:00-04:00",
+                window={"start": "10:00", "end": "10:30"},
+                feed_scope="nasdaq_public_chart_last_sale_volume_v1",
+                qualified_facts=[
+                    {
+                        "symbol": "AMD",
+                        "session": "regular",
+                        "event_time": "2026-08-14T10:29:00-04:00",
+                        "source_timestamp": "2026-08-14T10:29:00-04:00",
+                        "last_sale": 100.0,
+                        "reported_volume": 10.0,
+                    }
+                ],
+            )
+            write_snapshot(
+                root,
+                stage="open_60m",
+                trade_date="2026-08-14",
+                snapshot_id="open60-prior",
+                generated_at="2026-08-14T10:31:05-04:00",
+                data_refs=[
+                    {
+                        "path": prior_rel,
+                        "blob_sha": prior_blob,
+                        "kind": "regular_intraday_capture",
+                    }
+                ],
+                coverage={},
+                missing=["NVDA"],
+                target_window={"start": "09:30", "end": "10:30"},
+                actual_data_cutoff="2026-08-14T10:29:00-04:00",
+            )
+
+            def first_fetch(symbol, *_args, **_kwargs):
+                if symbol == "AMD":
+                    return [
+                        {
+                            "symbol": "AMD",
+                            "asset_class": "stocks",
+                            "session": "regular",
+                            "event_time": "2026-08-14T15:59:00-04:00",
+                            "source_timestamp": "2026-08-14T15:59:00-04:00",
+                            "last_sale": 101.0,
+                            "reported_volume": 20.0,
+                        }
+                    ]
+                return []
+
+            with mock.patch.object(
+                collectors,
+                "fetch_nasdaq_regular",
+                side_effect=first_fetch,
+            ):
+                first = collectors.collect_regular_window(
+                    mode="close",
+                    stage="close",
+                    trade_date="2026-08-14",
+                    start_et="15:45",
+                    end_et="16:00",
+                    store_root=root,
+                    watchlist=_watchlist(["AMD", "NVDA"]),
+                    completeness=_completeness(),
+                    access=_access(),
+                )
+
+            self.assertTrue(first["snapshot_written"])
+            latest = json.loads(
+                (root / "snapshots/2026-08/2026-08-14/close/latest.json").read_text()
+            )
+            first_snapshot = json.loads((root / latest["snapshot_path"]).read_text())
+            self.assertEqual(len(first_snapshot["data_refs"]), 2)
+            self.assertIn("NVDA", first_snapshot["missing"])
+
+            def retry_fetch(symbol, *_args, **_kwargs):
+                return [
+                    {
+                        "symbol": symbol,
+                        "asset_class": "stocks",
+                        "session": "regular",
+                        "event_time": "2026-08-14T15:59:30-04:00",
+                        "source_timestamp": "2026-08-14T15:59:30-04:00",
+                        "last_sale": 202.0,
+                        "reported_volume": 30.0,
+                    }
+                ]
+
+            with mock.patch.object(
+                collectors,
+                "fetch_nasdaq_regular",
+                side_effect=retry_fetch,
+            ):
+                retry = collectors.collect_regular_window(
+                    mode="close_retry",
+                    stage="close",
+                    trade_date="2026-08-14",
+                    start_et="15:45",
+                    end_et="16:00",
+                    store_root=root,
+                    watchlist=_watchlist(["AMD", "NVDA"]),
+                    completeness=_completeness(),
+                    access=_access(),
+                    symbols_override=["NVDA"],
+                )
+
+            self.assertTrue(retry["snapshot_written"])
+            latest = json.loads(
+                (root / "snapshots/2026-08/2026-08-14/close/latest.json").read_text()
+            )
+            retry_snapshot = json.loads((root / latest["snapshot_path"]).read_text())
+            self.assertEqual(len(retry_snapshot["data_refs"]), 3)
+            self.assertEqual(retry_snapshot["missing"], [])
+
+
+if __name__ == "__main__":
+    unittest.main()
