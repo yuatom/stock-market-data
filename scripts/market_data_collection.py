@@ -393,7 +393,16 @@ def _scope_coverage(
         facts_map = {str(symbol).upper(): list(facts) for symbol, facts in (facts_by_symbol or {}).items()}
         if not set(facts_map) <= requested_set:
             raise CoverageContractError("facts contain symbols outside requested scope")
-        qualified = {symbol for symbol in requested if facts_map.get(symbol)}
+        qualified_timestamps: dict[str, list[datetime]] = {}
+        for symbol in requested:
+            timestamps = [
+                _fact_timestamp(fact, trade_date, start_et, end_et)
+                for fact in facts_map.get(symbol, [])
+            ]
+            in_window = [timestamp for timestamp in timestamps if timestamp is not None]
+            if in_window:
+                qualified_timestamps[symbol] = in_window
+        qualified = set(qualified_timestamps)
         missing_set = requested_set - qualified
         if missing_set != hinted_missing:
             raise CoverageContractError(
@@ -402,11 +411,8 @@ def _scope_coverage(
         full: set[str] = set()
         terminal: set[str] = set()
         for symbol in qualified:
-            timestamps = [
-                _fact_timestamp(fact, trade_date, start_et, end_et)
-                for fact in facts_map[symbol]
-            ]
-            minutes = [timestamp.replace(second=0, microsecond=0).isoformat() for timestamp in timestamps if timestamp]
+            timestamps = qualified_timestamps[symbol]
+            minutes = [timestamp.replace(second=0, microsecond=0).isoformat() for timestamp in timestamps]
             valid_minutes = [minute for minute in minutes if minute is not None]
             minute_set = set(valid_minutes)
             # Full-window means every expected one-minute interval in [start,
@@ -414,7 +420,7 @@ def _scope_coverage(
             # separate exact final-interval-boundary observation.
             is_full = len(valid_minutes) == len(expected) and minute_set == expected
             terminal_start = max(window_start, window_end - timedelta(minutes=1))
-            has_terminal = terminal_start in {timestamp for timestamp in timestamps if timestamp}
+            has_terminal = terminal_start in set(timestamps)
             if is_full:
                 full.add(symbol)
             if has_terminal:
