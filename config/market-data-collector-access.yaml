@@ -1,5 +1,5 @@
 schema_version: 1
-contract_version: 10
+contract_version: 11
 ownership_authority: config/contract-ownership.yaml
 source_identity_authority: sources/registry.yaml
 store_authority: config/market-data-store.yaml
@@ -33,6 +33,14 @@ principles:
 http:
   timeout_seconds: 20
   user_agent: Mozilla/5.0 stock-dairy-market-data-collector/1
+  transient_retry:
+    max_attempts: 3
+    backoff_seconds: [1, 3]
+    retryable_errors: [TimeoutError, URLError]
+    http_error_retry: false
+    application_error_retry: false
+    metered_provider_failed_transport_attempt_must_consume_credit: true
+    maximum_attempts_hard_cap: 5
 
 regular_intraday_collection:
   provider_order: [nasdaq_public_intraday, twelve_data_basic]
