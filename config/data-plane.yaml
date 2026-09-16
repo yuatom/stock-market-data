@@ -1,6 +1,7 @@
 schema_version: 1
-contract_version: 13
+contract_version: 14
 repository: yuatom/stock-market-data
+store_publication_durability_authority: config/store-publication-durability.yaml
 purpose:
   - own reusable Market Data Plane code, contracts, collection and storage semantics
   - keep GitHub Actions collector/runtime public while persisted third-party market data remains private
@@ -11,6 +12,7 @@ purpose:
   - provide deterministic market-data arithmetic proof on exact private Store bytes without taking research/decision/report authority
   - keep mutable control branches as data-only triggers while execution logic always resolves from current main
   - permit owner-authorized historical Premarket probe sample replay only through exact source-probe identity and the normal private Store writer path
+  - make post-push Store durability proof a prerequisite for consumer-visible writer success
 
 boundaries:
   owns:
@@ -32,6 +34,7 @@ boundaries:
     - control_branch_dispatcher_contract
     - cross_repository_collector_request_contract
     - explicit_data_maintenance_request_contract
+    - store_publication_durability_mechanism
   must_not_own:
     - persisted_market_fact_commit_history
     - research_watchlist_priority
@@ -67,6 +70,7 @@ repositories:
     branch: main
     data_root: data/market-data
     actions_required: false
+    consumer_visible_retention_authority: README.md#consumer-visible-commit-retention
   research_consumer:
     repository: yuatom/stock-dairy
 
@@ -114,6 +118,9 @@ principles:
   context_proxy_must_not_be_relabelled_as_formal_underlying_metric: true
   sector_terminal_fact_must_be_timestamped_regular_session_context: true
   unsupported_enrichment_must_not_be_fabricated_from_proxy_data: true
+  successful_store_push_alone_is_not_consumer_pin_authority: true
+  all_consumer_visible_store_writers_share_publication_durability_authority: true
+  consumer_visible_store_commit_requires_durable_ref_and_remote_readback: true
 
 workflow_execution:
   runtime_workflow: .github/workflows/market-data-collector-runtime.yml
@@ -122,6 +129,8 @@ workflow_execution:
   scheduled_and_manual_entrypoint: .github/workflows/market-data-collector.yml
   control_dispatcher_template: config/control-branch-dispatcher.yml
   control_branches: [collector-requests, maintenance-requests]
+  store_publication_durability_authority: config/store-publication-durability.yaml
+  store_writer_concurrency_group: market-data-collector
   control_branch_dispatcher_rules:
     business_logic_forbidden: true
     provider_logic_forbidden: true
@@ -257,12 +266,21 @@ maintenance_request_interface:
   premarket_probe_replay_sample_only: true
   premarket_probe_replay_network_fetch_forbidden: true
 
+store_publication_durability:
+  authority: config/store-publication-durability.yaml
+  applies_to_all_consumer_visible_store_writers: true
+  writer_terminal_success_requires_durability_verified: true
+  durable_ref_template: refs/tags/market-data-read/{store_commit_sha}
+  store_retention_authority: yuatom/stock-market-data-store#README.md-consumer-visible-commit-retention
+  public_workflow_receipt_contains_private_payload_forbidden: true
+
 payload_writers:
   scheduled_and_on_demand_collector:
     executor: stock_market_data_github_actions
     allowed_repository: yuatom/stock-market-data-store
     allowed_prefix: data/market-data
     allowed_write_kinds: [daily_series, session_capture, stage_snapshot, deterministic_metric_proof, collector_state, probe_state, inventory]
+    terminal_success_requires: config/store-publication-durability.yaml#remote_publication_proof
   explicit_data_maintenance:
     executor: stock_market_data_github_actions_or_local_recovery
     allowed_repository: yuatom/stock-market-data-store
@@ -271,6 +289,7 @@ payload_writers:
     recovery_and_revision_audit_required_when_mutating_persisted_history: true
     append_only_context_repair_may_add_new_immutable_capture_and_snapshot_refs: true
     historical_premarket_probe_replay_may_add_new_immutable_sample_capture_and_snapshot_refs: true
+    consumer_visible_result_requires_durability_proof: true
   stock_dairy_research_runtime:
     executor: stock_dairy_chatgpt_runtime
     market_fact_write_allowed: false
@@ -283,7 +302,7 @@ consumer_interface:
   required_pins:
     research_repository_commit_sha: immutable stock-dairy research-contract commit
     market_data_contract_sha: immutable commit in yuatom/stock-market-data containing active data-plane contract
-    market_data_read_sha: immutable commit in yuatom/stock-market-data-store resolved once during research input resolution after optional bounded collector wait
+    market_data_read_sha: durability-verified immutable commit in yuatom/stock-market-data-store resolved once during research input resolution after optional bounded collector wait
   one_market_data_read_sha_per_frozen_research_input: true
   ref_shape:
     required: [repository, read_sha, path, blob_sha]
@@ -296,6 +315,10 @@ consumer_interface:
   consumer_must_not_refresh_read_sha_after_research_input_freeze: true
   store_miss_may_trigger_collector_request: true
   store_miss_must_not_authorize_research_runtime_market_fetch_or_write: true
+  consumer_must_verify_publication_durability_before_pin: true
+  durability_authority: config/store-publication-durability.yaml#consumer_contract
+  producer_terminal_success_without_durability_proof_is_not_pin_authority: true
+  proof_failure_must_not_substitute_newer_store_main: true
   premarket_refs_are_first_class_market_data_refs: true
   cutoff_valid_context_proxy_refs_are_first_class_market_data_refs: true
   proxy_semantics_must_survive_into_frozen_research_input: true

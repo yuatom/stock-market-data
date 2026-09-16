@@ -1,0 +1,67 @@
+schema_version: 1
+contract_version: 1
+owner: yuatom/stock-market-data
+persisted_store: yuatom/stock-market-data-store
+store_retention_authority: yuatom/stock-market-data-store#README.md-consumer-visible-commit-retention
+publication_helper: scripts/verify_store_publication.py
+
+purpose:
+  - make a successful Store push insufficient by itself for consumer pin authority
+  - prove the pushed commit is remotely readable before collector terminal success
+  - anchor every consumer-visible Store commit with a deterministic durable ref
+  - give stock-dairy an independently verifiable retention proof before market_data_read_sha pin
+
+writer_scope:
+  workflows:
+    - .github/workflows/market-data-collector-runtime.yml
+    - .github/workflows/dynamic-candidate-runtime.yml
+    - .github/workflows/extended-hours-readiness.yml
+  all_store_writers_must_share_concurrency_group: market-data-collector
+  terminal_success_for_new_or_existing_store_head_requires_durability_pass: true
+
+remote_publication_proof:
+  order:
+    - payload_or_control_state_commit_complete
+    - push_to_store_main_accepted
+    - fetch_remote_main_without_using_stale_local_tracking_state
+    - require_remote_main_equals_pushed_commit_while_writer_lock_is_held
+    - require_remote_commit_object_readable
+    - verify_changed_non_deleted_path_blob_ids_from_remote_commit
+    - create_or_verify_deterministic_durable_ref
+    - exact_readback_durable_ref
+    - emit_durability_receipt
+  remote_main_mismatch: fail_closed
+  remote_commit_unreadable: fail_closed
+  remote_path_blob_mismatch: fail_closed
+
+retention_anchor:
+  ref_template: refs/tags/market-data-read/{store_commit_sha}
+  target_must_equal_store_commit_sha: true
+  create_only_or_exact_existing_same_target: true
+  retarget_forbidden: true
+  deletion_forbidden: true
+  normal_history_rewrite_that_orphans_exposed_commit_forbidden: true
+  tag_push_failure: fail_closed
+  tag_readback_failure: fail_closed
+
+durability_receipt:
+  output_medium: workflow_stdout_safe_json
+  required_fields:
+    - status
+    - store_commit_sha
+    - durability_ref
+    - remote_main_sha
+    - verified_changed_paths
+  status_value: durability_verified
+  private_payload_values_in_public_log_forbidden: true
+
+consumer_contract:
+  consumer: yuatom/stock-dairy
+  candidate_sha_source: store_main_resolved_after_optional_bounded_collector_wait
+  deterministic_ref_derived_from_candidate_sha: true
+  consumer_must_independently_exact_read_ref: true
+  consumer_must_require_ref_target_equals_candidate_sha: true
+  consumer_must_exact_read_commit_and_consumed_path_blob_ids: true
+  proof_required_before_market_data_read_sha_pin: true
+  producer_terminal_success_without_proof_is_not_pin_authority: true
+  proof_failure_must_not_substitute_newer_store_main: true

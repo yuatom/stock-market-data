@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: extended-hours-readiness
+  group: market-data-collector
   cancel-in-progress: false
 
 jobs:
@@ -91,3 +91,13 @@ jobs:
             sleep $((attempt * 2))
           done
           exit 1
+
+      - name: Verify durable Store publication
+        working-directory: store
+        shell: bash
+        run: |
+          set -euo pipefail
+          python ../compute/scripts/verify_store_publication.py \
+            --store-root . \
+            --expected-commit "$(git rev-parse HEAD)" \
+            --writer-status readiness_persisted
