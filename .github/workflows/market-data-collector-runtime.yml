@@ -509,3 +509,14 @@ jobs:
             sleep $((attempt * 2))
           done
           exit 1
+
+      - name: Verify durable Store publication
+        if: steps.invocation.outputs.mode != 'smoke_readonly'
+        working-directory: store
+        shell: bash
+        run: |
+          set -euo pipefail
+          python ../compute/scripts/verify_store_publication.py \
+            --store-root . \
+            --expected-commit "$(git rev-parse HEAD)" \
+            --writer-status store_persisted

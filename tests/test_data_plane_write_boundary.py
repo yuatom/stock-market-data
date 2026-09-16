@@ -11,6 +11,9 @@ class DataPlaneWriteBoundaryTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.contract = yaml.safe_load((ROOT / "config/data-plane.yaml").read_text(encoding="utf-8"))
+        cls.durability = yaml.safe_load(
+            (ROOT / "config/store-publication-durability.yaml").read_text(encoding="utf-8")
+        )
 
     def test_research_runtime_cannot_write_market_facts(self):
         principles = self.contract["principles"]
@@ -28,6 +31,10 @@ class DataPlaneWriteBoundaryTest(unittest.TestCase):
         self.assertEqual(writer["allowed_repository"], "yuatom/stock-market-data-store")
         self.assertIn("session_capture", writer["allowed_write_kinds"])
         self.assertIn("stage_snapshot", writer["allowed_write_kinds"])
+        self.assertEqual(
+            writer["terminal_success_requires"],
+            "config/store-publication-durability.yaml#remote_publication_proof",
+        )
 
     def test_consumer_pins_one_read_sha_per_frozen_input(self):
         consumer = self.contract["consumer_interface"]
@@ -37,6 +44,43 @@ class DataPlaneWriteBoundaryTest(unittest.TestCase):
         self.assertTrue(consumer["store_miss_must_not_authorize_research_runtime_market_fetch_or_write"])
         self.assertTrue(consumer["cutoff_valid_context_proxy_refs_are_first_class_market_data_refs"])
         self.assertTrue(consumer["proxy_semantics_must_survive_into_frozen_research_input"])
+        self.assertTrue(consumer["consumer_must_verify_publication_durability_before_pin"])
+        self.assertTrue(consumer["producer_terminal_success_without_durability_proof_is_not_pin_authority"])
+        self.assertTrue(consumer["proof_failure_must_not_substitute_newer_store_main"])
+
+    def test_store_publication_durability_has_one_owner_contract(self):
+        self.assertEqual(
+            self.contract["store_publication_durability_authority"],
+            "config/store-publication-durability.yaml",
+        )
+        self.assertEqual(self.durability["owner"], "yuatom/stock-market-data")
+        self.assertEqual(self.durability["persisted_store"], "yuatom/stock-market-data-store")
+        self.assertEqual(
+            self.durability["retention_anchor"]["ref_template"],
+            "refs/tags/market-data-read/{store_commit_sha}",
+        )
+        self.assertTrue(self.durability["retention_anchor"]["retarget_forbidden"])
+        self.assertTrue(self.durability["retention_anchor"]["deletion_forbidden"])
+        self.assertTrue(
+            self.durability["consumer_contract"]["proof_required_before_market_data_read_sha_pin"]
+        )
+
+    def test_every_direct_store_writer_uses_one_serialization_lane_and_durability_helper(self):
+        workflows = self.durability["writer_scope"]["workflows"]
+        expected_group = self.durability["writer_scope"]["all_store_writers_must_share_concurrency_group"]
+        self.assertEqual(expected_group, "market-data-collector")
+        for relative in workflows:
+            with self.subTest(workflow=relative):
+                workflow = yaml.safe_load((ROOT / relative).read_text(encoding="utf-8"))
+                self.assertEqual(workflow["concurrency"]["group"], expected_group)
+                steps = next(iter(workflow["jobs"].values()))["steps"]
+                verification = [
+                    step for step in steps if step.get("name") == "Verify durable Store publication"
+                ]
+                self.assertEqual(len(verification), 1)
+                run = verification[0]["run"]
+                self.assertIn("verify_store_publication.py", run)
+                self.assertIn("--expected-commit", run)
 
     def test_supported_context_baseline_is_data_plane_owned(self):
         baseline = self.contract["supported_context_baseline"]
