@@ -46,6 +46,15 @@ class DynamicCandidateRuntimeWorkflowTests(unittest.TestCase):
             "market_data_contract_sha": contract_sha,
             "candidate_symbols": ["BILI"],
             "transaction_id": f"{stage}-test",
+            "personal_state_proof": {
+                "dynamic_state_read_sha": "c" * 40,
+                "blob_sha": "d" * 40,
+                "state_version": 5,
+                "authority_state": "canonical",
+                "content_hash_status": "unavailable_no_script",
+                "content_sha256": None,
+            },
+            "research_universe_resolution_status": "resolved",
         }
 
     def _run_validator(self, stage: str, purpose: str) -> subprocess.CompletedProcess[str]:
