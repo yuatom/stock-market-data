@@ -81,23 +81,31 @@ def _verify_required_manifest(root: Path, commit: str, manifest_path: str) -> li
     for field in ("request_id", "trade_date", "stage"):
         if not isinstance(manifest.get(field), str) or not manifest[field]:
             raise StorePublicationError(f"required output manifest missing {field}")
-    required_paths = manifest.get("required_paths")
-    if not isinstance(required_paths, list) or not required_paths:
-        raise StorePublicationError("required output manifest required_paths must be non-empty")
-    if len(required_paths) != len(set(required_paths)):
-        raise StorePublicationError("required output manifest paths must be unique")
+    required_outputs = manifest.get("required_outputs")
+    if not isinstance(required_outputs, list) or not required_outputs:
+        raise StorePublicationError("required output manifest required_outputs must be non-empty")
+    paths: list[str] = []
     verified: list[dict[str, str]] = []
-    for relative in required_paths:
+    for item in required_outputs:
+        if not isinstance(item, dict) or set(item) != {"path", "blob_sha"}:
+            raise StorePublicationError("required output manifest item must contain path and blob_sha")
+        relative = item.get("path")
+        expected_blob = item.get("blob_sha")
         if not isinstance(relative, str) or not relative or relative.startswith("/") or ".." in Path(relative).parts:
             raise StorePublicationError("required output manifest contains invalid path")
+        if not isinstance(expected_blob, str) or not SHA_RE.fullmatch(expected_blob):
+            raise StorePublicationError("required output manifest contains invalid blob_sha")
+        paths.append(relative)
         full_path = f"data/market-data/{relative}"
         exists = _git(root, "cat-file", "-e", f"{commit}:{full_path}", check=False)
         if exists.returncode != 0:
             raise StorePublicationError(f"required output missing at Store commit: {full_path}")
         blob_sha = _git(root, "rev-parse", f"{commit}:{full_path}").stdout.strip()
-        if not SHA_RE.fullmatch(blob_sha):
-            raise StorePublicationError(f"required output blob identity invalid: {full_path}")
+        if blob_sha != expected_blob:
+            raise StorePublicationError(f"required output blob mismatch at Store commit: {full_path}")
         verified.append({"path": full_path, "blob_sha": blob_sha})
+    if len(paths) != len(set(paths)):
+        raise StorePublicationError("required output manifest paths must be unique")
     return verified
 
 
