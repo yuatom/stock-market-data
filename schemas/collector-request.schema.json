@@ -12,18 +12,150 @@
     "mode",
     "research_repository",
     "research_repository_commit_sha",
-    "market_data_contract_sha"
+    "market_data_contract_sha",
+    "transaction_id",
+    "personal_state_proof",
+    "research_universe_resolution_status"
   ],
   "properties": {
-    "schema_version": {"const": 1},
-    "request_id": {"type": "string", "minLength": 1, "maxLength": 160},
-    "requested_at": {"type": "string", "format": "date-time"},
-    "trade_date": {"type": "string", "format": "date"},
-    "stage": {"enum": ["premarket", "open_15m", "open_30m", "open_60m", "close"]},
-    "mode": {"enum": ["premarket", "open_15m", "open_30m", "open_60m", "close"]},
-    "research_repository": {"const": "yuatom/stock-dairy"},
-    "research_repository_commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
-    "market_data_contract_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
-    "transaction_id": {"type": "string", "minLength": 1, "maxLength": 200}
+    "schema_version": {
+      "const": 1
+    },
+    "request_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "requested_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "trade_date": {
+      "type": "string",
+      "format": "date"
+    },
+    "stage": {
+      "enum": [
+        "premarket",
+        "open_15m",
+        "open_30m",
+        "open_60m",
+        "close"
+      ]
+    },
+    "mode": {
+      "enum": [
+        "premarket",
+        "open_15m",
+        "open_30m",
+        "open_60m",
+        "close"
+      ]
+    },
+    "research_repository": {
+      "const": "yuatom/stock-dairy"
+    },
+    "research_repository_commit_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "market_data_contract_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "transaction_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "personal_state_proof": {
+      "type": "object",
+      "required": [
+        "dynamic_state_read_sha",
+        "blob_sha",
+        "state_version",
+        "authority_state",
+        "content_hash_status",
+        "content_sha256"
+      ],
+      "properties": {
+        "dynamic_state_read_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "blob_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "state_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "authority_state": {
+          "enum": [
+            "shadow_pre_cutover",
+            "canonical"
+          ]
+        },
+        "content_hash_status": {
+          "enum": [
+            "canonical_sha256",
+            "unavailable_no_script"
+          ]
+        },
+        "content_sha256": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "content_hash_status": {
+                "const": "canonical_sha256"
+              }
+            },
+            "required": [
+              "content_hash_status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "content_sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "content_hash_status": {
+                "const": "unavailable_no_script"
+              }
+            },
+            "required": [
+              "content_hash_status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "content_sha256": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "research_universe_resolution_status": {
+      "const": "resolved"
+    }
   }
 }
