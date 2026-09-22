@@ -24,6 +24,15 @@ class DynamicCandidateRequestTests(unittest.TestCase):
             "market_data_contract_sha": "b" * 40,
             "candidate_symbols": ["RDDT", "AMAT", "APP"],
             "transaction_id": "open30-test",
+            "personal_state_proof": {
+                "dynamic_state_read_sha": "c" * 40,
+                "blob_sha": "d" * 40,
+                "state_version": 5,
+                "authority_state": "canonical",
+                "content_hash_status": "unavailable_no_script",
+                "content_sha256": None,
+            },
+            "research_universe_resolution_status": "resolved",
         }
 
     def _write(self, value):
