@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
+import json
 import subprocess
 import tempfile
 import unittest
@@ -65,8 +67,19 @@ class StorePublicationDurabilityTests(unittest.TestCase):
         required.write_text('{"ok":true}\n', encoding="utf-8")
         manifest = writer / "data" / "market-data" / "collector-state" / "publication.json"
         manifest.parent.mkdir(parents=True, exist_ok=True)
+        raw = required.read_bytes()
+        expected_blob = hashlib.sha1(f"blob {len(raw)}\\0".encode("ascii") + raw).hexdigest()
         manifest.write_text(
-            '{"schema_version":1,"request_id":"req","trade_date":"2026-09-21","stage":"open_30m","required_paths":["snapshots/required.json"]}\n',
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "request_id": "req",
+                    "trade_date": "2026-09-21",
+                    "stage": "open_30m",
+                    "required_outputs": [{"path": "snapshots/required.json", "blob_sha": expected_blob}],
+                },
+                separators=(",", ":"),
+            ) + "\n",
             encoding="utf-8",
         )
         subprocess.run(["git", "-C", str(writer), "add", "data/market-data"], check=True)
@@ -87,7 +100,16 @@ class StorePublicationDurabilityTests(unittest.TestCase):
         manifest = writer / "data" / "market-data" / "collector-state" / "publication.json"
         manifest.parent.mkdir(parents=True, exist_ok=True)
         manifest.write_text(
-            '{"schema_version":1,"request_id":"req","trade_date":"2026-09-21","stage":"open_30m","required_paths":["snapshots/never-persisted.json"]}\n',
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "request_id": "req",
+                    "trade_date": "2026-09-21",
+                    "stage": "open_30m",
+                    "required_outputs": [{"path": "snapshots/never-persisted.json", "blob_sha": "a" * 40}],
+                },
+                separators=(",", ":"),
+            ) + "\n",
             encoding="utf-8",
         )
         subprocess.run(["git", "-C", str(writer), "add", "data/market-data"], check=True)
