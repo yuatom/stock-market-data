@@ -3,216 +3,41 @@
   "$id": "https://github.com/yuatom/stock-market-data/schemas/dynamic-candidate-request.schema.json",
   "title": "Dynamic Research Object Market Data Request",
   "type": "object",
-  "required": [
-    "schema_version",
-    "request_id",
-    "requested_at",
-    "trade_date",
-    "stage",
-    "request_purpose",
-    "research_repository",
-    "research_repository_commit_sha",
-    "market_data_contract_sha",
-    "candidate_symbols",
-    "transaction_id",
-    "personal_state_proof",
-    "research_universe_resolution_status"
-  ],
+  "required": ["schema_version", "request_id", "requested_at", "trade_date", "stage", "request_purpose", "research_repository", "research_repository_commit_sha", "market_data_contract_sha", "candidate_symbols", "transaction_id", "personal_state_proof", "research_universe_resolution_status"],
   "properties": {
-    "schema_version": {
-      "const": 1
-    },
-    "request_id": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 160
-    },
-    "requested_at": {
-      "type": "string",
-      "format": "date-time"
-    },
-    "trade_date": {
-      "type": "string",
-      "format": "date"
-    },
-    "stage": {
-      "enum": [
-        "open_15m",
-        "open_30m",
-        "open_60m",
-        "close"
-      ]
-    },
-    "request_purpose": {
-      "enum": [
-        "carryover_validation",
-        "opportunity_discovery",
-        "personal_membership"
-      ]
-    },
-    "research_repository": {
-      "const": "yuatom/stock-dairy"
-    },
-    "research_repository_commit_sha": {
-      "type": "string",
-      "pattern": "^[0-9a-f]{40}$"
-    },
-    "market_data_contract_sha": {
-      "type": "string",
-      "pattern": "^[0-9a-f]{40}$"
-    },
-    "candidate_symbols": {
-      "type": "array",
-      "minItems": 1,
-      "maxItems": 8,
-      "uniqueItems": true,
-      "items": {
-        "type": "string",
-        "pattern": "^[A-Z][A-Z0-9.-]{0,9}$"
-      }
-    },
-    "transaction_id": {
-      "type": [
-        "string",
-        "null"
-      ],
-      "minLength": 1
-    },
+    "schema_version": {"const": 1},
+    "request_id": {"type": "string", "minLength": 1, "maxLength": 160},
+    "requested_at": {"type": "string", "format": "date-time"},
+    "trade_date": {"type": "string", "format": "date"},
+    "stage": {"enum": ["open_15m", "open_30m", "open_60m", "close"]},
+    "request_purpose": {"enum": ["carryover_validation", "opportunity_discovery", "personal_membership"]},
+    "research_repository": {"const": "yuatom/stock-dairy"},
+    "research_repository_commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "market_data_contract_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "candidate_symbols": {"type": "array", "minItems": 1, "maxItems": 8, "uniqueItems": true, "items": {"type": "string", "pattern": "^[A-Z][A-Z0-9.-]{0,9}$"}},
+    "transaction_id": {"type": "string", "minLength": 1},
     "personal_state_proof": {
       "type": "object",
-      "required": [
-        "dynamic_state_read_sha",
-        "blob_sha",
-        "state_version",
-        "authority_state",
-        "content_hash_status",
-        "content_sha256"
-      ],
+      "required": ["dynamic_state_read_sha", "blob_sha", "state_version", "authority_state", "content_hash_status", "content_sha256"],
       "properties": {
-        "dynamic_state_read_sha": {
-          "type": "string",
-          "pattern": "^[0-9a-f]{40}$"
-        },
-        "blob_sha": {
-          "type": "string",
-          "pattern": "^[0-9a-f]{40}$"
-        },
-        "state_version": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "authority_state": {
-          "enum": [
-            "shadow_pre_cutover",
-            "canonical"
-          ]
-        },
-        "content_hash_status": {
-          "enum": [
-            "canonical_sha256",
-            "unavailable_no_script"
-          ]
-        },
-        "content_sha256": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "pattern": "^[0-9a-f]{64}$"
-        }
+        "dynamic_state_read_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "blob_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "state_version": {"type": "integer", "minimum": 1},
+        "authority_state": {"enum": ["shadow_pre_cutover", "canonical"]},
+        "content_hash_status": {"enum": ["canonical_sha256", "unavailable_no_script"]},
+        "content_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"}
       },
       "allOf": [
-        {
-          "if": {
-            "properties": {
-              "content_hash_status": {
-                "const": "canonical_sha256"
-              }
-            },
-            "required": [
-              "content_hash_status"
-            ]
-          },
-          "then": {
-            "properties": {
-              "content_sha256": {
-                "type": "string",
-                "pattern": "^[0-9a-f]{64}$"
-              }
-            }
-          }
-        },
-        {
-          "if": {
-            "properties": {
-              "content_hash_status": {
-                "const": "unavailable_no_script"
-              }
-            },
-            "required": [
-              "content_hash_status"
-            ]
-          },
-          "then": {
-            "properties": {
-              "content_sha256": {
-                "type": "null"
-              }
-            }
-          }
-        }
+        {"if": {"properties": {"content_hash_status": {"const": "canonical_sha256"}}, "required": ["content_hash_status"]}, "then": {"properties": {"content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}}},
+        {"if": {"properties": {"content_hash_status": {"const": "unavailable_no_script"}}, "required": ["content_hash_status"]}, "then": {"properties": {"content_sha256": {"type": "null"}}}}
       ],
       "additionalProperties": false
     },
-    "research_universe_resolution_status": {
-      "const": "resolved"
-    }
+    "research_universe_resolution_status": {"const": "resolved"}
   },
   "allOf": [
-    {
-      "if": {
-        "properties": {
-          "stage": {
-            "const": "open_15m"
-          }
-        },
-        "required": [
-          "stage"
-        ]
-      },
-      "then": {
-        "properties": {
-          "request_purpose": {
-            "enum": [
-              "carryover_validation",
-              "personal_membership"
-            ]
-          }
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "stage": {
-            "const": "open_60m"
-          }
-        },
-        "required": [
-          "stage"
-        ]
-      },
-      "then": {
-        "properties": {
-          "request_purpose": {
-            "enum": [
-              "carryover_validation",
-              "personal_membership"
-            ]
-          }
-        }
-      }
-    }
+    {"if": {"properties": {"stage": {"const": "open_15m"}}, "required": ["stage"]}, "then": {"properties": {"request_purpose": {"enum": ["carryover_validation", "personal_membership"]}}}},
+    {"if": {"properties": {"stage": {"const": "open_60m"}}, "required": ["stage"]}, "then": {"properties": {"request_purpose": {"enum": ["carryover_validation", "personal_membership"]}}}}
   ],
   "additionalProperties": false
 }
