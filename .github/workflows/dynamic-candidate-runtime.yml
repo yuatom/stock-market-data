@@ -112,18 +112,34 @@ jobs:
           print(json.dumps({'request_id':request.get('request_id'),'stage':stage,'request_purpose':purpose,'candidate_count':len(symbols),'contract_sha':compute_sha}, sort_keys=True))
 
       - name: Collect qualified dynamic facts
+        id: collect
         working-directory: compute
         env:
           TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
+        shell: bash
         run: |
           set -euo pipefail
+          result_file="$(mktemp)"
           python scripts/collect_dynamic_candidates.py \
             --request ../control/requests/dynamic-candidate-request.json \
             --store-root ../store/data/market-data \
             --store-config config/market-data-store.yaml \
             --access-config config/market-data-collector-access.yaml \
             --dynamic-config config/dynamic-candidate-collection.yaml \
-            --expected-contract-sha '${{ steps.request.outputs.contract_sha }}'
+            --expected-contract-sha '${{ steps.request.outputs.contract_sha }}' | tee "$result_file"
+          manifest_path="$(python - "$result_file" <<'PY'
+import json
+import sys
+from pathlib import Path
+lines = [line for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines() if line.strip()]
+value = json.loads(lines[-1])
+manifest = value.get("publication_manifest_path")
+if not isinstance(manifest, str) or not manifest:
+    raise SystemExit("dynamic collector did not emit publication_manifest_path")
+print(manifest)
+PY
+          )"
+          echo "publication_manifest_path=$manifest_path" >> "$GITHUB_OUTPUT"
 
       - name: Rebuild private Store inventory
         working-directory: compute
@@ -165,4 +181,5 @@ jobs:
           python ../compute/scripts/verify_store_publication.py \
             --store-root . \
             --expected-commit "$(git rev-parse HEAD)" \
-            --writer-status dynamic_candidate_persisted
+            --writer-status dynamic_candidate_persisted \
+            --required-manifest "data/market-data/${{ steps.collect.outputs.publication_manifest_path }}"
