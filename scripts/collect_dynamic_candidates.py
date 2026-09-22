@@ -217,20 +217,28 @@ def collect_request(*, request: dict[str, Any], store_root: Path, store_config_p
         / trade_date[:7]
         / f"{trade_date}-dynamic-candidate-{stage}-{request_token}-publication.json"
     )
+    def output_ref(relative: str) -> dict[str, str]:
+        raw = (store_root / relative).read_bytes()
+        header = f"blob {len(raw)}\\0".encode("ascii")
+        return {
+            "path": relative,
+            "blob_sha": hashlib.sha1(header + raw).hexdigest(),
+        }
+
     manifest_payload = {
         "schema_version": 1,
         "request_id": request["request_id"],
         "trade_date": trade_date,
         "stage": stage,
         "request_purpose": request["request_purpose"],
-        "required_paths": sorted(set(required_paths)),
+        "required_outputs": [output_ref(path) for path in sorted(set(required_paths))],
     }
     manifest.write_text(
         json.dumps(manifest_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
         encoding="utf-8",
     )
     result["publication_manifest_path"] = str(manifest.relative_to(store_root))
-    result["required_store_paths"] = manifest_payload["required_paths"]
+    result["required_store_outputs"] = manifest_payload["required_outputs"]
     return result
 
 
