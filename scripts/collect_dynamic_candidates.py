@@ -9,6 +9,7 @@ the fixed collection universe. Open15/Open60 still forbid new radar discovery.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -175,6 +176,30 @@ def collect_request(*, request: dict[str, Any], store_root: Path, store_config_p
     state_payload["recorded_at"] = datetime.now(timezone.utc).isoformat()
     state.write_text(json.dumps(state_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
     result["result_state_path"] = str(state.relative_to(store_root))
+    required_paths = [result["result_state_path"]]
+    if result.get("snapshot_written") and result.get("snapshot_path"):
+        required_paths.append(str(result["snapshot_path"]))
+    request_token = hashlib.sha256(str(request["request_id"]).encode("utf-8")).hexdigest()[:16]
+    manifest = (
+        store_root
+        / "collector-state"
+        / trade_date[:7]
+        / f"{trade_date}-dynamic-candidate-{stage}-{request_token}-publication.json"
+    )
+    manifest_payload = {
+        "schema_version": 1,
+        "request_id": request["request_id"],
+        "trade_date": trade_date,
+        "stage": stage,
+        "request_purpose": request["request_purpose"],
+        "required_paths": sorted(set(required_paths)),
+    }
+    manifest.write_text(
+        json.dumps(manifest_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    result["publication_manifest_path"] = str(manifest.relative_to(store_root))
+    result["required_store_paths"] = manifest_payload["required_paths"]
     return result
 
 
