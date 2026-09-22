@@ -188,6 +188,9 @@ jobs:
                       raise SystemExit('unavailable_no_script collector proof requires null content_sha256')
               else:
                   raise SystemExit('collector request personal_state_proof content_hash_status is invalid')
+              transaction_id = request.get('transaction_id')
+              if not isinstance(transaction_id, str) or not transaction_id.strip():
+                  raise SystemExit('collector request transaction_id must be a non-empty string')
               if request.get('market_data_contract_sha') != compute_sha:
                   raise SystemExit(
                       'collector request market_data_contract_sha does not match current compute main'
