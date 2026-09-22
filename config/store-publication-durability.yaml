@@ -1,5 +1,5 @@
 schema_version: 1
-contract_version: 1
+contract_version: 2
 owner: yuatom/stock-market-data
 persisted_store: yuatom/stock-market-data-store
 store_retention_authority: yuatom/stock-market-data-store#README.md-consumer-visible-commit-retention
@@ -27,12 +27,27 @@ remote_publication_proof:
     - require_remote_main_equals_pushed_commit_while_writer_lock_is_held
     - require_remote_commit_object_readable
     - verify_changed_non_deleted_path_blob_ids_from_remote_commit
+    - read_required_output_manifest_at_remote_commit_when_present
+    - verify_every_declared_required_output_path_and_blob
     - create_or_verify_deterministic_durable_ref
     - exact_readback_durable_ref
     - emit_durability_receipt
   remote_main_mismatch: fail_closed
   remote_commit_unreadable: fail_closed
   remote_path_blob_mismatch: fail_closed
+  required_output_missing_or_unreadable: fail_closed
+
+required_output_closure:
+  manifest_scope: data/market-data/collector-state
+  manifest_schema_version: 1
+  required_fields: [schema_version, request_id, trade_date, stage, required_paths]
+  required_paths_are_relative_to_data_market_data_root: true
+  required_paths_must_be_unique: true
+  every_required_path_must_exist_at_store_commit_sha: true
+  every_required_path_blob_sha_must_be_exact_readable: true
+  producer_terminal_success_requires_closure: true
+  dynamic_candidate_snapshot_when_written_must_be_declared: true
+  dynamic_candidate_result_state_must_be_declared: true
 
 retention_anchor:
   ref_template: refs/tags/market-data-read/{store_commit_sha}
@@ -52,6 +67,7 @@ durability_receipt:
     - durability_ref
     - remote_main_sha
     - verified_changed_paths
+    - verified_required_outputs
   status_value: durability_verified
   private_payload_values_in_public_log_forbidden: true
 
@@ -64,4 +80,5 @@ consumer_contract:
   consumer_must_exact_read_commit_and_consumed_path_blob_ids: true
   proof_required_before_market_data_read_sha_pin: true
   producer_terminal_success_without_proof_is_not_pin_authority: true
+  producer_terminal_success_requires_required_output_closure: true
   proof_failure_must_not_substitute_newer_store_main: true
