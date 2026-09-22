@@ -101,6 +101,9 @@ def _load_request(path: Path, *, expected_contract_sha: str | None = None) -> di
             raise DynamicCandidateCollectionError("unavailable_no_script requires null content_sha256")
     else:
         raise DynamicCandidateCollectionError("personal_state_proof content_hash_status is invalid")
+    transaction_id = value.get("transaction_id")
+    if not isinstance(transaction_id, str) or not transaction_id.strip():
+        raise DynamicCandidateCollectionError("transaction_id must be a non-empty string")
     symbols = value.get("candidate_symbols")
     if not isinstance(symbols, list) or not (1 <= len(symbols) <= 8):
         raise DynamicCandidateCollectionError("candidate_symbols must contain 1-8 symbols")
