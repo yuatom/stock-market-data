@@ -94,6 +94,9 @@ jobs:
               raise SystemExit('invalid request_purpose')
           if stage in {'open_15m','open_60m'} and purpose not in {'carryover_validation','personal_membership'}:
               raise SystemExit(f'{stage} dynamic collection forbids new opportunity discovery')
+          transaction_id = request.get('transaction_id')
+          if not isinstance(transaction_id, str) or not transaction_id.strip():
+              raise SystemExit('transaction_id must be a non-empty string')
           symbols = request.get('candidate_symbols')
           if not isinstance(symbols, list) or not (1 <= len(symbols) <= 8):
               raise SystemExit('candidate_symbols must contain 1-8 symbols')
