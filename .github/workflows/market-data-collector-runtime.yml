@@ -484,6 +484,21 @@ jobs:
           --output ../store/data/market-data/collector-state/market-data-inventory.json
           >/dev/null
 
+      - name: Build Store publication manifest
+        id: publication
+        if: steps.invocation.outputs.mode != 'smoke_readonly'
+        working-directory: compute
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest_path="$(python scripts/build_store_publication_manifest.py \
+            --store-root ../store/data/market-data \
+            --result-file /tmp/collector-output.txt \
+            --request-id '${{ steps.invocation.outputs.request_id }}' \
+            --trade-date '${{ steps.invocation.outputs.trade_date }}' \
+            --stage '${{ steps.invocation.outputs.mode }}')"
+          echo "publication_manifest_path=$manifest_path" >> "$GITHUB_OUTPUT"
+
       - name: Persist private Store only
         if: steps.invocation.outputs.mode != 'smoke_readonly'
         working-directory: store
@@ -548,7 +563,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          args=()
+          manifest_path='${{ steps.publication.outputs.publication_manifest_path }}'
+          if [[ -n "$manifest_path" ]]; then
+            args+=(--required-manifest "data/market-data/$manifest_path")
+          fi
           python ../compute/scripts/verify_store_publication.py \
             --store-root . \
             --expected-commit "$(git rev-parse HEAD)" \
-            --writer-status store_persisted
+            --writer-status store_persisted \
+            "${args[@]}"
