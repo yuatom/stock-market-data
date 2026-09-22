@@ -48,11 +48,12 @@ def _load_request(path: Path, *, expected_contract_sha: str | None = None) -> di
     required = {
         "schema_version", "request_id", "requested_at", "trade_date", "stage", "request_purpose",
         "research_repository", "research_repository_commit_sha", "market_data_contract_sha", "candidate_symbols",
+        "transaction_id", "personal_state_proof", "research_universe_resolution_status",
     }
     missing = sorted(required - set(value))
     if missing:
         raise DynamicCandidateCollectionError(f"request missing fields: {missing}")
-    allowed = required | {"transaction_id"}
+    allowed = set(required)
     extra = sorted(set(value) - allowed)
     if extra:
         raise DynamicCandidateCollectionError(f"request has unsupported fields: {extra}")
@@ -73,6 +74,33 @@ def _load_request(path: Path, *, expected_contract_sha: str | None = None) -> di
             raise DynamicCandidateCollectionError(f"{field} must be a 40-char SHA")
     if expected_contract_sha and value.get("market_data_contract_sha") != expected_contract_sha:
         raise DynamicCandidateCollectionError("request market_data_contract_sha does not match collector contract")
+    if value.get("research_universe_resolution_status") != "resolved":
+        raise DynamicCandidateCollectionError("research_universe_resolution_status must be resolved")
+    proof = value.get("personal_state_proof")
+    if not isinstance(proof, dict):
+        raise DynamicCandidateCollectionError("personal_state_proof must be an object")
+    proof_required = {
+        "dynamic_state_read_sha", "blob_sha", "state_version", "authority_state",
+        "content_hash_status", "content_sha256",
+    }
+    if set(proof) != proof_required:
+        raise DynamicCandidateCollectionError("personal_state_proof fields are incomplete or unsupported")
+    for field in ("dynamic_state_read_sha", "blob_sha"):
+        if not HEX40.fullmatch(str(proof.get(field) or "")):
+            raise DynamicCandidateCollectionError(f"personal_state_proof {field} must be a 40-char SHA")
+    if not isinstance(proof.get("state_version"), int) or proof["state_version"] < 1:
+        raise DynamicCandidateCollectionError("personal_state_proof state_version must be positive")
+    if proof.get("authority_state") not in {"shadow_pre_cutover", "canonical"}:
+        raise DynamicCandidateCollectionError("personal_state_proof authority_state is invalid")
+    hash_status = proof.get("content_hash_status")
+    if hash_status == "canonical_sha256":
+        if not re.fullmatch(r"[0-9a-f]{64}", str(proof.get("content_sha256") or "")):
+            raise DynamicCandidateCollectionError("canonical personal_state_proof requires content_sha256")
+    elif hash_status == "unavailable_no_script":
+        if proof.get("content_sha256") is not None:
+            raise DynamicCandidateCollectionError("unavailable_no_script requires null content_sha256")
+    else:
+        raise DynamicCandidateCollectionError("personal_state_proof content_hash_status is invalid")
     symbols = value.get("candidate_symbols")
     if not isinstance(symbols, list) or not (1 <= len(symbols) <= 8):
         raise DynamicCandidateCollectionError("candidate_symbols must contain 1-8 symbols")
