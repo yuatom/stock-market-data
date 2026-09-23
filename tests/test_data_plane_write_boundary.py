@@ -35,6 +35,10 @@ class DataPlaneWriteBoundaryTest(unittest.TestCase):
             writer["terminal_success_requires"],
             "config/store-publication-durability.yaml#remote_publication_proof",
         )
+        self.assertEqual(
+            writer["required_output_closure"],
+            "config/store-publication-durability.yaml#required_output_closure",
+        )
 
     def test_consumer_pins_one_read_sha_per_frozen_input(self):
         consumer = self.contract["consumer_interface"]
@@ -46,6 +50,7 @@ class DataPlaneWriteBoundaryTest(unittest.TestCase):
         self.assertTrue(consumer["proxy_semantics_must_survive_into_frozen_research_input"])
         self.assertTrue(consumer["consumer_must_verify_publication_durability_before_pin"])
         self.assertTrue(consumer["producer_terminal_success_without_durability_proof_is_not_pin_authority"])
+        self.assertTrue(consumer["producer_terminal_success_without_required_output_closure_is_not_pin_authority"])
         self.assertTrue(consumer["proof_failure_must_not_substitute_newer_store_main"])
 
     def test_store_publication_durability_has_one_owner_contract(self):
@@ -63,6 +68,9 @@ class DataPlaneWriteBoundaryTest(unittest.TestCase):
         self.assertTrue(self.durability["retention_anchor"]["deletion_forbidden"])
         self.assertTrue(
             self.durability["consumer_contract"]["proof_required_before_market_data_read_sha_pin"]
+        )
+        self.assertTrue(
+            self.durability["consumer_contract"]["producer_terminal_success_requires_required_output_closure"]
         )
 
     def test_every_direct_store_writer_uses_one_serialization_lane_and_durability_helper(self):
