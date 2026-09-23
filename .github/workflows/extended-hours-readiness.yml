@@ -69,6 +69,21 @@ jobs:
           print(json.dumps({'status': 'readiness_evaluated', 'sessions': safe}, sort_keys=True))
           PY
 
+      - name: Build readiness publication manifest
+        id: publication
+        working-directory: compute
+        shell: bash
+        run: |
+          set -euo pipefail
+          trade_date="$(TZ=America/New_York date +%F)"
+          manifest_path="$(python scripts/build_store_publication_manifest.py \
+            --store-root ../store/data/market-data \
+            --result-file /tmp/extended-hours-readiness.json \
+            --request-id "extended-hours-readiness-$trade_date" \
+            --trade-date "$trade_date" \
+            --stage extended_hours_readiness)"
+          echo "publication_manifest_path=$manifest_path" >> "$GITHUB_OUTPUT"
+
       - name: Persist readiness control state only
         working-directory: store
         run: |
@@ -97,7 +112,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          args=()
+          manifest_path='${{ steps.publication.outputs.publication_manifest_path }}'
+          if [[ -n "$manifest_path" ]]; then
+            args+=(--required-manifest "data/market-data/$manifest_path")
+          fi
           python ../compute/scripts/verify_store_publication.py \
             --store-root . \
             --expected-commit "$(git rev-parse HEAD)" \
-            --writer-status readiness_persisted
+            --writer-status readiness_persisted \
+            "${args[@]}"
