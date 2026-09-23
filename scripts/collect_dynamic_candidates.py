@@ -219,7 +219,7 @@ def collect_request(*, request: dict[str, Any], store_root: Path, store_config_p
     )
     def output_ref(relative: str) -> dict[str, str]:
         raw = (store_root / relative).read_bytes()
-        header = f"blob {len(raw)}\\0".encode("ascii")
+        header = f"blob {len(raw)}\0".encode("ascii")
         return {
             "path": relative,
             "blob_sha": hashlib.sha1(header + raw).hexdigest(),
