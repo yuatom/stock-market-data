@@ -9,6 +9,7 @@ the fixed collection universe. Open15/Open60 still forbid new radar discovery.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -47,11 +48,12 @@ def _load_request(path: Path, *, expected_contract_sha: str | None = None) -> di
     required = {
         "schema_version", "request_id", "requested_at", "trade_date", "stage", "request_purpose",
         "research_repository", "research_repository_commit_sha", "market_data_contract_sha", "candidate_symbols",
+        "transaction_id", "personal_state_proof", "research_universe_resolution_status",
     }
     missing = sorted(required - set(value))
     if missing:
         raise DynamicCandidateCollectionError(f"request missing fields: {missing}")
-    allowed = required | {"transaction_id"}
+    allowed = set(required)
     extra = sorted(set(value) - allowed)
     if extra:
         raise DynamicCandidateCollectionError(f"request has unsupported fields: {extra}")
@@ -72,6 +74,36 @@ def _load_request(path: Path, *, expected_contract_sha: str | None = None) -> di
             raise DynamicCandidateCollectionError(f"{field} must be a 40-char SHA")
     if expected_contract_sha and value.get("market_data_contract_sha") != expected_contract_sha:
         raise DynamicCandidateCollectionError("request market_data_contract_sha does not match collector contract")
+    if value.get("research_universe_resolution_status") != "resolved":
+        raise DynamicCandidateCollectionError("research_universe_resolution_status must be resolved")
+    proof = value.get("personal_state_proof")
+    if not isinstance(proof, dict):
+        raise DynamicCandidateCollectionError("personal_state_proof must be an object")
+    proof_required = {
+        "dynamic_state_read_sha", "blob_sha", "state_version", "authority_state",
+        "content_hash_status", "content_sha256",
+    }
+    if set(proof) != proof_required:
+        raise DynamicCandidateCollectionError("personal_state_proof fields are incomplete or unsupported")
+    for field in ("dynamic_state_read_sha", "blob_sha"):
+        if not HEX40.fullmatch(str(proof.get(field) or "")):
+            raise DynamicCandidateCollectionError(f"personal_state_proof {field} must be a 40-char SHA")
+    if not isinstance(proof.get("state_version"), int) or proof["state_version"] < 1:
+        raise DynamicCandidateCollectionError("personal_state_proof state_version must be positive")
+    if proof.get("authority_state") not in {"shadow_pre_cutover", "canonical"}:
+        raise DynamicCandidateCollectionError("personal_state_proof authority_state is invalid")
+    hash_status = proof.get("content_hash_status")
+    if hash_status == "canonical_sha256":
+        if not re.fullmatch(r"[0-9a-f]{64}", str(proof.get("content_sha256") or "")):
+            raise DynamicCandidateCollectionError("canonical personal_state_proof requires content_sha256")
+    elif hash_status == "unavailable_no_script":
+        if proof.get("content_sha256") is not None:
+            raise DynamicCandidateCollectionError("unavailable_no_script requires null content_sha256")
+    else:
+        raise DynamicCandidateCollectionError("personal_state_proof content_hash_status is invalid")
+    transaction_id = value.get("transaction_id")
+    if not isinstance(transaction_id, str) or not transaction_id.strip():
+        raise DynamicCandidateCollectionError("transaction_id must be a non-empty string")
     symbols = value.get("candidate_symbols")
     if not isinstance(symbols, list) or not (1 <= len(symbols) <= 8):
         raise DynamicCandidateCollectionError("candidate_symbols must contain 1-8 symbols")
@@ -175,6 +207,38 @@ def collect_request(*, request: dict[str, Any], store_root: Path, store_config_p
     state_payload["recorded_at"] = datetime.now(timezone.utc).isoformat()
     state.write_text(json.dumps(state_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
     result["result_state_path"] = str(state.relative_to(store_root))
+    required_paths = [result["result_state_path"]]
+    if result.get("snapshot_written") and result.get("snapshot_path"):
+        required_paths.append(str(result["snapshot_path"]))
+    request_token = hashlib.sha256(str(request["request_id"]).encode("utf-8")).hexdigest()[:16]
+    manifest = (
+        store_root
+        / "collector-state"
+        / trade_date[:7]
+        / f"{trade_date}-dynamic-candidate-{stage}-{request_token}-publication.json"
+    )
+    def output_ref(relative: str) -> dict[str, str]:
+        raw = (store_root / relative).read_bytes()
+        header = f"blob {len(raw)}\0".encode("ascii")
+        return {
+            "path": relative,
+            "blob_sha": hashlib.sha1(header + raw).hexdigest(),
+        }
+
+    manifest_payload = {
+        "schema_version": 1,
+        "request_id": request["request_id"],
+        "trade_date": trade_date,
+        "stage": stage,
+        "request_purpose": request["request_purpose"],
+        "required_outputs": [output_ref(path) for path in sorted(set(required_paths))],
+    }
+    manifest.write_text(
+        json.dumps(manifest_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    result["publication_manifest_path"] = str(manifest.relative_to(store_root))
+    result["required_store_outputs"] = manifest_payload["required_outputs"]
     return result
 
 

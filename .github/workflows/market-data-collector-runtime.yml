@@ -142,7 +142,8 @@ jobs:
               request = json.loads(path.read_text(encoding='utf-8'))
               required = {
                   'schema_version','request_id','requested_at','trade_date','stage','mode',
-                  'research_repository','research_repository_commit_sha','market_data_contract_sha'
+                  'research_repository','research_repository_commit_sha','market_data_contract_sha',
+                  'transaction_id','personal_state_proof','research_universe_resolution_status'
               }
               missing = sorted(required - set(request))
               if missing:
@@ -159,6 +160,37 @@ jobs:
                   value = str(request.get(field) or '')
                   if not re.fullmatch(r'[0-9a-f]{40}', value):
                       raise SystemExit(f'collector request {field} is invalid')
+              if request.get('research_universe_resolution_status') != 'resolved':
+                  raise SystemExit('collector request research_universe_resolution_status must be resolved')
+              proof = request.get('personal_state_proof')
+              if not isinstance(proof, dict):
+                  raise SystemExit('collector request personal_state_proof must be an object')
+              expected_proof_fields = {
+                  'dynamic_state_read_sha','blob_sha','state_version','authority_state',
+                  'content_hash_status','content_sha256',
+              }
+              if set(proof) != expected_proof_fields:
+                  raise SystemExit('collector request personal_state_proof fields are incomplete or unsupported')
+              for field in ('dynamic_state_read_sha','blob_sha'):
+                  value = str(proof.get(field) or '')
+                  if not re.fullmatch(r'[0-9a-f]{40}', value):
+                      raise SystemExit(f'collector request personal_state_proof {field} is invalid')
+              if not isinstance(proof.get('state_version'), int) or proof['state_version'] < 1:
+                  raise SystemExit('collector request personal_state_proof state_version is invalid')
+              if proof.get('authority_state') not in {'shadow_pre_cutover','canonical'}:
+                  raise SystemExit('collector request personal_state_proof authority_state is invalid')
+              hash_status = proof.get('content_hash_status')
+              if hash_status == 'canonical_sha256':
+                  if not re.fullmatch(r'[0-9a-f]{64}', str(proof.get('content_sha256') or '')):
+                      raise SystemExit('canonical collector personal_state_proof requires content_sha256')
+              elif hash_status == 'unavailable_no_script':
+                  if proof.get('content_sha256') is not None:
+                      raise SystemExit('unavailable_no_script collector proof requires null content_sha256')
+              else:
+                  raise SystemExit('collector request personal_state_proof content_hash_status is invalid')
+              transaction_id = request.get('transaction_id')
+              if not isinstance(transaction_id, str) or not transaction_id.strip():
+                  raise SystemExit('collector request transaction_id must be a non-empty string')
               if request.get('market_data_contract_sha') != compute_sha:
                   raise SystemExit(
                       'collector request market_data_contract_sha does not match current compute main'
@@ -452,6 +484,21 @@ jobs:
           --output ../store/data/market-data/collector-state/market-data-inventory.json
           >/dev/null
 
+      - name: Build Store publication manifest
+        id: publication
+        if: steps.invocation.outputs.mode != 'smoke_readonly'
+        working-directory: compute
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest_path="$(python scripts/build_store_publication_manifest.py \
+            --store-root ../store/data/market-data \
+            --result-file /tmp/collector-output.txt \
+            --request-id '${{ steps.invocation.outputs.request_id }}' \
+            --trade-date '${{ steps.invocation.outputs.trade_date }}' \
+            --stage '${{ steps.invocation.outputs.mode }}')"
+          echo "publication_manifest_path=$manifest_path" >> "$GITHUB_OUTPUT"
+
       - name: Persist private Store only
         if: steps.invocation.outputs.mode != 'smoke_readonly'
         working-directory: store
@@ -516,7 +563,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          args=()
+          manifest_path='${{ steps.publication.outputs.publication_manifest_path }}'
+          if [[ -n "$manifest_path" ]]; then
+            args+=(--required-manifest "data/market-data/$manifest_path")
+          fi
           python ../compute/scripts/verify_store_publication.py \
             --store-root . \
             --expected-commit "$(git rev-parse HEAD)" \
-            --writer-status store_persisted
+            --writer-status store_persisted \
+            "${args[@]}"

@@ -1,5 +1,5 @@
 schema_version: 1
-contract_version: 4
+contract_version: 5
 purpose:
   - collect bounded transaction-scoped regular-session market facts for opportunity-discovery candidates, inherited lifecycle objects, and explicit personal-membership inputs
   - keep the fixed collection universe unchanged as the normal supported baseline
@@ -22,6 +22,9 @@ principles:
   open60_new_radar_forbidden: true
   request_must_bind_stock_dairy_repository_sha: true
   request_must_bind_current_market_data_contract_sha: true
+  request_must_bind_personal_state_proof: true
+  request_must_bind_research_universe_resolution: true
+  request_before_personal_state_resolution_forbidden: true
 
 request:
   schema: schemas/dynamic-candidate-request.schema.json
@@ -36,6 +39,12 @@ request:
     open_60m: [carryover_validation, personal_membership]
     close: [opportunity_discovery, carryover_validation, personal_membership]
   symbol_limit: 8
+  required_barrier_fields:
+    - transaction_id
+    - personal_state_proof
+    - research_universe_resolution_status
+  research_universe_resolution_status_must_equal: resolved
+  personal_state_proof_hash_status_values: [canonical_sha256, unavailable_no_script]
   personal_membership:
     semantics: request_scoped_market_data_only
     durable_membership_authority: false
@@ -69,3 +78,7 @@ result:
   request_purpose_must_be_preserved_in_result: true
   candidate_missing_is_explicit: true
   result_state_path: collector-state/{YYYY-MM}/{trade_date}-dynamic-candidate-{stage}.json
+  publication_manifest_required_before_terminal_success: true
+  publication_manifest_authority: config/store-publication-durability.yaml#required_output_closure
+  snapshot_path_when_written_must_be_declared_with_blob_sha: true
+  result_state_path_must_be_declared_with_blob_sha: true

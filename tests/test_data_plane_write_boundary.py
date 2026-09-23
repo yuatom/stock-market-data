@@ -35,6 +35,10 @@ class DataPlaneWriteBoundaryTest(unittest.TestCase):
             writer["terminal_success_requires"],
             "config/store-publication-durability.yaml#remote_publication_proof",
         )
+        self.assertEqual(
+            writer["required_output_closure"],
+            "config/store-publication-durability.yaml#required_output_closure",
+        )
 
     def test_consumer_pins_one_read_sha_per_frozen_input(self):
         consumer = self.contract["consumer_interface"]
@@ -46,6 +50,7 @@ class DataPlaneWriteBoundaryTest(unittest.TestCase):
         self.assertTrue(consumer["proxy_semantics_must_survive_into_frozen_research_input"])
         self.assertTrue(consumer["consumer_must_verify_publication_durability_before_pin"])
         self.assertTrue(consumer["producer_terminal_success_without_durability_proof_is_not_pin_authority"])
+        self.assertTrue(consumer["producer_terminal_success_without_required_output_closure_is_not_pin_authority"])
         self.assertTrue(consumer["proof_failure_must_not_substitute_newer_store_main"])
 
     def test_store_publication_durability_has_one_owner_contract(self):
@@ -64,6 +69,9 @@ class DataPlaneWriteBoundaryTest(unittest.TestCase):
         self.assertTrue(
             self.durability["consumer_contract"]["proof_required_before_market_data_read_sha_pin"]
         )
+        self.assertTrue(
+            self.durability["consumer_contract"]["producer_terminal_success_requires_required_output_closure"]
+        )
 
     def test_every_direct_store_writer_uses_one_serialization_lane_and_durability_helper(self):
         workflows = self.durability["writer_scope"]["workflows"]
@@ -81,6 +89,31 @@ class DataPlaneWriteBoundaryTest(unittest.TestCase):
                 run = verification[0]["run"]
                 self.assertIn("verify_store_publication.py", run)
                 self.assertIn("--expected-commit", run)
+                self.assertIn("--required-manifest", run)
+
+    def test_readiness_writer_stages_only_state_and_generated_publication_manifest(self):
+        workflow = yaml.safe_load(
+            (ROOT / ".github/workflows/extended-hours-readiness.yml").read_text(encoding="utf-8")
+        )
+        steps = workflow["jobs"]["evaluate"]["steps"]
+        persist = next(step for step in steps if step.get("name") == "Persist readiness control state only")
+        run = persist["run"]
+        self.assertIn("path='data/market-data/collector-state/probes/nasdaq-extended/promotion-readiness.json'", run)
+        self.assertIn("manifest_path='", run)
+        self.assertIn('manifest_git_path="data/market-data/$manifest_path"', run)
+        self.assertIn('git add -- "$path"', run)
+        self.assertIn('git add -- "$manifest_git_path"', run)
+        self.assertNotIn("git add -- data/market-data", run)
+        self.assertIn('collector-state/*-publication.json', run)
+
+    def test_dynamic_candidate_contract_requires_personal_state_and_output_closure(self):
+        dynamic = yaml.safe_load((ROOT / "config/dynamic-candidate-collection.yaml").read_text(encoding="utf-8"))
+        self.assertEqual(dynamic["contract_version"], 5)
+        self.assertTrue(dynamic["principles"]["request_must_bind_personal_state_proof"])
+        self.assertTrue(dynamic["principles"]["request_before_personal_state_resolution_forbidden"])
+        self.assertEqual(dynamic["request"]["research_universe_resolution_status_must_equal"], "resolved")
+        self.assertTrue(dynamic["result"]["publication_manifest_required_before_terminal_success"])
+        self.assertTrue(dynamic["result"]["snapshot_path_when_written_must_be_declared_with_blob_sha"])
 
     def test_supported_context_baseline_is_data_plane_owned(self):
         baseline = self.contract["supported_context_baseline"]
