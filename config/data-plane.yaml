@@ -1,5 +1,5 @@
 schema_version: 1
-contract_version: 14
+contract_version: 15
 repository: yuatom/stock-market-data
 store_publication_durability_authority: config/store-publication-durability.yaml
 purpose:
@@ -13,6 +13,8 @@ purpose:
   - keep mutable control branches as data-only triggers while execution logic always resolves from current main
   - permit owner-authorized historical Premarket probe sample replay only through exact source-probe identity and the normal private Store writer path
   - make post-push Store durability proof a prerequisite for consumer-visible writer success
+  - require request-scoped Personal State provenance before stock-dairy may trigger Data Plane control writes
+  - close every producer-declared consumer-visible output by exact path and blob at one durable Store commit before terminal success
 
 boundaries:
   owns:
@@ -235,6 +237,12 @@ collector_request_interface:
     - trade_date
     - stage
     - request_id
+    - transaction_id
+    - personal_state_proof
+    - research_universe_resolution_status
+  personal_state_proof_required: true
+  research_universe_resolution_status_must_equal: resolved
+  request_before_personal_state_resolution_forbidden: true
   market_data_contract_sha_must_equal_current_compute_main: true
   current_trade_date_only: true
   request_is_control_state_not_market_fact: true
@@ -270,6 +278,8 @@ store_publication_durability:
   authority: config/store-publication-durability.yaml
   applies_to_all_consumer_visible_store_writers: true
   writer_terminal_success_requires_durability_verified: true
+  producer_terminal_success_requires_required_output_closure: true
+  required_output_manifest_authority: config/store-publication-durability.yaml#required_output_closure
   durable_ref_template: refs/tags/market-data-read/{store_commit_sha}
   store_retention_authority: yuatom/stock-market-data-store#README.md-consumer-visible-commit-retention
   public_workflow_receipt_contains_private_payload_forbidden: true
@@ -281,6 +291,7 @@ payload_writers:
     allowed_prefix: data/market-data
     allowed_write_kinds: [daily_series, session_capture, stage_snapshot, deterministic_metric_proof, collector_state, probe_state, inventory]
     terminal_success_requires: config/store-publication-durability.yaml#remote_publication_proof
+    required_output_closure: config/store-publication-durability.yaml#required_output_closure
   explicit_data_maintenance:
     executor: stock_market_data_github_actions_or_local_recovery
     allowed_repository: yuatom/stock-market-data-store
@@ -318,6 +329,7 @@ consumer_interface:
   consumer_must_verify_publication_durability_before_pin: true
   durability_authority: config/store-publication-durability.yaml#consumer_contract
   producer_terminal_success_without_durability_proof_is_not_pin_authority: true
+  producer_terminal_success_without_required_output_closure_is_not_pin_authority: true
   proof_failure_must_not_substitute_newer_store_main: true
   premarket_refs_are_first_class_market_data_refs: true
   cutoff_valid_context_proxy_refs_are_first_class_market_data_refs: true
