@@ -1,13 +1,16 @@
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import collect_dynamic_candidates as dynamic  # noqa: E402
+import verify_store_publication as durability  # noqa: E402
 
 
 class DynamicCandidateRequestTests(unittest.TestCase):
@@ -103,6 +106,85 @@ class DynamicCandidateRequestTests(unittest.TestCase):
         path = self._write(value)
         with self.assertRaises(dynamic.DynamicCandidateCollectionError):
             dynamic._load_request(path)
+
+    def test_production_dynamic_manifest_closes_against_actual_git_blobs_and_verifier(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            remote = root / "remote.git"
+            writer = root / "writer"
+            subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
+            subprocess.run(["git", "init", "-q", str(writer)], check=True)
+            subprocess.run(["git", "-C", str(writer), "config", "user.name", "test"], check=True)
+            subprocess.run(["git", "-C", str(writer), "config", "user.email", "test@example.invalid"], check=True)
+            subprocess.run(["git", "-C", str(writer), "remote", "add", "origin", str(remote)], check=True)
+
+            store_root = writer / "data" / "market-data"
+            seed = store_root / "collector-state" / "seed.json"
+            seed.parent.mkdir(parents=True, exist_ok=True)
+            seed.write_text("{}\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(writer), "add", "data/market-data"], check=True)
+            subprocess.run(["git", "-C", str(writer), "commit", "-q", "-m", "seed"], check=True)
+            subprocess.run(["git", "-C", str(writer), "branch", "-M", "main"], check=True)
+            subprocess.run(["git", "-C", str(writer), "push", "-q", "-u", "origin", "main"], check=True)
+
+            def fake_collect_regular_window(**kwargs):
+                snapshot = kwargs["store_root"] / "snapshots" / "2026-08" / "dynamic-open30.json"
+                snapshot.parent.mkdir(parents=True, exist_ok=True)
+                snapshot.write_text('{"snapshot":"ok"}\n', encoding="utf-8")
+                return {
+                    "status": "ok",
+                    "snapshot_written": True,
+                    "snapshot_path": str(snapshot.relative_to(kwargs["store_root"])),
+                }
+
+            request = self._request()
+            with mock.patch.object(dynamic, "_ensure_daily_history", return_value=([], [])), mock.patch.object(
+                dynamic, "collect_regular_window", side_effect=fake_collect_regular_window
+            ):
+                result = dynamic.collect_request(
+                    request=request,
+                    store_root=store_root,
+                    store_config_path=ROOT / "config" / "market-data-store.yaml",
+                    access_path=ROOT / "config" / "market-data-collector-access.yaml",
+                    dynamic_config_path=ROOT / "config" / "dynamic-candidate-collection.yaml",
+                )
+
+            manifest_relative = result["publication_manifest_path"]
+            manifest = json.loads((store_root / manifest_relative).read_text(encoding="utf-8"))
+            self.assertEqual(
+                {item["path"] for item in manifest["required_outputs"]},
+                {result["result_state_path"], result["snapshot_path"]},
+            )
+
+            subprocess.run(["git", "-C", str(writer), "add", "data/market-data"], check=True)
+            subprocess.run(["git", "-C", str(writer), "commit", "-q", "-m", "dynamic outputs"], check=True)
+            commit = subprocess.check_output(
+                ["git", "-C", str(writer), "rev-parse", "HEAD"], text=True
+            ).strip()
+            subprocess.run(["git", "-C", str(writer), "push", "-q", "origin", "HEAD:main"], check=True)
+
+            for item in manifest["required_outputs"]:
+                actual = subprocess.check_output(
+                    [
+                        "git",
+                        "-C",
+                        str(writer),
+                        "rev-parse",
+                        f"{commit}:data/market-data/{item['path']}",
+                    ],
+                    text=True,
+                ).strip()
+                self.assertEqual(item["blob_sha"], actual)
+
+            receipt = durability.verify_publication(
+                writer,
+                commit,
+                required_manifest=f"data/market-data/{manifest_relative}",
+            )
+            self.assertEqual(receipt["status"], "durability_verified")
+            verified = {row["path"]: row["blob_sha"] for row in receipt["verified_required_outputs"]}
+            for item in manifest["required_outputs"]:
+                self.assertEqual(verified[f"data/market-data/{item['path']}"], item["blob_sha"])
 
     def test_dynamic_contract_keeps_fixed_universe_separate(self):
         text = (ROOT / "config" / "dynamic-candidate-collection.yaml").read_text(encoding="utf-8")
