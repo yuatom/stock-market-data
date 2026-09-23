@@ -68,7 +68,7 @@ class StorePublicationDurabilityTests(unittest.TestCase):
         manifest = writer / "data" / "market-data" / "collector-state" / "publication.json"
         manifest.parent.mkdir(parents=True, exist_ok=True)
         raw = required.read_bytes()
-        expected_blob = hashlib.sha1(f"blob {len(raw)}\\0".encode("ascii") + raw).hexdigest()
+        expected_blob = hashlib.sha1(f"blob {len(raw)}\0".encode("ascii") + raw).hexdigest()
         manifest.write_text(
             json.dumps(
                 {
