@@ -89,6 +89,16 @@ class DataPlaneWriteBoundaryTest(unittest.TestCase):
                 run = verification[0]["run"]
                 self.assertIn("verify_store_publication.py", run)
                 self.assertIn("--expected-commit", run)
+                self.assertIn("--required-manifest", run)
+
+    def test_dynamic_candidate_contract_requires_personal_state_and_output_closure(self):
+        dynamic = yaml.safe_load((ROOT / "config/dynamic-candidate-collection.yaml").read_text(encoding="utf-8"))
+        self.assertEqual(dynamic["contract_version"], 5)
+        self.assertTrue(dynamic["principles"]["request_must_bind_personal_state_proof"])
+        self.assertTrue(dynamic["principles"]["request_before_personal_state_resolution_forbidden"])
+        self.assertEqual(dynamic["request"]["research_universe_resolution_status_must_equal"], "resolved")
+        self.assertTrue(dynamic["result"]["publication_manifest_required_before_terminal_success"])
+        self.assertTrue(dynamic["result"]["snapshot_path_when_written_must_be_declared_with_blob_sha"])
 
     def test_supported_context_baseline_is_data_plane_owned(self):
         baseline = self.contract["supported_context_baseline"]
