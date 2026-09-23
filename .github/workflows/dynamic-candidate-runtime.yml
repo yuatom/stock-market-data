@@ -157,18 +157,7 @@ jobs:
             --access-config config/market-data-collector-access.yaml \
             --dynamic-config config/dynamic-candidate-collection.yaml \
             --expected-contract-sha '${{ steps.request.outputs.contract_sha }}' | tee "$result_file"
-          manifest_path="$(python - "$result_file" <<'PY'
-import json
-import sys
-from pathlib import Path
-lines = [line for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines() if line.strip()]
-value = json.loads(lines[-1])
-manifest = value.get("publication_manifest_path")
-if not isinstance(manifest, str) or not manifest:
-    raise SystemExit("dynamic collector did not emit publication_manifest_path")
-print(manifest)
-PY
-          )"
+          manifest_path="$(python -c 'import json,sys; from pathlib import Path; lines=[line for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines() if line.strip()]; value=json.loads(lines[-1]); manifest=value.get("publication_manifest_path"); isinstance(manifest,str) and manifest or (_ for _ in ()).throw(SystemExit("dynamic collector did not emit publication_manifest_path")); print(manifest)' "$result_file")"
           echo "publication_manifest_path=$manifest_path" >> "$GITHUB_OUTPUT"
 
       - name: Rebuild private Store inventory
