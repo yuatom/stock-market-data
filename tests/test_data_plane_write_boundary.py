@@ -91,6 +91,21 @@ class DataPlaneWriteBoundaryTest(unittest.TestCase):
                 self.assertIn("--expected-commit", run)
                 self.assertIn("--required-manifest", run)
 
+    def test_readiness_writer_stages_only_state_and_generated_publication_manifest(self):
+        workflow = yaml.safe_load(
+            (ROOT / ".github/workflows/extended-hours-readiness.yml").read_text(encoding="utf-8")
+        )
+        steps = workflow["jobs"]["evaluate"]["steps"]
+        persist = next(step for step in steps if step.get("name") == "Persist readiness control state only")
+        run = persist["run"]
+        self.assertIn("path='data/market-data/collector-state/probes/nasdaq-extended/promotion-readiness.json'", run)
+        self.assertIn("manifest_path='", run)
+        self.assertIn('manifest_git_path="data/market-data/$manifest_path"', run)
+        self.assertIn('git add -- "$path"', run)
+        self.assertIn('git add -- "$manifest_git_path"', run)
+        self.assertNotIn("git add -- data/market-data", run)
+        self.assertIn('collector-state/*-publication.json', run)
+
     def test_dynamic_candidate_contract_requires_personal_state_and_output_closure(self):
         dynamic = yaml.safe_load((ROOT / "config/dynamic-candidate-collection.yaml").read_text(encoding="utf-8"))
         self.assertEqual(dynamic["contract_version"], 5)
