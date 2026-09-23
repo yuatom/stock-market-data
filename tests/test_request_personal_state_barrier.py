@@ -3,9 +3,9 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import tempfile
+import unittest
 from pathlib import Path
-
-import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -48,38 +48,46 @@ def _request() -> dict:
     }
 
 
-def test_dynamic_request_requires_personal_state_barrier(tmp_path: Path) -> None:
-    value = _request()
-    value.pop("personal_state_proof")
-    path = tmp_path / "request.json"
-    path.write_text(json.dumps(value), encoding="utf-8")
-    with pytest.raises(MODULE.DynamicCandidateCollectionError, match="missing fields"):
-        MODULE._load_request(path)
+class RequestPersonalStateBarrierTest(unittest.TestCase):
+    def _write(self, value: dict) -> tuple[tempfile.TemporaryDirectory, Path]:
+        tmp = tempfile.TemporaryDirectory()
+        path = Path(tmp.name) / "request.json"
+        path.write_text(json.dumps(value), encoding="utf-8")
+        return tmp, path
+
+    def test_dynamic_request_requires_personal_state_barrier(self):
+        value = _request()
+        value.pop("personal_state_proof")
+        tmp, path = self._write(value)
+        self.addCleanup(tmp.cleanup)
+        with self.assertRaisesRegex(MODULE.DynamicCandidateCollectionError, "missing fields"):
+            MODULE._load_request(path)
+
+    def test_dynamic_request_accepts_no_script_personal_state_proof(self):
+        tmp, path = self._write(_request())
+        self.addCleanup(tmp.cleanup)
+        value = MODULE._load_request(path, expected_contract_sha="e" * 40)
+        self.assertEqual(value["personal_state_proof"]["content_hash_status"], "unavailable_no_script")
+        self.assertIsNone(value["personal_state_proof"]["content_sha256"])
+
+    def test_dynamic_request_rejects_fabricated_no_script_digest(self):
+        value = _request()
+        value["personal_state_proof"]["content_sha256"] = "f" * 64
+        tmp, path = self._write(value)
+        self.addCleanup(tmp.cleanup)
+        with self.assertRaisesRegex(MODULE.DynamicCandidateCollectionError, "requires null content_sha256"):
+            MODULE._load_request(path)
+
+    def test_wire_schemas_require_personal_state_barrier(self):
+        for relative in (
+            "schemas/collector-request.schema.json",
+            "schemas/dynamic-candidate-request.schema.json",
+        ):
+            schema = json.loads((ROOT / relative).read_text(encoding="utf-8"))
+            required = set(schema["required"])
+            self.assertTrue({"transaction_id", "personal_state_proof", "research_universe_resolution_status"} <= required)
+            self.assertEqual(schema["properties"]["research_universe_resolution_status"]["const"], "resolved")
 
 
-def test_dynamic_request_accepts_no_script_personal_state_proof(tmp_path: Path) -> None:
-    path = tmp_path / "request.json"
-    path.write_text(json.dumps(_request()), encoding="utf-8")
-    value = MODULE._load_request(path, expected_contract_sha="e" * 40)
-    assert value["personal_state_proof"]["content_hash_status"] == "unavailable_no_script"
-    assert value["personal_state_proof"]["content_sha256"] is None
-
-
-def test_dynamic_request_rejects_fabricated_no_script_digest(tmp_path: Path) -> None:
-    value = _request()
-    value["personal_state_proof"]["content_sha256"] = "f" * 64
-    path = tmp_path / "request.json"
-    path.write_text(json.dumps(value), encoding="utf-8")
-    with pytest.raises(MODULE.DynamicCandidateCollectionError, match="requires null content_sha256"):
-        MODULE._load_request(path)
-
-
-def test_wire_schemas_require_personal_state_barrier() -> None:
-    for relative in (
-        "schemas/collector-request.schema.json",
-        "schemas/dynamic-candidate-request.schema.json",
-    ):
-        schema = json.loads((ROOT / relative).read_text(encoding="utf-8"))
-        required = set(schema["required"])
-        assert {"transaction_id", "personal_state_proof", "research_universe_resolution_status"} <= required
-        assert schema["properties"]["research_universe_resolution_status"]["const"] == "resolved"
+if __name__ == "__main__":
+    unittest.main()
