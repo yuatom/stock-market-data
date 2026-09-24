@@ -1,22 +1,22 @@
 {
   "schema_version": 1,
-  "request_id": "stock-dairy-20260923-open30-radar-095740-et-01",
-  "requested_at": "2026-09-23T14:11:17Z",
-  "trade_date": "2026-09-23",
+  "request_id": "stock-dairy-20260924-open30-personal-095742-et-01",
+  "requested_at": "2026-09-24T14:04:30Z",
+  "trade_date": "2026-09-24",
   "stage": "open_30m",
-  "request_purpose": "opportunity_discovery",
+  "request_purpose": "personal_membership",
   "research_repository": "yuatom/stock-dairy",
-  "research_repository_commit_sha": "09907cde2484151c12f50b957a124ac1a9326c88",
+  "research_repository_commit_sha": "2e2147bea405086a4528aca8d78ae3e38545eb74",
   "market_data_contract_sha": "72dbc60bdc4a5601aa9416f6d8c097a2fd28bed4",
-  "candidate_symbols": ["VKTX", "BFLY", "INOD"],
-  "transaction_id": "open30-20260923-095740-et-01",
+  "candidate_symbols": ["BILI", "CRCL", "ASML", "CRWV", "BBAI"],
+  "transaction_id": "open30-20260924-095742-et-01",
   "personal_state_proof": {
-    "dynamic_state_read_sha": "b7602e79707c74f8fa860c7ebd7f0d217ffe268c",
+    "dynamic_state_read_sha": "3b9e81c9c98b2890edc21af9ebbcfba71b9b6436",
     "blob_sha": "0392a34c368b90447732aa690ca807321adfcddb",
     "state_version": 5,
     "authority_state": "canonical",
-    "content_hash_status": "canonical_sha256",
-    "content_sha256": "a8fbf05e0c57ee12cc464bd2bb9660e7849eeac013651d91e5c3bf1cd849dd8e"
+    "content_hash_status": "unavailable_no_script",
+    "content_sha256": null
   },
   "research_universe_resolution_status": "resolved"
 }
