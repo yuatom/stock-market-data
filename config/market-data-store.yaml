@@ -1,5 +1,5 @@
 schema_version: 1
-contract_version: 2
+contract_version: 3
 ownership_authority: config/data-plane.yaml
 collection_universe_authority: config/collection-universe.json
 purpose:
@@ -145,7 +145,7 @@ collector:
     path: requests/collector-request.json
     schema: schemas/collector-request.schema.json
     trigger_event: push_on_collector_requests_branch_only
-    accepted_modes: [open_15m, open_30m, open_60m, close]
+    accepted_modes: [premarket, open_15m, open_30m, open_60m, close]
     target_trade_date_must_match_current_et_trade_date: true
     request_stage_must_equal_mode: true
     request_market_data_contract_sha_must_equal_current_compute_main: true
@@ -213,12 +213,14 @@ collector:
     runtime_must_not_wait_for_late_scheduled_workflow_beyond_bounded_window: true
     report_schedule_shift_required: false
     daily_series_maturity_schedule_must_finish_before_premarket_report: true
-    live_premarket_scheduled: false
-    live_premarket_disabled_reason: no_qualified_live_premarket_adapter_registered
+    live_premarket_scheduled: true
+    live_premarket_mode: premarket
+    live_premarket_provider: nasdaq_public_extended
     shadow_probe_does_not_change_live_source_status: true
   schedules_et:
     previous_session_eod: '07:05'
-    premarket_shadow_probe: '07:20'
+    premarket_shadow_probe: '07:10'
+    premarket: '07:20'
     open_15m: '09:46'
     open_30m: '10:01'
     open_60m: '10:31'
