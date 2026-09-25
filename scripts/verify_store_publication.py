@@ -123,7 +123,9 @@ def _ensure_retention_ref(
     def read_tag() -> str | None:
         observed = _one_remote_ref(root, remote, durable_ref, transport=transport)
         if observed is not None and observed != expected_commit:
-            raise StorePublicationError("STORE_PUBLICATION_RETENTION_REF_CONFLICT")
+            raise StorePublicationError(
+                f"durable ref {durable_ref} already targets {observed}, expected {expected_commit}"
+            )
         return observed
 
     for attempt in range(REMOTE_ATTEMPTS):
