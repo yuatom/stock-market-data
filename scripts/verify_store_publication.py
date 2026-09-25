@@ -3,14 +3,27 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
+import sys
+import time
 from pathlib import Path
 from typing import Any
+
+try:
+    from scripts.push_proof_store_commit import transient
+except ModuleNotFoundError:
+    from push_proof_store_commit import transient
 
 
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 REF_PREFIX = "refs/tags/market-data-read/"
+# Implementation bounds; kept aligned with the publication transport owner by tests.
+REMOTE_ATTEMPTS = 3
+REMOTE_COMMAND_TIMEOUT_SECONDS = 30
+REMOTE_BUDGET_SECONDS = 120
+REMOTE_BACKOFF_SECONDS = (1, 3)
 
 
 class StorePublicationError(RuntimeError):
@@ -18,21 +31,73 @@ class StorePublicationError(RuntimeError):
 
 
 def _git(root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(
-        ["git", "-C", str(root), *args],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    if check and result.returncode != 0:
-        raise StorePublicationError(
-            f"git {' '.join(args)} failed ({result.returncode}): {result.stderr.strip()}"
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), *args],
+            text=True, capture_output=True, check=False,
+            timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
+            env=dict(os.environ, GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="Never"),
         )
+    except (OSError, subprocess.TimeoutExpired):
+        raise StorePublicationError("STORE_LOCAL_GIT_UNAVAILABLE") from None
+    if check and result.returncode != 0:
+        # A raw Git error can contain credential URLs or private payload values.
+        raise StorePublicationError("STORE_LOCAL_GIT_FAILED")
     return result
 
 
-def _one_remote_ref(root: Path, remote: str, ref: str) -> str | None:
-    result = _git(root, "ls-remote", remote, ref)
+class _PublicationTransport:
+    """One bounded verification attempt; never switch commit or retry a whole producer."""
+
+    def __init__(self, root: Path):
+        self.root = root
+        self.deadline = time.monotonic() + REMOTE_BUDGET_SECONDS
+
+    def remaining(self) -> float:
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise StorePublicationError("STORE_PUBLICATION_TRANSPORT_DEADLINE")
+        return remaining
+
+    def backoff(self, attempt: int) -> None:
+        if attempt:
+            delay = REMOTE_BACKOFF_SECONDS[attempt - 1]
+            if delay >= self.remaining():
+                raise StorePublicationError("STORE_PUBLICATION_TRANSPORT_DEADLINE")
+            time.sleep(delay)
+
+    def once(self, *args: str) -> subprocess.CompletedProcess[str]:
+        timeout = min(REMOTE_COMMAND_TIMEOUT_SECONDS, self.remaining())
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(self.root), *args], text=True,
+                capture_output=True, check=False, timeout=timeout,
+                env=dict(os.environ, GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="Never"),
+            )
+        except subprocess.TimeoutExpired:
+            result = subprocess.CompletedProcess(args, 124, "", "git transport timeout")
+        except OSError:
+            raise StorePublicationError("STORE_PUBLICATION_EXECUTOR_UNAVAILABLE") from None
+        self.remaining()
+        return result
+
+    def read(self, *args: str) -> subprocess.CompletedProcess[str]:
+        for attempt in range(REMOTE_ATTEMPTS):
+            self.backoff(attempt)
+            result = self.once(*args)
+            if result.returncode == 0:
+                return result
+            if not transient(result):
+                raise StorePublicationError("STORE_PUBLICATION_REMOTE_READ_REJECTED")
+        raise StorePublicationError("STORE_PUBLICATION_REMOTE_READ_EXHAUSTED")
+
+
+def _one_remote_ref(
+    root: Path, remote: str, ref: str,
+    *, transport: _PublicationTransport | None = None,
+) -> str | None:
+    transport = transport or _PublicationTransport(root)
+    result = transport.read("ls-remote", remote, ref)
     rows = [line.split() for line in result.stdout.splitlines() if line.strip()]
     if not rows:
         return None
@@ -42,6 +107,44 @@ def _one_remote_ref(root: Path, remote: str, ref: str) -> str | None:
     if returned_ref != ref or not SHA_RE.fullmatch(sha):
         raise StorePublicationError(f"invalid remote ref result for {ref}")
     return sha
+
+
+def _ensure_retention_ref(
+    root: Path, remote: str, expected_commit: str, durable_ref: str,
+    transport: _PublicationTransport,
+) -> None:
+    def require_identity() -> None:
+        if _git(root, "rev-parse", "HEAD").stdout.strip() != expected_commit:
+            raise StorePublicationError("STORE_PUBLICATION_CANDIDATE_CHANGED")
+        main = _one_remote_ref(root, remote, "refs/heads/main", transport=transport)
+        if main != expected_commit:
+            raise StorePublicationError("STORE_PUBLICATION_REMOTE_MAIN_CHANGED")
+
+    def read_tag() -> str | None:
+        observed = _one_remote_ref(root, remote, durable_ref, transport=transport)
+        if observed is not None and observed != expected_commit:
+            raise StorePublicationError("STORE_PUBLICATION_RETENTION_REF_CONFLICT")
+        return observed
+
+    for attempt in range(REMOTE_ATTEMPTS):
+        transport.backoff(attempt)
+        require_identity()
+        if read_tag() == expected_commit:
+            require_identity()
+            return
+        # Retry only after fresh exact main and tag-absence observations.
+        # Git rejects tag retargeting: never force, integrate, rebuild or delete.
+        if _git(root, "rev-parse", "HEAD").stdout.strip() != expected_commit:
+            raise StorePublicationError("STORE_PUBLICATION_CANDIDATE_CHANGED")
+        pushed = transport.once("push", remote, f"{expected_commit}:{durable_ref}")
+        # A lost acknowledgement is reconciled by the actual remote ref, not
+        # by the push exit status. Unreadable readback forbids another write.
+        if read_tag() == expected_commit:
+            require_identity()
+            return
+        if pushed.returncode != 0 and not transient(pushed):
+            raise StorePublicationError("STORE_PUBLICATION_TAG_PUSH_REJECTED")
+    raise StorePublicationError("STORE_PUBLICATION_TAG_READBACK_UNCONFIRMED")
 
 
 def _changed_paths(root: Path, commit: str) -> list[tuple[str, str]]:
@@ -126,7 +229,8 @@ def verify_publication(
             f"local HEAD {local_head} does not match expected commit {expected_commit}"
         )
 
-    _git(root, "fetch", "--no-tags", remote, "main")
+    transport = _PublicationTransport(root)
+    transport.read("fetch", "--no-tags", remote, "main")
     remote_main = _git(root, "rev-parse", "FETCH_HEAD").stdout.strip()
     if remote_main != expected_commit:
         raise StorePublicationError(
@@ -152,19 +256,8 @@ def verify_publication(
     )
 
     durable_ref = f"{REF_PREFIX}{expected_commit}"
-    existing = _one_remote_ref(root, remote, durable_ref)
-    if existing is not None and existing != expected_commit:
-        raise StorePublicationError(
-            f"durable ref {durable_ref} already targets {existing}, expected {expected_commit}"
-        )
-    if existing is None:
-        _git(root, "push", remote, f"{expected_commit}:{durable_ref}")
-
-    readback = _one_remote_ref(root, remote, durable_ref)
-    if readback != expected_commit:
-        raise StorePublicationError(
-            f"durable ref readback {readback!r} does not equal {expected_commit}"
-        )
+    _ensure_retention_ref(root, remote, expected_commit, durable_ref, transport)
+    transport.remaining()
 
     return {
         "status": "durability_verified",
@@ -187,13 +280,17 @@ def main() -> int:
     parser.add_argument("--required-manifest")
     args = parser.parse_args()
 
-    receipt = verify_publication(
-        Path(args.store_root),
-        args.expected_commit,
-        remote=args.remote,
-        status=args.writer_status,
-        required_manifest=args.required_manifest,
-    )
+    try:
+        receipt = verify_publication(
+            Path(args.store_root),
+            args.expected_commit,
+            remote=args.remote,
+            status=args.writer_status,
+            required_manifest=args.required_manifest,
+        )
+    except StorePublicationError as exc:
+        print(json.dumps({"status": "store_publication_failed", "reason": str(exc)}), file=sys.stderr)
+        return 1
     print(json.dumps(receipt, sort_keys=True))
     return 0
 
