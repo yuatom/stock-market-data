@@ -49,7 +49,15 @@ class PremarketReplayControlContractTest(unittest.TestCase):
         self.assertIn("git push origin HEAD:main", runtime)
         self.assertIn("sleep $((attempt * 2))", runtime)
         self.assertIn('if [[ -n "$proof_stage" ]]; then', runtime)
-        self.assertIn("refusing post-proof integration", runtime)
+        proof_branch = runtime.split('if [[ -n "$proof_stage" ]]; then', 1)[1].split(
+            "          fi\n\n          for attempt in 1 2 3; do", 1
+        )[0]
+        self.assertIn("--verify-existing", proof_branch)
+        self.assertIn("python ../compute/scripts/push_proof_store_commit.py", proof_branch)
+        self.assertIn('--base "$store_base_sha"', proof_branch)
+        self.assertIn('--candidate "$(git rev-parse HEAD)"', proof_branch)
+        self.assertNotIn("git pull", proof_branch)
+        self.assertNotIn("git push", proof_branch)
 
     def test_replay_does_not_require_twelve_data_secret(self):
         runtime = (ROOT / ".github/workflows/market-data-collector-runtime.yml").read_text(encoding="utf-8")
