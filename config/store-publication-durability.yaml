@@ -1,5 +1,5 @@
 schema_version: 1
-contract_version: 3
+contract_version: 4
 owner: yuatom/stock-market-data
 persisted_store: yuatom/stock-market-data-store
 store_retention_authority: yuatom/stock-market-data-store#README.md-consumer-visible-commit-retention
@@ -23,8 +23,11 @@ remote_publication_proof:
   order:
     - payload_or_control_state_commit_complete
     - push_to_store_main_accepted
-    - fetch_remote_main_without_using_stale_local_tracking_state
+    - read_exact_remote_main_ref_without_using_local_tracking_state
     - require_remote_main_equals_pushed_commit_while_writer_lock_is_held
+    - fetch_same_verified_immutable_commit_without_reresolving_floating_main
+    - require_fetched_commit_equals_expected_commit
+    - recheck_local_head_and_remote_main_before_output_verification
     - require_remote_commit_object_readable
     - verify_changed_non_deleted_path_blob_ids_from_remote_commit
     - read_required_output_manifest_at_remote_commit_when_present
@@ -34,6 +37,7 @@ remote_publication_proof:
     - emit_durability_receipt
   remote_main_mismatch: fail_closed
   remote_commit_unreadable: fail_closed
+  fetched_commit_mismatch: fail_closed
   remote_path_blob_mismatch: fail_closed
   required_output_missing_or_unreadable: fail_closed
 

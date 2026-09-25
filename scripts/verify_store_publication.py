@@ -232,12 +232,26 @@ def verify_publication(
         )
 
     transport = _PublicationTransport(root)
-    transport.read("fetch", "--no-tags", remote, "main")
-    remote_main = _git(root, "rev-parse", "FETCH_HEAD").stdout.strip()
+    # Observe the exact branch ref once, then fetch only that verified immutable
+    # object. A second floating-main resolution can describe a different moment.
+    remote_main = _one_remote_ref(root, remote, "refs/heads/main", transport=transport)
     if remote_main != expected_commit:
         raise StorePublicationError(
             f"remote main {remote_main} does not equal pushed commit {expected_commit}"
         )
+    transport.read(
+        "fetch", "--no-tags", "--no-recurse-submodules", "--write-fetch-head",
+        remote, expected_commit,
+    )
+    fetched_commit = _git(root, "rev-parse", "FETCH_HEAD").stdout.strip()
+    if fetched_commit != expected_commit:
+        raise StorePublicationError("STORE_PUBLICATION_FETCHED_COMMIT_MISMATCH")
+    # Neither a successful fetch nor a prior matching ref authorizes a changed
+    # local candidate or remote branch. Stop before output/tag processing.
+    if _git(root, "rev-parse", "HEAD").stdout.strip() != expected_commit:
+        raise StorePublicationError("STORE_PUBLICATION_CANDIDATE_CHANGED")
+    if _one_remote_ref(root, remote, "refs/heads/main", transport=transport) != expected_commit:
+        raise StorePublicationError("STORE_PUBLICATION_REMOTE_MAIN_CHANGED")
 
     _git(root, "cat-file", "-e", f"{remote_main}^{{commit}}")
     changed = _changed_paths(root, remote_main)
