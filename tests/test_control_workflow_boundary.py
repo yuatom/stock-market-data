@@ -31,16 +31,23 @@ class ControlWorkflowBoundaryTest(unittest.TestCase):
         )[0]
         self.assertNotIn("git pull --rebase", proof_branch)
         self.assertIn("store_base_sha=\"$(git rev-parse HEAD)\"", persist)
-        self.assertIn("git fetch origin main", proof_branch)
-        self.assertIn("remote_main_sha=\"$(git rev-parse origin/main)\"", proof_branch)
+        self.assertIn('--base "$store_base_sha"', proof_branch)
+        self.assertIn('--candidate "$(git rev-parse HEAD)"', proof_branch)
         self.assertIn("--verify-existing", proof_branch)
         verify_pos = proof_branch.index("--verify-existing")
-        fetch_pos = proof_branch.index("git fetch origin main")
-        push_pos = proof_branch.index("git push origin HEAD:main")
-        self.assertLess(verify_pos, fetch_pos)
-        self.assertLess(fetch_pos, push_pos)
-        self.assertIn("refusing post-proof integration", proof_branch)
-        self.assertIn("refusing to rebase a proof-bearing commit", proof_branch)
+        push_pos = proof_branch.index("python ../compute/scripts/push_proof_store_commit.py")
+        self.assertLess(verify_pos, push_pos)
+        self.assertNotIn("git push", proof_branch)
+        self.assertNotIn("--force", proof_branch)
+        workflow = yaml.safe_load(text)
+        steps = workflow["jobs"]["collect"]["steps"]
+        names = [step["name"] for step in steps]
+        self.assertLess(names.index("Persist private Store only"), names.index("Verify durable Store publication"))
+        durability = steps[names.index("Verify durable Store publication")]
+        self.assertEqual(durability["if"], "steps.invocation.outputs.mode != 'smoke_readonly'")
+        self.assertNotIn("continue-on-error", durability)
+        self.assertIn("verify_store_publication.py", durability["run"])
+        self.assertIn("--required-manifest", durability["run"])
 
     def test_non_proof_store_publication_preserves_base_retry_semantics(self):
         text = (ROOT / ".github/workflows/market-data-collector-runtime.yml").read_text(encoding="utf-8")
