@@ -267,13 +267,127 @@ class PublicationTransportTests(unittest.TestCase):
         self.assertNotIn("SECRET_SENTINEL", stderr.getvalue())
         self.assertNotIn("Traceback", stderr.getvalue())
 
+    def test_exact_fetch_avoids_second_floating_branch_resolution(self):
+        # Inject a stale branch-fetch observation while the actual remote ref
+        # already points at the candidate. Immutable-object fetch is unaffected.
+        def fault(op, cmd, kwargs):
+            if op == "fetch" and cmd[-1] in {"main", "refs/heads/main"}:
+                stale = list(cmd)
+                stale[-1] = self.base
+                return RUN(stale, **kwargs)
+        result = self.verify(fault)
+        self.assertEqual(result["status"], "durability_verified")
+        self.assertEqual(result["remote_main_sha"], self.head)
+        for cmd, _ in self.calls:
+            if cmd[3] == "fetch":
+                self.assertEqual(cmd[-1], self.head)
+                self.assertIn("--write-fetch-head", cmd)
+                self.assertIn("--no-recurse-submodules", cmd)
+        self.assert_bound_write()
+
+    def test_exact_fetch_reads_full_main_ref_before_fetch(self):
+        self.verify()
+        self.assertEqual(self.calls[0][0][3:], ["ls-remote", "origin", "refs/heads/main"])
+        self.assertEqual(self.calls[1][0][3], "fetch")
+        self.assertEqual(self.calls[1][0][-1], self.head)
+
+    def test_exact_fetch_missing_main_is_not_absence_permission(self):
+        def fault(op, cmd, kwargs):
+            if op == "ls-remote" and cmd[-1] == "refs/heads/main":
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+        with self.assertRaises(V.StorePublicationError):
+            self.verify(fault)
+        self.assertEqual(self.count("fetch"), 0)
+        self.assertEqual(self.count("push"), 0)
+
+    def test_exact_fetch_different_main_never_switches_expected_commit(self):
+        def fault(op, cmd, kwargs):
+            if op == "ls-remote" and cmd[-1] == "refs/heads/main":
+                return subprocess.CompletedProcess(cmd, 0, f"{self.base}\trefs/heads/main\n", "")
+        with self.assertRaises(V.StorePublicationError):
+            self.verify(fault)
+        self.assertEqual(self.count("ls-remote"), 1)
+        self.assertEqual(self.count("fetch"), 0)
+        self.assertEqual(self.count("push"), 0)
+
+    def test_exact_fetch_malformed_main_is_not_retried(self):
+        def fault(op, cmd, kwargs):
+            if op == "ls-remote" and cmd[-1] == "refs/heads/main":
+                return subprocess.CompletedProcess(cmd, 0, "broken\n", "")
+        with self.assertRaises(V.StorePublicationError):
+            self.verify(fault)
+        self.assertEqual(self.count("ls-remote"), 1)
+        self.assertEqual(self.count("fetch"), 0)
+        self.assertEqual(self.count("push"), 0)
+
+    def test_exact_fetch_rejects_stale_fetch_head_after_success_exit(self):
+        def fault(op, cmd, kwargs):
+            if op == "fetch":
+                actual = RUN(cmd, **kwargs)
+                (self.work / ".git/FETCH_HEAD").write_text(f"{self.base}\t\tstale fixture\n")
+                return actual
+        with self.assertRaisesRegex(V.StorePublicationError, "FETCHED_COMMIT_MISMATCH"):
+            self.verify(fault)
+        self.assertEqual(self.count("fetch"), 1)
+        self.assertEqual(self.count("push"), 0)
+
+    def test_exact_fetch_failed_fetch_does_not_reuse_previous_fetch_head(self):
+        self.git("fetch", "--no-tags", "origin", self.head)
+        with self.assertRaisesRegex(V.StorePublicationError, "READ_EXHAUSTED"):
+            self.verify(lambda op, cmd, kw: self.failed(cmd) if op == "fetch" else None)
+        self.assertEqual(self.count("fetch"), 3)
+        self.assertEqual(self.count("push"), 0)
+
+    def test_exact_fetch_remote_drift_stops_before_output_verification(self):
+        def fault(op, cmd, kwargs):
+            if op == "fetch":
+                actual = RUN(cmd, **kwargs)
+                self.advance_remote()
+                return actual
+        with mock.patch.object(V, "_verify_required_manifest", wraps=V._verify_required_manifest) as proof:
+            with self.assertRaises(V.StorePublicationError):
+                self.verify(fault)
+            proof.assert_not_called()
+        self.assertEqual(self.count("push"), 0)
+
+    def test_exact_fetch_local_drift_stops_before_output_verification(self):
+        def fault(op, cmd, kwargs):
+            if op == "fetch":
+                actual = RUN(cmd, **kwargs)
+                self.git("checkout", "--detach", "-q", self.base)
+                return actual
+        with mock.patch.object(V, "_verify_required_manifest", wraps=V._verify_required_manifest) as proof:
+            with self.assertRaises(V.StorePublicationError):
+                self.verify(fault)
+            proof.assert_not_called()
+        self.assertEqual(self.count("push"), 0)
+
+    def test_exact_fetch_permanent_main_error_stops_without_fetch(self):
+        def fault(op, cmd, kwargs):
+            if op == "ls-remote" and cmd[-1] == "refs/heads/main":
+                return self.failed(cmd, "Permission denied SECRET_SENTINEL")
+        with self.assertRaises(V.StorePublicationError) as caught:
+            self.verify(fault)
+        self.assertNotIn("SECRET_SENTINEL", str(caught.exception))
+        self.assertEqual(self.count("ls-remote"), 1)
+        self.assertEqual(self.count("fetch"), 0)
+        self.assertEqual(self.count("push"), 0)
+
+    def test_exact_fetch_transient_retry_keeps_immutable_commit(self):
+        result = self.verify(lambda op, cmd, kw: self.failed(cmd) if op == "fetch" and self.count(op) == 1 else None)
+        self.assertEqual(result["status"], "durability_verified")
+        fetches = [cmd for cmd, _ in self.calls if cmd[3] == "fetch"]
+        self.assertEqual(len(fetches), 2)
+        self.assertTrue(all(cmd[-1] == self.head for cmd in fetches))
+        self.assert_bound_write()
+
 
 class TransportOwnerTests(unittest.TestCase):
     def test_implementation_bounds_match_owner_without_changing_receipt_authority(self):
         import yaml
         owner = yaml.safe_load((ROOT / "config/store-publication-durability.yaml").read_text())
         contract = owner["verification_transport"]
-        self.assertEqual(owner["contract_version"], 3)
+        self.assertEqual(owner["contract_version"], 4)
         self.assertEqual(V.REMOTE_ATTEMPTS, contract["max_attempts_per_operation"])
         self.assertEqual(V.REMOTE_COMMAND_TIMEOUT_SECONDS, contract["command_timeout_seconds"])
         self.assertEqual(V.REMOTE_BUDGET_SECONDS, contract["shared_elapsed_budget_seconds"])
@@ -281,6 +395,18 @@ class TransportOwnerTests(unittest.TestCase):
         self.assertTrue(owner["retention_anchor"]["retarget_forbidden"])
         self.assertTrue(owner["consumer_contract"]["proof_required_before_market_data_read_sha_pin"])
         self.assertEqual(owner["durability_receipt"]["status_value"], "durability_verified")
+        proof = owner["remote_publication_proof"]
+        self.assertEqual(proof["remote_main_mismatch"], "fail_closed")
+        self.assertEqual(proof["fetched_commit_mismatch"], "fail_closed")
+        order = proof["order"]
+        self.assertLess(
+            order.index("require_remote_main_equals_pushed_commit_while_writer_lock_is_held"),
+            order.index("fetch_same_verified_immutable_commit_without_reresolving_floating_main"),
+        )
+        self.assertLess(
+            order.index("recheck_local_head_and_remote_main_before_output_verification"),
+            order.index("verify_changed_non_deleted_path_blob_ids_from_remote_commit"),
+        )
 
 
 if __name__ == "__main__":
