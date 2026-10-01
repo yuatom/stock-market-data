@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -59,11 +60,38 @@ class CollectionUniverseTest(unittest.TestCase):
             )
         self.assertEqual(rc, 0)
         kwargs = collect.call_args.kwargs
-        self.assertEqual(kwargs["eligible_universe"], expected)
-        self.assertIsNone(kwargs.get("symbols_override"))
+        self.assertIsNone(kwargs.get("eligible_universe"))
+        self.assertEqual(kwargs["symbols_override"], [symbol for symbol, _asset in expected])
         self.assertEqual(kwargs["stage"], "close")
         self.assertEqual(kwargs["start_et"], "15:45")
         self.assertEqual(kwargs["end_et"], "16:00")
+
+    def test_historical_repair_real_config_preserves_full_scope_and_bounded_requests(self):
+        maintenance = collection.close_supported_baseline_universe(self.universe)
+        requested = [symbol for symbol, _asset in maintenance]
+        intraday = dict(collection.intraday_universe(self.universe))
+        expected_full = sorted(set(intraday) | set(requested))
+        # Exercise real canonical groups: sector ETFs are outside intraday.
+        self.assertTrue(set(requested) - set(intraday))
+        no_rows = ([], {"raw_row_count": 0})
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch.object(runtime, "fetch_nasdaq_regular", return_value=no_rows) as nasdaq, \
+             mock.patch.object(runtime, "fetch_twelve_regular", return_value=no_rows) as twelve, \
+             mock.patch.object(runtime.base, "_load_prior_snapshot", return_value=([], [])):
+            result = runtime.collect_regular_window(
+                mode=runtime.HISTORICAL_CONTEXT_REPAIR, stage="close",
+                trade_date="2026-09-30", start_et="15:45", end_et="16:00",
+                store_root=Path(tmp), universe_config=self.universe, config={},
+                access={"nasdaq_public_intraday": {"max_workers": 1}},
+                symbols_override=requested,
+            )
+        self.assertEqual(sorted(call.args[0] for call in nasdaq.call_args_list), requested)
+        self.assertEqual(sorted(call.args[0] for call in twelve.call_args_list), requested)
+        self.assertEqual(result["coverage"]["increment"]["requested_symbol_count"], len(requested))
+        self.assertEqual(result["coverage"]["stage_snapshot"]["requested_symbol_count"], len(expected_full))
+        self.assertEqual(result["snapshot_missing"], expected_full)
+        self.assertEqual(result["status"], "no_new_qualified_facts")
+        self.assertFalse(result["snapshot_written"])
 
     def test_every_context_proxy_is_daily_and_intraday(self):
         daily = {symbol for symbol, _asset in collection.daily_universe(self.universe)}
