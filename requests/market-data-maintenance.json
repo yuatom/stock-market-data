@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
-  "request_id": "issue166-close-context-rerun-20260930-20261001T002208Z",
-  "requested_at": "2026-10-01T00:22:08Z",
+  "request_id": "issue166-pr40-close-replay-20260930-20261001T033239Z",
+  "requested_at": "2026-10-01T03:32:39Z",
   "trade_date": "2026-09-30",
   "mode": "historical_context_repair",
   "scope": "cutoff_valid_close_supported_baseline",
   "authority": "owner_authorized_data_plane_maintenance",
-  "market_data_contract_sha": "a6a2b1f1e2c3ba1299dc071ced477efdc2060c9a"
+  "market_data_contract_sha": "11b666dbe67ec36ebeeffecdc92bbe89e6e566fe"
 }
