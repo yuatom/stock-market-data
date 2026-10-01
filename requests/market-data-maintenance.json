@@ -1,12 +1,10 @@
 {
   "schema_version": 1,
-  "request_id": "premarket-probe-replay-20260817-a442dc1f7429",
-  "requested_at": "2026-08-18T02:57:00Z",
-  "trade_date": "2026-08-17",
-  "mode": "premarket_probe_replay",
-  "scope": "historical_premarket_probe_sample",
+  "request_id": "issue166-close-context-rerun-20260930-20261001T002208Z",
+  "requested_at": "2026-10-01T00:22:08Z",
+  "trade_date": "2026-09-30",
+  "mode": "historical_context_repair",
+  "scope": "cutoff_valid_close_supported_baseline",
   "authority": "owner_authorized_data_plane_maintenance",
-  "market_data_contract_sha": "b877f97bbc5812b2e5156987a4c56f3b31a4dd2d",
-  "probe_path": "collector-state/probes/nasdaq-extended/2026-08/2026-08-17/074452-et.json",
-  "probe_blob_sha": "a442dc1f74299064e800f6ad9b9f82c075aabea3"
+  "market_data_contract_sha": "a6a2b1f1e2c3ba1299dc071ced477efdc2060c9a"
 }
