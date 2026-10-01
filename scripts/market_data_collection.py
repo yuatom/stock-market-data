@@ -592,6 +592,14 @@ def collect_regular_window(
     eligible_universe: Sequence[tuple[str, str]] | None = None,
 ) -> dict[str, Any]:
     full_universe = list(eligible_universe) if eligible_universe is not None else collection.intraday_universe(universe_config)
+    if mode == HISTORICAL_CONTEXT_REPAIR and eligible_universe is None:
+        # Sector ETFs are a separate canonical group, not regular intraday
+        # requests. Admit them to cumulative Close scope without fetching the
+        # full scope: the maintenance caller still supplies symbols_override.
+        full_universe = sorted({
+            **dict(full_universe),
+            **dict(collection.close_supported_baseline_universe(universe_config)),
+        }.items())
     by_symbol = dict(full_universe)
     if symbols_override is None:
         universe = full_universe
