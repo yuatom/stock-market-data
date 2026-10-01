@@ -740,7 +740,7 @@ def collect_regular_window(
         symbol: facts for symbol, (_provider, facts) in facts_by_symbol.items()
     }
     prior_facts = _capture_facts(store_root, prior_refs) if prior_refs else {}
-    stage_facts = dict(prior_facts)
+    stage_facts = {symbol: list(facts) for symbol, facts in prior_facts.items()}
     for symbol, facts in increment_facts.items():
         stage_facts.setdefault(symbol, []).extend(facts)
 
@@ -758,7 +758,26 @@ def collect_regular_window(
             symbol for symbol in requested_stage_symbols if stage_facts.get(symbol)
         }
         snapshot_missing = sorted(requested_stage_symbols - stage_qualified_symbols)
-    elif stage_name == "close" and mode in ("close_retry", "close_final", HISTORICAL_CONTEXT_REPAIR):
+    elif stage_name == "close" and mode == HISTORICAL_CONTEXT_REPAIR:
+        # Maintenance is a restricted increment, not a replacement Close
+        # universe. Missing is based on the union of qualified window facts;
+        # an unsuccessful refresh must not erase a valid inherited capture.
+        requested_stage_symbols = {symbol for symbol, _asset in full_universe}
+        prior_missing_set = {str(symbol).upper() for symbol in prior_missing}
+        if not prior_missing_set <= requested_stage_symbols:
+            raise CoverageContractError("prior snapshot missing symbols must be requested symbols")
+        prior_qualified_symbols = {
+            symbol for symbol, facts in prior_facts.items()
+            if any(_fact_timestamp(fact, trade_date, start_et, end_et) is not None for fact in facts)
+        }
+        if prior_missing_set & prior_qualified_symbols:
+            raise CoverageContractError("prior snapshot cannot mark a qualified symbol missing")
+        stage_qualified_symbols = {
+            symbol for symbol, facts in stage_facts.items()
+            if any(_fact_timestamp(fact, trade_date, start_et, end_et) is not None for fact in facts)
+        }
+        snapshot_missing = sorted(requested_stage_symbols - stage_qualified_symbols)
+    elif stage_name == "close" and mode in ("close_retry", "close_final"):
         snapshot_missing = sorted((set(prior_missing) - successful) | set(missing))
     else:
         snapshot_missing = sorted(set(missing))
@@ -954,7 +973,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             universe_config=universe_config,
             config=config,
             access=access,
-            eligible_universe=maintenance_universe,
+            symbols_override=[symbol for symbol, _asset in maintenance_universe],
         )
         result["repair_scope"] = "cutoff_valid_close_supported_baseline"
         result["terminal_semantics"] = "timestamped_regular_session_supported_baseline_context_provider_specific_not_official_close_or_sip"
