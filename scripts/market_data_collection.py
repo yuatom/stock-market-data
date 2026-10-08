@@ -786,7 +786,9 @@ def collect_regular_window(
         }
         snapshot_missing = sorted(requested_stage_symbols - stage_qualified_symbols)
     elif stage_name == "close" and mode in ("close_retry", "close_final"):
-        snapshot_missing = sorted((set(prior_missing) - successful) | set(missing))
+        # Match selector/coverage symbol identity before subtracting successes.
+        prior_missing_set = {str(symbol).upper() for symbol in prior_missing}
+        snapshot_missing = sorted((prior_missing_set - successful) | set(missing))
     else:
         snapshot_missing = sorted(set(missing))
 
