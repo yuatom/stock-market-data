@@ -253,6 +253,13 @@ def _live_close_retry_symbols(
     """
     required = {symbol for symbol, _asset in eligible}
     refs, prior_missing = base._load_prior_snapshot(store_root, trade_date, "close")
+    # Match the coverage owner's symbol identity before scope/overlap checks.
+    # Do not strip invalid whitespace into a seemingly valid missing hint.
+    hinted_missing = {symbol.upper() for symbol in prior_missing}
+    if not hinted_missing <= required:
+        raise runtime.CoverageContractError(
+            "Close snapshot missing symbols must be eligible symbols"
+        )
     facts = runtime._capture_facts(store_root, refs) if refs else {}
     qualified = {
         symbol for symbol in required
@@ -262,7 +269,7 @@ def _live_close_retry_symbols(
             for fact in facts.get(symbol, [])
         )
     }
-    if set(prior_missing) & qualified:
+    if hinted_missing & qualified:
         raise runtime.CoverageContractError(
             "Close snapshot cannot mark a qualified Close-window symbol missing"
         )

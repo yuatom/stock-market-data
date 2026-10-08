@@ -59,15 +59,17 @@ class LiveCloseRetrySelectionTest(unittest.TestCase):
     def selection(self):
         return entry._live_close_retry_symbols(self.store, self.DATE, self.ELIGIBLE)
 
-    def invoke(self, mode):
-        args = ["--mode", mode, "--trade-date", self.DATE,
+    def invocation_args(self, mode):
+        return ["--mode", mode, "--trade-date", self.DATE,
                 "--store-root", str(self.store),
                 "--universe", str(ROOT / "config/collection-universe.json"),
                 "--config", str(ROOT / "config/market-data-store.yaml"),
                 "--access-config", str(ROOT / "config/market-data-collector-access.yaml")]
+
+    def invoke(self, mode):
         with mock.patch.object(runtime, "collect_regular_window", return_value={}) as collect:
             with contextlib.redirect_stdout(io.StringIO()):
-                result = entry._run_live_close(args)
+                result = entry._run_live_close(self.invocation_args(mode))
         return result, collect
 
     def test_cold_retry_uses_actual_full_live_close_universe(self):
@@ -146,6 +148,54 @@ class LiveCloseRetrySelectionTest(unittest.TestCase):
         self.snapshot({"SPY": [self.fact("SPY")]}, missing=["SPY"])
         with self.assertRaises(runtime.CoverageContractError):
             self.selection()
+
+    def assert_persisted_hint_rejected(self, hint):
+        universe = universe_owner.load_collection_universe(ROOT / "config/collection-universe.json")
+        eligible = entry._live_close_universe(universe)
+        self.snapshot({symbol: [self.fact(symbol)] for symbol, _asset in eligible}, missing=[hint])
+        _refs, persisted_missing = entry.base._load_prior_snapshot(self.store, self.DATE, "close")
+        self.assertEqual(persisted_missing, [hint])
+        before = {path.relative_to(self.store): path.read_bytes()
+                  for path in self.store.rglob("*") if path.is_file()}
+        for mode in ("close_retry", "close_final"):
+            with self.subTest(mode=mode, hint=hint):
+                output = io.StringIO()
+                with mock.patch.object(runtime, "collect_regular_window") as collect:
+                    with contextlib.redirect_stdout(output):
+                        with self.assertRaisesRegex(runtime.CoverageContractError, "Close snapshot"):
+                            entry._run_live_close(self.invocation_args(mode))
+                    collect.assert_not_called()
+                self.assertNotIn("nothing_missing", output.getvalue())
+        after = {path.relative_to(self.store): path.read_bytes()
+                 for path in self.store.rglob("*") if path.is_file()}
+        self.assertEqual(after, before)
+
+    def test_lowercase_persisted_conflict_blocks_both_retry_modes(self):
+        self.assert_persisted_hint_rejected("spy")
+
+    def test_mixed_case_persisted_conflict_blocks_both_retry_modes(self):
+        self.assert_persisted_hint_rejected("SpY")
+
+    def test_out_of_scope_persisted_hint_blocks_both_retry_modes(self):
+        self.assert_persisted_hint_rejected("not-in-eligible-universe")
+
+    def test_empty_persisted_hint_blocks_both_retry_modes(self):
+        self.assert_persisted_hint_rejected("")
+
+    def test_padded_persisted_hint_is_not_trimmed_into_valid_symbol(self):
+        self.assert_persisted_hint_rejected(" SPY ")
+
+    def test_nonconflicting_lowercase_hint_keeps_absent_symbol_selection(self):
+        self.snapshot({"XLE": [self.fact("XLE")]}, missing=["spy"])
+        self.assertEqual(self.selection(), ["SPY"])
+        universe = universe_owner.load_collection_universe(ROOT / "config/collection-universe.json")
+        expected = sorted(symbol for symbol, _asset in entry._live_close_universe(universe)
+                          if symbol != "XLE")
+        for mode in ("close_retry", "close_final"):
+            with self.subTest(mode=mode):
+                result, collect = self.invoke(mode)
+                self.assertEqual(result, 0)
+                self.assertEqual(collect.call_args.kwargs["symbols_override"], expected)
 
     def test_initial_close_still_collects_full_scope(self):
         result, collect = self.invoke("close")
