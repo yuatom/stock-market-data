@@ -240,6 +240,35 @@ def _live_close_universe(universe_config: Mapping[str, Any]) -> list[tuple[str, 
     return [(symbol, assets[symbol]) for symbol in sorted(symbols)]
 
 
+def _live_close_retry_symbols(
+    store_root: Path, trade_date: str, eligible: list[tuple[str, str]]
+) -> list[str]:
+    """Retry absent Close-window facts, not an advisory missing-state cache.
+
+    A missing/older snapshot must not erase the live Close sector group. An
+    empty cache may have been written before snapshot publication failed, so
+    only exact blob-verified persisted captures can justify skipping a symbol.
+    Keep the existing missing-vs-partial boundary: one qualified Close-window
+    fact is sufficient here; this does not assert full-window readiness.
+    """
+    required = {symbol for symbol, _asset in eligible}
+    refs, prior_missing = base._load_prior_snapshot(store_root, trade_date, "close")
+    facts = runtime._capture_facts(store_root, refs) if refs else {}
+    qualified = {
+        symbol for symbol in required
+        if any(
+            fact.get("session") == "regular"
+            and runtime._fact_timestamp(fact, trade_date, "15:45", "16:00") is not None
+            for fact in facts.get(symbol, [])
+        )
+    }
+    if set(prior_missing) & qualified:
+        raise runtime.CoverageContractError(
+            "Close snapshot cannot mark a qualified Close-window symbol missing"
+        )
+    return sorted(required - qualified)
+
+
 def _run_live_close(argv: list[str]) -> int | None:
     mode = str(_arg_value(argv, "--mode") or "")
     if mode not in {"close", "close_retry", "close_final"}:
@@ -258,7 +287,7 @@ def _run_live_close(argv: list[str]) -> int | None:
 
     symbols_override = None
     if mode in {"close_retry", "close_final"}:
-        symbols_override = runtime._retry_symbols(store_root, trade_date, universe_config)
+        symbols_override = _live_close_retry_symbols(store_root, trade_date, eligible)
         if not symbols_override:
             print(json.dumps({"mode": mode, "status": "nothing_missing", "changed": 0}, sort_keys=True))
             return 0
