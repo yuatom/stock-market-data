@@ -1,19 +1,18 @@
 {
   "schema_version": 1,
-  "request_id": "discovery-close-20261008-203652-et-01",
-  "requested_at": "2026-10-09T00:42:59.701Z",
+  "request_id": "personal-close-20261008-203652-et-02",
+  "requested_at": "2026-10-09T00:47:31.046Z",
   "trade_date": "2026-10-08",
   "stage": "close",
-  "request_purpose": "opportunity_discovery",
+  "request_purpose": "personal_membership",
   "research_repository": "yuatom/stock-dairy",
   "research_repository_commit_sha": "13634e9556a53d39ae63e41485831c9e607249ee",
   "market_data_contract_sha": "d015f9ed767640019280dea381a3ea798166f5c4",
   "candidate_symbols": [
-    "HAE",
-    "COCO",
-    "CSGP",
-    "AAOI",
-    "MXL"
+    "BILI",
+    "CRCL",
+    "ASML",
+    "SMIC"
   ],
   "transaction_id": "close-20261008-203652-et-01",
   "personal_state_proof": {
