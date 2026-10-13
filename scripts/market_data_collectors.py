@@ -250,6 +250,7 @@ def collect_previous_session_eod(
     universe = _daily_universe(watchlist, completeness)
 
     for symbol, asset_class in universe:
+        phase = "budget_check"
         try:
             wait_for_twelve_budget(
                 store_root,
@@ -264,6 +265,7 @@ def collect_previous_session_eod(
                 per_day=int(budget["hard_credits_per_day"]),
                 per_minute=int(budget["hard_credits_per_minute"]),
             )
+            phase = "provider_fetch"
             fetched = fetch_twelve_daily(symbol, key, access, outputsize=outputsize)
             effective = _identity_effective_date(watchlist, symbol)
             eligible = [
@@ -279,8 +281,10 @@ def collect_previous_session_eod(
             index_path = _series_index_path(store_root, TWELVE_PROVIDER, symbol)
             existing: list[dict[str, Any]] = []
             if index_path.exists():
+                phase = "stored_series_read"
                 existing = read_daily_series(store_root, provider=TWELVE_PROVIDER, symbol=symbol)
                 existing_by_date = {row["trade_date"]: row for row in existing}
+                phase = "historical_overlap_comparison"
                 for row in eligible:
                     old = existing_by_date.get(row["trade_date"])
                     if old is not None and old != row:
@@ -302,6 +306,7 @@ def collect_previous_session_eod(
             if not new_rows:
                 continue
 
+            phase = "immutable_append"
             result = append_daily_bars(
                 store_root,
                 provider=TWELVE_PROVIDER,
@@ -324,7 +329,16 @@ def collect_previous_session_eod(
         except BudgetExceeded:
             raise
         except Exception as exc:
-            failures.append({"symbol": symbol, "reason": type(exc).__name__, "detail": str(exc)[:240]})
+            failure = {"symbol": symbol, "reason": type(exc).__name__, "detail": str(exc)[:240]}
+            if isinstance(exc, MarketDataConflict):
+                # Classify only by the proven call phase, never by private provider data
+                # or a substring of an exception message. Do not relax append-only.
+                failure["reason_code"] = {
+                    "stored_series_read": "stored_series_integrity_conflict",
+                    "historical_overlap_comparison": "historical_provider_revision",
+                    "immutable_append": "immutable_append_conflict",
+                }.get(phase, "unclassified_market_data_conflict")
+            failures.append(failure)
 
     return {
         "mode": "previous_session_eod",

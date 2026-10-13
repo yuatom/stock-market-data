@@ -473,6 +473,25 @@ jobs:
               safe['failure_classes'] = sorted({
                   str(x.get('reason') or 'unknown') for x in result['failures'] if isinstance(x, dict)
               })[:12]
+              if result.get('mode') == 'previous_session_eod':
+                  # Fixed machine vocabulary only; never echo symbol, exception detail,
+                  # provider payload or arbitrary caller-controlled reason_code.
+                  allowed_codes = (
+                      'stored_series_integrity_conflict',
+                      'historical_provider_revision',
+                      'immutable_append_conflict',
+                      'unclassified_market_data_conflict',
+                  )
+                  counts = {
+                      code: sum(
+                          isinstance(item, dict) and item.get('reason_code') == code
+                          for item in result['failures']
+                      )
+                      for code in allowed_codes
+                  }
+                  counts = {code: count for code, count in counts.items() if count}
+                  if counts:
+                      safe['failure_reason_code_counts'] = counts
           elif isinstance(result.get('failures'), dict):
               safe['failure_count'] = len(result['failures'])
           if isinstance(result.get('missing'), list):
