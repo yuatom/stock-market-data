@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import market_data_collectors as collector  # noqa: E402
-from market_data_store import MarketDataConflict, append_daily_bars, read_daily_series  # noqa: E402
+from market_data_store import append_daily_bars, read_daily_series  # noqa: E402
 
 
 WATCHLIST = {"core_watchlist": ["AMD"], "instruments": {"AMD": {"asset_class": "stocks"}}}
@@ -97,7 +97,7 @@ class PreviousSessionConflictReasonCodeTest(unittest.TestCase):
             root = Path(d)
             self.seed_existing(root)
             result = self.collect(
-                root, read={"side_effect": MarketDataConflict("private shard detail")}
+                root, read={"side_effect": collector.MarketDataConflict("private shard detail")}
             )
         self.assert_failure(result, "stored_series_integrity_conflict")
 
@@ -105,7 +105,7 @@ class PreviousSessionConflictReasonCodeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             result = self.collect(
-                root, append={"side_effect": MarketDataConflict("private append detail")}
+                root, append={"side_effect": collector.MarketDataConflict("private append detail")}
             )
             self.assertFalse((root / "series").exists())
         self.assert_failure(result, "immutable_append_conflict")
@@ -115,7 +115,7 @@ class PreviousSessionConflictReasonCodeTest(unittest.TestCase):
             root = Path(d)
             with mock.patch.object(
                 collector, "fetch_twelve_daily",
-                side_effect=MarketDataConflict("unexpected fetch-phase conflict"),
+                side_effect=collector.MarketDataConflict("unexpected fetch-phase conflict"),
             ):
                 with (
                     mock.patch.dict(os.environ, {"TWELVE_DATA_API_KEY": "fixture-only"}),
