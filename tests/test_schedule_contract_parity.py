@@ -19,7 +19,8 @@ class CollectorScheduleContractParityTest(unittest.TestCase):
 
     def test_schedule_selector_routes_cover_all_declared_crons(self):
         crons = re.findall(r"cron: '([^']+)'", self.workflow)
-        selector = dict(re.findall(r"^\s*'([^']+)': '([^']+)',?$", self.runtime, re.M))
+        schedule_block = self.runtime.split("schedules = {", 1)[1].split("}", 1)[0]
+        selector = dict(re.findall(r"^\s*'([^']+)': '([^']+)',?$", schedule_block, re.M))
         self.assertEqual(set(crons), set(selector))
         self.assertEqual(len(crons), 11)
         self.assertEqual(selector["20 7 * * 1-5"], "premarket")

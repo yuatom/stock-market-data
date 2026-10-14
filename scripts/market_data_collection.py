@@ -668,9 +668,14 @@ def collect_regular_window(
     # The primary endpoint may emit only a sparse trade chart even when every
     # returned row is truthful. Try a whole-provider fallback only when the
     # explicit access contract permits it and the primary is not full-window.
-    try_sparse_fallback = bool(
-        access.get("regular_intraday_collection", {}).get(
-            "fallback_when_primary_is_incomplete_target_window", False
+    # Close retries are deliberately missing-only recovery operations, not
+    # another full-window source-election pass over a sparse-but-valid hint.
+    try_sparse_fallback = (
+        mode not in ("close_retry", "close_final", HISTORICAL_CONTEXT_REPAIR)
+        and bool(
+            access.get("regular_intraday_collection", {}).get(
+                "fallback_when_primary_is_incomplete_target_window", False
+            )
         )
     )
     for symbol, asset in universe:
