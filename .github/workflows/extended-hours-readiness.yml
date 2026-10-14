@@ -12,6 +12,7 @@ permissions:
 concurrency:
   group: market-data-collector
   cancel-in-progress: false
+  queue: max
 
 jobs:
   evaluate:

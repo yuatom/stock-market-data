@@ -70,7 +70,8 @@ class DailySeriesSettlementMaturityTest(unittest.TestCase):
             "07:00",
         )
         self.assertEqual(cfg["collector"]["schedules_et"]["previous_session_eod"], "07:05")
-        self.assertEqual(cfg["collector"]["schedules_et"]["premarket_shadow_probe"], "07:20")
+        self.assertEqual(cfg["collector"]["schedules_et"]["premarket_shadow_probe"], "07:10")
+        self.assertEqual(cfg["collector"]["schedules_et"]["premarket_live"], "07:20")
 
 
 if __name__ == "__main__":

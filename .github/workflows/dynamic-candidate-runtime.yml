@@ -26,6 +26,7 @@ concurrency:
   # prevents the inventory rebase conflict observed on 2026-08-17 Open30.
   group: market-data-collector
   cancel-in-progress: false
+  queue: max
 
 jobs:
   collect:

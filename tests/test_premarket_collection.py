@@ -53,6 +53,23 @@ class PremarketCollectionTest(unittest.TestCase):
         self.assertFalse(facts[-1]["realtime_claim"])
         self.assertEqual(facts[-1]["source_contract"], premarket.SOURCE_CONTRACT)
 
+    def test_production_mixed_premarket_payload_preserves_truthful_fact_scope(self):
+        mixed = payload(
+            last_update="Data last updated Aug 17, 2026 09:30 AM ET.",
+            rows=[
+                {"price": "$1", "shareVolume": "1", "time": "09:29:55"},
+                {"price": "$2", "shareVolume": "1", "time": "09:30:00"},
+            ],
+        )
+        with mock.patch("premarket_collection.base._http_json", return_value=mixed):
+            facts, diag = premarket.fetch_premarket(
+                "NVDA", "stocks", "2026-08-17", universe=self.universe, access=self.access
+            )
+        self.assertEqual(len(facts), 1)
+        self.assertEqual(facts[0]["event_time"], "2026-08-17T09:29:55-04:00")
+        self.assertEqual(diag["ignored_out_of_session_row_count"], 1)
+        self.assertEqual(diag["actual_data_cutoff"], facts[0]["source_timestamp"])
+
     def test_wrong_trade_date_fails_closed(self):
         with mock.patch("premarket_collection.base._http_json", return_value=payload(last_update="Data last updated Aug 16, 2026 07:44 AM ET.")):
             with self.assertRaisesRegex(Exception, "wrong Premarket trade date"):

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -44,13 +45,32 @@ class CoverageContractError(RuntimeError):
 
 
 def _number(value: Any) -> float | None:
-    if value in (None, "", "N/A"):
+    """Return a finite parsed provider number, or None on invalid input."""
+    if isinstance(value, bool) or value in (None, "", "N/A"):
         return None
     text = str(value).replace("$", "").replace(",", "").strip()
     try:
-        return float(text)
-    except ValueError:
+        parsed = float(text)
+    except (ValueError, OverflowError):
         return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _finite_regular_fact(fact: Mapping[str, Any]) -> bool:
+    """Do not admit malformed numeric facts to provider selection or Store."""
+    fields = ("last_sale", "reported_volume", "open", "high", "low", "close", "volume")
+    for field in fields:
+        if field not in fact:
+            continue
+        value = fact[field]
+        if isinstance(value, bool) or not isinstance(value, (float, int)):
+            return False
+        try:
+            if not math.isfinite(value):
+                return False
+        except (OverflowError, TypeError, ValueError):
+            return False
+    return True
 
 
 def _window_bounds(trade_date: str, start_et: str, end_et: str) -> tuple[datetime, datetime]:
@@ -126,8 +146,9 @@ def fetch_nasdaq_regular(
             continue
         window_rows += 1
         price = _number(row.get(price_field))
-        volume = _number(row.get(volume_field))
-        if price is None:
+        volume_raw = row.get(volume_field)
+        volume = _number(volume_raw)
+        if price is None or (volume_raw not in (None, "", "N/A") and volume is None):
             continue
         facts.append(
             {
@@ -229,17 +250,25 @@ def fetch_twelve_regular(
         close = _number(row.get("close"))
         if close is None:
             continue
+        optional_fields = ("open", "high", "low", "volume")
+        parsed_optional = {field: _number(row.get(field)) for field in optional_fields}
+        # Do not silently turn a present non-finite OHLCV value into missing/zero.
+        if any(
+            row.get(field) not in (None, "", "N/A") and parsed_optional[field] is None
+            for field in optional_fields
+        ):
+            continue
         fact: dict[str, Any] = {
             "symbol": symbol,
             "asset_class": asset_class,
             "session": "regular",
             "event_time": ts.isoformat(),
             "source_timestamp": ts.isoformat(),
-            "open": _number(row.get("open")),
-            "high": _number(row.get("high")),
-            "low": _number(row.get("low")),
+            "open": parsed_optional["open"],
+            "high": parsed_optional["high"],
+            "low": parsed_optional["low"],
             "close": close,
-            "volume": max(_number(row.get("volume")) or 0.0, 0.0),
+            "volume": max(parsed_optional["volume"] or 0.0, 0.0),
             "source_contract": "twelve_data_basic_regular_1min_v1",
         }
         facts.append({k: v for k, v in fact.items() if v is not None})
@@ -320,6 +349,25 @@ def _fact_timestamp(
     if timestamp.date().isoformat() != trade_date or not (start <= timestamp < end):
         return None
     return timestamp
+
+
+def _full_window_from_one_provider(
+    facts: Sequence[Mapping[str, Any]], trade_date: str, start_et: str, end_et: str
+) -> bool:
+    """Match the existing strict one-minute grid AND exact terminal fact.
+
+    Selection uses a complete *single* provider window, never minute-level
+    splicing, forward filling or a stale observation re-labeled as terminal.
+    """
+    if any(not _finite_regular_fact(fact) for fact in facts):
+        return False
+    expected = _minute_grid(trade_date, start_et, end_et)
+    timestamps = [_fact_timestamp(fact, trade_date, start_et, end_et) for fact in facts]
+    if len(timestamps) != len(expected) or any(t is None for t in timestamps):
+        return False
+    minute_set = {t.replace(second=0, microsecond=0).isoformat() for t in timestamps if t}
+    _, window_end = _window_bounds(trade_date, start_et, end_et)
+    return minute_set == expected and window_end - timedelta(minutes=1) in timestamps
 
 
 def _fact_minute(fact: Mapping[str, Any], trade_date: str, start_et: str, end_et: str) -> str | None:
@@ -635,6 +683,7 @@ def collect_regular_window(
             symbol = futures[future]
             try:
                 _symbol, (facts, diag) = future.result()
+                facts = [fact for fact in facts if _finite_regular_fact(fact)]
                 reason = "success" if facts else _reason_from_diagnostic(diag)
                 diag = dict(diag)
                 diag["reason_class"] = reason
@@ -648,8 +697,25 @@ def collect_regular_window(
                 failures.setdefault(symbol, []).append(f"nasdaq:{type(exc).__name__}:{exc}")
                 record_reason(symbol, _reason_from_exception(exc), f"{NASDAQ}:{type(exc).__name__}:{exc}")
 
+    # The primary endpoint may emit only a sparse trade chart even when every
+    # returned row is truthful. Try a whole-provider fallback only when the
+    # explicit access contract permits it and the primary is not full-window.
+    # Close retries are deliberately missing-only recovery operations, not
+    # another full-window source-election pass over a sparse-but-valid hint.
+    try_sparse_fallback = (
+        mode not in ("close_retry", "close_final", HISTORICAL_CONTEXT_REPAIR)
+        and bool(
+            access.get("regular_intraday_collection", {}).get(
+                "fallback_when_primary_is_incomplete_target_window", False
+            )
+        )
+    )
     for symbol, asset in universe:
-        if symbol in facts_by_symbol:
+        primary = facts_by_symbol.get(symbol)
+        if primary is not None and (
+            not try_sparse_fallback
+            or _full_window_from_one_provider(primary[1], trade_date, start_et, end_et)
+        ):
             continue
         try:
             facts, diag = fetch_twelve_regular(
@@ -662,13 +728,22 @@ def collect_regular_window(
                 config=config,
                 access=access,
             )
+            facts = [fact for fact in facts if _finite_regular_fact(fact)]
             reason = "success" if facts else _reason_from_diagnostic(diag)
             diag = dict(diag)
             diag["reason_class"] = reason
             diagnostics.setdefault(symbol, []).append(diag)
             record_reason(symbol, reason, f"{TWELVE}:{diag}")
             if facts:
-                facts_by_symbol[symbol] = (TWELVE, _decorate_context_facts(universe_config, facts))
+                # With a nonempty primary, replace the *entire* symbol/window
+                # only if the alternate is complete; otherwise preserve the
+                # qualified primary without a cross-provider minute splice.
+                if primary is None or _full_window_from_one_provider(
+                    facts, trade_date, start_et, end_et
+                ):
+                    facts_by_symbol[symbol] = (TWELVE, _decorate_context_facts(universe_config, facts))
+                else:
+                    diag["fallback_not_selected"] = "alternate_window_incomplete"
             else:
                 failures.setdefault(symbol, []).append("twelve_no_qualified_target_window_facts")
         except Exception as exc:  # noqa: BLE001

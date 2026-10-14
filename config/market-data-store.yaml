@@ -137,7 +137,7 @@ collector:
   allowed_payload_write_prefixes: [data/market-data]
   public_compute_payload_write_forbidden: true
   standard_runner_only: ubuntu-latest
-  timeout_minutes: 8
+  timeout_minutes: 12
   activation_probe_path: .github/market-data-collector-activation-v1
   on_demand_request:
     control_repository: yuatom/stock-market-data
@@ -145,7 +145,7 @@ collector:
     path: requests/collector-request.json
     schema: schemas/collector-request.schema.json
     trigger_event: push_on_collector_requests_branch_only
-    accepted_modes: [open_15m, open_30m, open_60m, close]
+    accepted_modes: [premarket, open_15m, open_30m, open_60m, close]
     target_trade_date_must_match_current_et_trade_date: true
     request_stage_must_equal_mode: true
     request_market_data_contract_sha_must_equal_current_compute_main: true
@@ -205,7 +205,8 @@ collector:
     raw_data_artifacts_forbidden: true
   scheduling:
     timezone: America/New_York
-    window_collector_runs_after_target_window_end: true
+    window_collector_provider_access_only_after_target_window_end: true
+    regular_window_runner_may_prewarm_before_target_cutoff: true
     scheduled_workflow_delivery_is_best_effort: true
     scheduled_collector_is_opportunistic_not_report_sla: true
     on_demand_push_is_primary_live_stage_handoff_when_snapshot_missing: true
@@ -213,15 +214,19 @@ collector:
     runtime_must_not_wait_for_late_scheduled_workflow_beyond_bounded_window: true
     report_schedule_shift_required: false
     daily_series_maturity_schedule_must_finish_before_premarket_report: true
-    live_premarket_scheduled: false
-    live_premarket_disabled_reason: no_qualified_live_premarket_adapter_registered
+    live_premarket_scheduled: true
+    live_premarket_source_contract: config/market-data-collector-access.yaml#nasdaq_public_extended_premarket
     shadow_probe_does_not_change_live_source_status: true
   schedules_et:
     previous_session_eod: '07:05'
-    premarket_shadow_probe: '07:20'
-    open_15m: '09:46'
-    open_30m: '10:01'
-    open_60m: '10:31'
+    premarket_shadow_probe: '07:10'
+    premarket_live: '07:20'
+    open_15m: '09:40'
+    open_15m_semantic_cutoff: '09:45'
+    open_30m: '09:55'
+    open_30m_semantic_cutoff: '10:00'
+    open_60m: '10:25'
+    open_60m_semantic_cutoff: '10:30'
     close: '16:06'
     close_retry_1: '16:21'
     close_retry_2: '16:36'
