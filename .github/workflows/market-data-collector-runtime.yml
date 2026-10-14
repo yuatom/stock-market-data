@@ -44,6 +44,7 @@ permissions:
 concurrency:
   group: market-data-collector
   cancel-in-progress: false
+  queue: max
 
 jobs:
   collect:
@@ -283,6 +284,26 @@ jobs:
           if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', trade_date):
               raise SystemExit(f'invalid trade_date: {trade_date}')
 
+          # This is an observation at invocation resolution, NOT Actions
+          # event creation or runner queue-start telemetry. A late cron from
+          # a prior ET date cannot be assigned an inferred historical date.
+          schedule_delivery_observation = None
+          if event == 'schedule':
+              cron_parts = os.environ['EVENT_SCHEDULE'].split()
+              nominal = datetime.fromisoformat(
+                  f"{trade_date}T{int(cron_parts[1]):02d}:{int(cron_parts[0]):02d}:00"
+              ).replace(tzinfo=et)
+              observed = datetime.now(et)
+              lag = max(0, int((observed - nominal).total_seconds()))
+              schedule_delivery_observation = {
+                  'semantics': 'schedule_to_invocation_observed_after_checkout_not_actions_creation',
+                  'nominal_et_at_resolved_trade_date': nominal.isoformat(),
+                  'invocation_observed_at_et': observed.isoformat(),
+                  'nominal_to_invocation_observed_seconds': lag,
+                  'late_more_than_two_minutes': lag > 120,
+                  'nominal_date_is_inferred_from_resolved_trade_date': True,
+              }
+
           output = Path(os.environ['GITHUB_OUTPUT'])
           with output.open('a', encoding='utf-8') as fh:
               fh.write(f'mode={mode}\n')
@@ -303,6 +324,7 @@ jobs:
               'probe_blob_sha': probe_blob_sha or None,
               'market_data_contract_sha': compute_sha,
               'maintenance_authorized': maintenance_authorized,
+              'schedule_delivery_observation': schedule_delivery_observation,
           }, sort_keys=True))
 
       - name: Verify required secrets
