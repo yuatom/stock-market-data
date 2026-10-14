@@ -37,7 +37,12 @@ http:
 regular_intraday_collection:
   provider_order: [nasdaq_public_intraday, twelve_data_basic]
   first_qualified_provider_per_symbol_wins: true
+  first_qualified_provider_exception: alternate_full_window_replaces_sparse_primary_whole_window_only
   fallback_when_primary_has_no_qualified_target_window_facts: true
+  fallback_when_primary_is_incomplete_target_window: true
+  sparse_fallback_must_be_full_window_and_exact_terminal: true
+  sparse_fallback_preserves_primary_if_alternate_incomplete_or_unavailable: true
+  cross_provider_minute_splice_forbidden: true
   report_runtime_direct_twelve_data_transport_forbidden: true
 
 nasdaq_public_intraday:

@@ -322,6 +322,23 @@ def _fact_timestamp(
     return timestamp
 
 
+def _full_window_from_one_provider(
+    facts: Sequence[Mapping[str, Any]], trade_date: str, start_et: str, end_et: str
+) -> bool:
+    """Match the existing strict one-minute grid AND exact terminal fact.
+
+    Selection uses a complete *single* provider window, never minute-level
+    splicing, forward filling or a stale observation re-labeled as terminal.
+    """
+    expected = _minute_grid(trade_date, start_et, end_et)
+    timestamps = [_fact_timestamp(fact, trade_date, start_et, end_et) for fact in facts]
+    if len(timestamps) != len(expected) or any(t is None for t in timestamps):
+        return False
+    minute_set = {t.replace(second=0, microsecond=0).isoformat() for t in timestamps if t}
+    _, window_end = _window_bounds(trade_date, start_et, end_et)
+    return minute_set == expected and window_end - timedelta(minutes=1) in timestamps
+
+
 def _fact_minute(fact: Mapping[str, Any], trade_date: str, start_et: str, end_et: str) -> str | None:
     timestamp = _fact_timestamp(fact, trade_date, start_et, end_et)
     return timestamp.replace(second=0, microsecond=0).isoformat() if timestamp else None
@@ -648,8 +665,20 @@ def collect_regular_window(
                 failures.setdefault(symbol, []).append(f"nasdaq:{type(exc).__name__}:{exc}")
                 record_reason(symbol, _reason_from_exception(exc), f"{NASDAQ}:{type(exc).__name__}:{exc}")
 
+    # The primary endpoint may emit only a sparse trade chart even when every
+    # returned row is truthful. Try a whole-provider fallback only when the
+    # explicit access contract permits it and the primary is not full-window.
+    try_sparse_fallback = bool(
+        access.get("regular_intraday_collection", {}).get(
+            "fallback_when_primary_is_incomplete_target_window", False
+        )
+    )
     for symbol, asset in universe:
-        if symbol in facts_by_symbol:
+        primary = facts_by_symbol.get(symbol)
+        if primary is not None and (
+            not try_sparse_fallback
+            or _full_window_from_one_provider(primary[1], trade_date, start_et, end_et)
+        ):
             continue
         try:
             facts, diag = fetch_twelve_regular(
@@ -668,7 +697,15 @@ def collect_regular_window(
             diagnostics.setdefault(symbol, []).append(diag)
             record_reason(symbol, reason, f"{TWELVE}:{diag}")
             if facts:
-                facts_by_symbol[symbol] = (TWELVE, _decorate_context_facts(universe_config, facts))
+                # With a nonempty primary, replace the *entire* symbol/window
+                # only if the alternate is complete; otherwise preserve the
+                # qualified primary without a cross-provider minute splice.
+                if primary is None or _full_window_from_one_provider(
+                    facts, trade_date, start_et, end_et
+                ):
+                    facts_by_symbol[symbol] = (TWELVE, _decorate_context_facts(universe_config, facts))
+                else:
+                    diag["fallback_not_selected"] = "alternate_window_incomplete"
             else:
                 failures.setdefault(symbol, []).append("twelve_no_qualified_target_window_facts")
         except Exception as exc:  # noqa: BLE001
