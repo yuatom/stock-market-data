@@ -56,6 +56,7 @@ def fetch_premarket(
         symbol=symbol,
         asset_class=asset_class,
         endpoint_id=endpoint_id,
+        allow_mixed_session_rows=bool(spec.get("qualify_in_window_rows_from_mixed_response", False)),
     )
     if normalized.get("trade_date") != trade_date:
         raise ExtendedHoursAdapterError(
@@ -88,6 +89,7 @@ def fetch_premarket(
         "last_update_timestamp_et": normalized.get("last_update_timestamp_et"),
         "actual_data_cutoff": normalized.get("actual_data_cutoff"),
         "qualified_trade_rows": len(facts),
+        "ignored_out_of_session_row_count": normalized.get("ignored_out_of_session_row_count", 0),
         "security_identity": identity,
     }
 

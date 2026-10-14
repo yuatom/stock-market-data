@@ -61,6 +61,53 @@ class ExtendedAdapterTest(unittest.TestCase):
         self.assertEqual(result["trade_date"], "2026-08-14")
         self.assertEqual(result["actual_data_cutoff"], "2026-08-14T07:46:24-04:00")
 
+    def test_premarket_mixed_response_keeps_only_truthful_window_rows(self):
+        result = module.normalize_extended_trade_payload(
+            payload(
+                last_update="Data last updated Aug 14, 2026 09:30 AM ET.",
+                rows=[
+                    {"price": "$9", "shareVolume": "2", "time": "09:30:00"},
+                    {"price": "$8", "shareVolume": "3", "time": "09:29:57"},
+                    {"price": "$10", "shareVolume": "2", "time": "09:30:01"},
+                ],
+            ),
+            session="premarket",
+            symbol="MU",
+            asset_class="stocks",
+            endpoint_id="extended_trading_pre",
+            allow_mixed_session_rows=True,
+        )
+        self.assertEqual(len(result["qualified_candidate_facts"]), 1)
+        self.assertEqual(result["ignored_out_of_session_row_count"], 2)
+        self.assertEqual(result["actual_data_cutoff"], "2026-08-14T09:29:57-04:00")
+        self.assertEqual(result["qualified_candidate_facts"][0]["observed_delay_seconds"], 3)
+        self.assertFalse(result["market_fact_authority"])
+
+    def test_premarket_mixed_response_without_any_qualified_rows_fails_closed(self):
+        with self.assertRaisesRegex(module.ExtendedHoursAdapterError, "no qualified trade rows"):
+            module.normalize_extended_trade_payload(
+                payload(
+                    last_update="Data last updated Aug 14, 2026 09:30 AM ET.",
+                    rows=[{"price": "$1", "shareVolume": "2", "time": "09:30:00"}],
+                ),
+                session="premarket",
+                symbol="MU",
+                asset_class="stocks",
+                endpoint_id="extended_trading_pre",
+                allow_mixed_session_rows=True,
+            )
+
+    def test_after_hours_mixed_response_remains_strict_even_with_flag(self):
+        with self.assertRaises(module.ExtendedHoursAdapterError):
+            module.normalize_extended_trade_payload(
+                payload(rows=[{"price": "$1", "shareVolume": "1", "time": "09:30:00"}]),
+                session="after_hours",
+                symbol="MU",
+                asset_class="stocks",
+                endpoint_id="extended_trading_post",
+                allow_mixed_session_rows=True,
+            )
+
     def test_wrong_session_clock_fails_closed(self):
         with self.assertRaises(module.ExtendedHoursAdapterError):
             module.normalize_extended_trade_payload(

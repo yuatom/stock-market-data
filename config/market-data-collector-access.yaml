@@ -72,6 +72,7 @@ nasdaq_public_extended_premarket:
   endpoint_id: extended_trading_pre
   url_template: https://api.nasdaq.com/api/quote/{symbol}/extended-trading?assetclass={asset_class}&markettype=pre
   allowed_sessions: [premarket]
+  qualify_in_window_rows_from_mixed_response: true
   target_window_et: ['04:00', '09:30']
   collection_group: config/collection-universe.json#premarket
   feed_scope: official_website_delayed_extended_trade_detail
@@ -82,7 +83,10 @@ nasdaq_public_extended_premarket:
     application_rCode_must_equal: 200
     explicit_last_update_et_required: true
     target_trade_date_required: true
-    every_trade_clock_must_be_inside_target_session: true
+    every_persisted_trade_clock_must_be_inside_target_session: true
+    outside_window_raw_rows_must_not_be_persisted: true
+    zero_in_window_rows_after_filter_must_fail_closed: true
+    mixed_session_response_behavior: filter_by_explicit_session_clock_without_fabrication
     requested_symbol_and_asset_class_must_match_fact_identity: true
     security_identity_must_be_bound_from_collection_universe: true
     ticker_effective_at_must_be_preserved_when_present: true

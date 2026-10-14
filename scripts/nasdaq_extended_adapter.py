@@ -96,6 +96,7 @@ def normalize_extended_trade_payload(
     symbol: str,
     asset_class: str,
     endpoint_id: str,
+    allow_mixed_session_rows: bool = False,
 ) -> dict[str, Any]:
     """Return validated candidate facts without granting market-fact authority.
 
@@ -136,9 +137,16 @@ def normalize_extended_trade_payload(
         raise ExtendedHoursAdapterError("at least one extended-hours trade row is required")
 
     facts: list[dict[str, Any]] = []
+    ignored_outside_window = 0
     for row in rows:
         clock = _parse_trade_clock(row.get("time"))
         if not _clock_in_session(clock, session):
+            # The extended-trading endpoint can return regular-session prints
+            # after 09:30 ET. Only explicit Premarket promotion may discard
+            # those rows; never re-label them or weaken per-fact truth checks.
+            if session == "premarket" and allow_mixed_session_rows:
+                ignored_outside_window += 1
+                continue
             raise ExtendedHoursAdapterError(
                 f"trade clock {clock} is outside declared {session} window"
             )
@@ -166,6 +174,8 @@ def normalize_extended_trade_payload(
             }
         )
 
+    if not facts:
+        raise ExtendedHoursAdapterError("no qualified trade rows inside declared session window")
     facts.sort(key=lambda fact: (fact["event_time"], fact["last_sale"], fact["reported_share_volume"]))
     latest_event = max(datetime.fromisoformat(fact["event_time"]) for fact in facts)
     return {
@@ -180,4 +190,5 @@ def normalize_extended_trade_payload(
         "last_update_timestamp_et": last_update.isoformat(),
         "actual_data_cutoff": latest_event.isoformat(),
         "qualified_candidate_facts": facts,
+        "ignored_out_of_session_row_count": ignored_outside_window,
     }
