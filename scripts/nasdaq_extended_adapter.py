@@ -9,6 +9,7 @@ shadow-probe readiness gate passes.
 """
 from __future__ import annotations
 
+import math
 import re
 from datetime import datetime
 from typing import Any, Mapping
@@ -65,7 +66,10 @@ def _parse_numeric(value: Any, *, field: str, non_negative: bool = False) -> flo
     if isinstance(value, bool):
         raise ExtendedHoursAdapterError(f"{field} must be numeric")
     if isinstance(value, (int, float)):
-        parsed = float(value)
+        try:
+            parsed = float(value)
+        except (OverflowError, ValueError) as exc:
+            raise ExtendedHoursAdapterError(f"{field} must be finite") from exc
     elif isinstance(value, str):
         text = value.strip().replace(",", "").replace("$", "")
         if not text:
@@ -76,6 +80,8 @@ def _parse_numeric(value: Any, *, field: str, non_negative: bool = False) -> flo
             raise ExtendedHoursAdapterError(f"{field} is not numeric: {value!r}") from exc
     else:
         raise ExtendedHoursAdapterError(f"{field} must be numeric")
+    if not math.isfinite(parsed):
+        raise ExtendedHoursAdapterError(f"{field} must be finite")
     if non_negative and parsed < 0:
         raise ExtendedHoursAdapterError(f"{field} must be non-negative")
     return parsed
