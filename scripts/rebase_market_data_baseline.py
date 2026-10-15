@@ -183,6 +183,7 @@ def _replace_series(
     archive_path: Path,
     revision_count: int,
     store_root: Path,
+    history_outputsize: int | None = None,
 ) -> None:
     rows = [dict(x) for x in records]
     rows.sort(key=lambda x: x["trade_date"])
@@ -213,7 +214,7 @@ def _replace_series(
         {
             "ingest_kind": "collector_explicit_daily_baseline_rebase",
             "ingest_trade_date": trade_date,
-            "history_outputsize": target_records,
+            "history_outputsize": history_outputsize if history_outputsize is not None else target_records,
             "start": 0,
             "end": len(rows) - 1,
             "recovery_archive_path": archive_rel,
@@ -230,6 +231,33 @@ def _replace_series(
         "recovery_archive_path": archive_rel,
     }
     store._write_json(index_path, index)
+
+
+def _replacement_history_outputsize(
+    existing: Sequence[Mapping[str, Any]], *, trade_date: str, target_records: int
+) -> int:
+    """Size one latest-history request without losing retained dates.
+
+    At most one daily row exists per calendar day. Calendar spans therefore
+    conservatively cover both old history and rows later excluded by cutoff,
+    without guessing exchange holidays. This does not authorize any revision.
+    Twelve Data's single-request limit is 5000; exceeding it needs a separate
+    paginated maintenance design, never silent truncation or an unbounded loop.
+    """
+    if not existing:
+        raise ExplicitRebaseError("explicit rebase requires an existing series")
+    if target_records < 1:
+        raise ExplicitRebaseError("target_records must be positive")
+    today = datetime.now(collectors.ET).date()
+    cutoff = datetime.strptime(trade_date, "%Y-%m-%d").date()
+    oldest = datetime.strptime(str(existing[0]["trade_date"]), "%Y-%m-%d").date()
+    if cutoff > today:
+        raise ExplicitRebaseError("explicit rebase trade_date cannot be in the future")
+    excluded_days = (today - cutoff).days + 1
+    outputsize = max(target_records + excluded_days, (today - oldest).days + 1)
+    if outputsize > 5000:
+        raise ExplicitRebaseError("retained history exceeds the bounded 5000-row request")
+    return outputsize
 
 
 def rebase(
@@ -283,6 +311,10 @@ def rebase(
                         f"series semantic mismatch {field}: {index.get(field)!r} != {value!r}"
                     )
 
+            existing = store.read_daily_series(store_root, provider=provider, symbol=symbol)
+            history_outputsize = _replacement_history_outputsize(
+                existing, trade_date=trade_date, target_records=target_records
+            )
             collectors.wait_for_twelve_budget(
                 store_root,
                 trade_date,
@@ -296,7 +328,9 @@ def rebase(
                 per_day=int(budget["hard_credits_per_day"]),
                 per_minute=int(budget["hard_credits_per_minute"]),
             )
-            fetched = collectors.fetch_twelve_daily(symbol, key, access, outputsize=target_records)
+            fetched = collectors.fetch_twelve_daily(
+                symbol, key, access, outputsize=history_outputsize
+            )
             effective = collection.ticker_effective_at(universe_config, symbol)
             eligible = [
                 row for row in fetched
@@ -309,7 +343,15 @@ def rebase(
                     f"provider returned only {len(eligible)} eligible rows for target {target_records}"
                 )
 
-            existing = store.read_daily_series(store_root, provider=provider, symbol=symbol)
+            # The request may overfetch older rows. Retain all old dates plus
+            # newer eligible rows, extending backward only to meet the target.
+            if eligible:
+                target_start = eligible[-target_records:][0]["trade_date"]
+                first_required = min(existing[0]["trade_date"], target_start)
+                eligible = [row for row in eligible if row["trade_date"] >= first_required]
+            # Validate every selected row before creating an irreversible archive,
+            # including new rows that overlap-comparison would not serialize.
+            store.canonical_bytes(eligible)
             revisions = validate_replacement(
                 existing,
                 eligible,
@@ -337,6 +379,7 @@ def rebase(
                 archive_path=archive_path,
                 revision_count=len(revisions),
                 store_root=store_root,
+                history_outputsize=history_outputsize,
             )
             results.append(
                 {
