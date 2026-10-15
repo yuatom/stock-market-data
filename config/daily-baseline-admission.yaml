@@ -30,3 +30,18 @@ terminal_statuses: [PASS, FAIL, BLOCKED]
 interrupted_status: IN_PROGRESS
 non_pass_exit_code: 2
 admission_is_recovery_or_future_write_authorization: false
+pre_provider_guard:
+  after_durable_predebit: true
+  boundary: strict_replacement_reader_before_http
+  current_compute_main_and_clean_checkout_required: true
+  current_store_commit_and_unchanged_budget_blob_required: true
+  minute_authority: actual_persisted_ledger_delta
+  clock_checked_after_remote_identity_reads: true
+required_output_closure:
+  authority: config/store-publication-durability.yaml
+  manifest_carrier: existing_target_day_budget_json
+  preserve_credit_and_minute_counters: true
+  publish_diagnostic_and_declaration_together: true
+  verifier_requires_manifest: true
+  verified_outputs_must_equal_exact_diagnostic_path_and_blob: true
+  invocation_date_stage_and_diagnostic_identity_must_match: true

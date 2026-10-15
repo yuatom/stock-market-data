@@ -251,6 +251,10 @@ class AdmissionExecutionTests(unittest.TestCase):
     def setUp(self):
         AdmissionPublisherTests.setUp(self)
         self.fetch = Mock(return_value=[])
+        self.now = NOW
+        self.compute_head = 'a'*40
+        self.before_transport = lambda: None
+        self.before_compute_read = lambda: None
         self.cfg = {'collector': {'twelve_data_daily': {'settlement_maturity': {'minimum_next_day_et': '07:00'}},
                                   'budgets': {'twelve_data_basic': {'hard_credits_per_day': 200, 'hard_credits_per_minute': 8}}},
                     'series': {'baseline_initialization': {'explicit_rebase': {
@@ -260,26 +264,37 @@ class AdmissionExecutionTests(unittest.TestCase):
             state = json.loads(self.budget.read_text()) if self.budget.exists() else {'credits': 0}
             state['credits'] += 1
             state['trade_date'] = DAY
-            state['minutes'] = {}
+            minute = self.now.strftime('%Y-%m-%dT%H:%MZ')
+            state.setdefault('minutes', {})[minute] = state.get('minutes', {}).get(minute, 0) + 1
             self.budget.write_text(json.dumps(state))
         class Exhausted(RuntimeError):
             pass
+        def strict_fetch(*args, before_request=None, **kwargs):
+            self.before_transport()
+            if before_request is not None:
+                before_request()
+            return self.fetch(*args, **kwargs)
         self.h = SimpleNamespace(collectors=SimpleNamespace(wait_for_twelve_budget=Mock(),
                     consume_twelve_credit=Mock(side_effect=debit), BudgetExceeded=Exhausted),
-                    rebaser=SimpleNamespace(_fetch_replacement_daily=self.fetch))
+                    rebaser=SimpleNamespace(_fetch_replacement_daily=strict_fetch))
         self.candidates = [{'symbol': 'TEST', 'outputsize': 300, 'effective': None}]
 
     def execute(self, key='unit-test-only'):
         real_git = self.m.git
         def wrapped_git(repo, *args):
             if repo == Path('/synthetic-compute'):
-                return 'a'*40 + '\trefs/heads/main'
+                if args == ('rev-parse', 'HEAD'):
+                    return 'a'*40
+                if args[0] == 'status':
+                    return ''
+                self.before_compute_read()
+                return self.compute_head + '\trefs/heads/main'
             return real_git(repo, *args)
         with patch.object(self.m, 'prepare_series', return_value=self.candidates), \
              patch.object(self.m, 'compare_replacement', return_value={'symbol': 'TEST', 'status': 'PASS'}), \
              patch.object(self.m, 'git', side_effect=wrapped_git):
             return self.m.execute(self.h, self.p, compute=Path('/synthetic-compute'), compute_sha='a'*40,
-                day=DAY, request_id='12-1', config=self.cfg, universe={}, access={}, key=key, clock=lambda: NOW)
+                day=DAY, request_id='12-1', config=self.cfg, universe={}, access={}, key=key, clock=lambda: self.now)
 
     def test_secret_missing_causes_no_write_or_fetch(self):
         with self.assertRaises(self.m.AdmissionError) as ctx:
@@ -383,6 +398,245 @@ class AdmissionCanonicalTests(unittest.TestCase):
                 rows.append(copy.deepcopy(rows[-1]))
             with self.subTest(value=value), self.assertRaises(self.m.AdmissionError):
                 self.m.compare_replacement(self.h, self.candidate, rows, DAY, self.cfg)
+
+
+    def test_canonical_request_guard_runs_after_preparation_before_http(self):
+        access = {'twelve_data_basic': {'interval_daily': '1day', 'base_url': 'https://example.invalid',
+                                      'time_series_path': '/time_series'},
+                  'http': {'timeout_seconds': 5, 'user_agent': 'synthetic-test'}}
+        calls = []
+        urlencode = self.h.rebaser.urllib.parse.urlencode
+        def prepare(value):
+            calls.append('prepare')
+            return urlencode(value)
+        def guard():
+            self.assertEqual(calls, ['prepare'])
+            calls.append('guard')
+        def http(*args, **kwargs):
+            self.assertEqual(calls, ['prepare', 'guard'])
+            calls.append('http')
+            return {'values': []}
+        with patch.object(self.h.rebaser.urllib.parse, 'urlencode', side_effect=prepare), \
+             patch.object(self.h.collectors, '_http_json', side_effect=http):
+            self.h.rebaser._fetch_replacement_daily('TEST', 'synthetic-key', access,
+                outputsize=10, trade_date=DAY, effective=None, before_request=guard)
+        self.assertEqual(calls, ['prepare', 'guard', 'http'])
+
+    def test_canonical_request_guard_failure_never_enters_http(self):
+        access = {'twelve_data_basic': {'interval_daily': '1day', 'base_url': 'https://example.invalid',
+                                      'time_series_path': '/time_series'},
+                  'http': {'timeout_seconds': 5, 'user_agent': 'synthetic-test'}}
+        guard = Mock(side_effect=self.m.AdmissionError('object_drift'))
+        with patch.object(self.h.collectors, '_http_json') as http, self.assertRaises(self.m.AdmissionError):
+            self.h.rebaser._fetch_replacement_daily('TEST', 'synthetic-key', access,
+                outputsize=10, trade_date=DAY, effective=None, before_request=guard)
+        guard.assert_called_once_with()
+        http.assert_not_called()
+
+    def test_canonical_reader_without_guard_remains_compatible(self):
+        access = {'twelve_data_basic': {'interval_daily': '1day', 'base_url': 'https://example.invalid',
+                                      'time_series_path': '/time_series'},
+                  'http': {'timeout_seconds': 5, 'user_agent': 'synthetic-test'}}
+        with patch.object(self.h.collectors, '_http_json', return_value={'values': []}) as http:
+            self.assertEqual(self.h.rebaser._fetch_replacement_daily('TEST', 'synthetic-key', access,
+                outputsize=10, trade_date=DAY, effective=None), [])
+        http.assert_called_once()
+
+
+class AdmissionRequestRaceTests(unittest.TestCase):
+    setUp = AdmissionExecutionTests.setUp
+    execute = AdmissionExecutionTests.execute
+
+    def assert_unused_debit(self, result):
+        self.fetch.assert_not_called()
+        self.assertEqual(result['status'], 'BLOCKED')
+        self.assertEqual(result['budget_debits'], 1)
+        self.assertEqual(result['requests_attempted'], 0)
+        ledger = json.loads(git(self.remote, 'show', 'refs/heads/main:'+self.p.budget_relative))
+        self.assertEqual(ledger['credits'], 1)
+        self.assertEqual(ledger['minutes'][NOW.strftime('%Y-%m-%dT%H:%MZ')], 1)
+        self.assertEqual(set(git(self.repo, 'diff', '--name-only', self.base, self.p.head).splitlines()), self.p.allowed)
+        self.assertEqual(self.facts.read_text(), '{"synthetic":true}\n')
+
+    def test_actual_debit_minute_is_taken_from_ledger_delta(self):
+        original = self.h.collectors.consume_twelve_credit.side_effect
+        def debit(*args, **kwargs):
+            self.now = NOW.replace(minute=1)
+            return original(*args, **kwargs)
+        self.h.collectors.consume_twelve_credit.side_effect = debit
+        result, _ = self.execute()
+        self.assertEqual(result['status'], 'PASS')
+        self.assertEqual(result['budget_debits'], 1)
+        self.assertEqual(result['requests_attempted'], 1)
+        ledger = json.loads(git(self.remote, 'show', 'refs/heads/main:'+self.p.budget_relative))
+        self.assertEqual(ledger['minutes'], {self.now.strftime('%Y-%m-%dT%H:%MZ'): 1})
+
+    def test_p1_source_drift_after_durable_predebit_blocks_http(self):
+        original = self.m.debit_before_request
+        def debit(*args, **kwargs):
+            proof = original(*args, **kwargs)
+            self.compute_head = 'b'*40
+            return proof
+        with patch.object(self.m, 'debit_before_request', side_effect=debit):
+            result, _ = self.execute()
+        self.assert_unused_debit(result)
+        self.assertEqual(result['failures'][0]['code'], 'object_drift')
+
+    def test_p1_source_drift_during_request_preparation_blocks_http(self):
+        self.before_transport = lambda: setattr(self, 'compute_head', 'b'*40)
+        result, _ = self.execute()
+        self.assert_unused_debit(result)
+        self.assertEqual(result['failures'][0]['code'], 'object_drift')
+
+    def test_p1_minute_rollover_during_request_preparation_blocks_http(self):
+        self.before_transport = lambda: setattr(self, 'now', NOW.replace(minute=1))
+        result, _ = self.execute()
+        self.assert_unused_debit(result)
+        self.assertEqual(result['failures'][0]['code'], 'budget_slot_expired')
+
+    def test_p1_slow_final_source_read_cannot_reuse_expired_slot(self):
+        def delay():
+            if self.budget.exists() and json.loads(self.budget.read_text())['credits'] == 1:
+                self.now = NOW.replace(minute=1)
+        self.before_compute_read = delay
+        result, _ = self.execute()
+        self.assert_unused_debit(result)
+        self.assertEqual(result['failures'][0]['code'], 'budget_slot_expired')
+
+    def test_p1_dirty_debit_after_predebit_is_not_published_or_used(self):
+        def tamper():
+            state = json.loads(self.budget.read_text())
+            state['credits'] = 99
+            self.budget.write_text(json.dumps(state))
+        self.before_transport = tamper
+        with self.assertRaises(self.m.AdmissionError):
+            self.execute()
+        self.fetch.assert_not_called()
+        ledger = json.loads(git(self.remote, 'show', 'refs/heads/main:'+self.p.budget_relative))
+        self.assertEqual(ledger['credits'], 1)
+        report = json.loads(git(self.remote, 'show', 'refs/heads/main:'+self.p.report_relative))
+        self.assertEqual(report['status'], 'IN_PROGRESS')
+
+    def test_p1_remote_store_drift_stops_http_and_final_publication(self):
+        remote_sha = []
+        def drift():
+            other = self.root / 'concurrent'
+            git(self.root, 'clone', '--branch', 'main', str(self.remote), str(other))
+            git(other, 'config', 'user.name', 'synthetic-writer')
+            git(other, 'config', 'user.email', 'synthetic@example.invalid')
+            (other / 'concurrent.txt').write_text('synthetic')
+            git(other, 'add', '.')
+            git(other, 'commit', '-m', 'synthetic concurrent advance')
+            git(other, 'push', 'origin', 'main')
+            remote_sha.append(git(other, 'rev-parse', 'HEAD'))
+        self.before_transport = drift
+        with self.assertRaises(self.m.AdmissionError):
+            self.execute()
+        self.fetch.assert_not_called()
+        self.assertEqual(git(self.remote, 'rev-parse', 'refs/heads/main'), remote_sha[0])
+        self.assertEqual(json.loads(git(self.remote, 'show', 'refs/heads/main:'+self.p.budget_relative))['credits'], 1)
+
+
+class AdmissionRequiredClosureTests(unittest.TestCase):
+    setUp = AdmissionExecutionTests.setUp
+    execute = AdmissionExecutionTests.execute
+
+    def test_p1_real_verifier_receives_nonempty_exact_diagnostic_closure(self):
+        self.p.verify = self.m.verify_durability
+        outputs = []
+        real_run = self.m._run
+        def capture(argv, **kwargs):
+            value = real_run(argv, **kwargs)
+            if 'verify_store_publication.py' in ' '.join(argv):
+                outputs.append((argv, json.loads(value)))
+            return value
+        with patch.object(self.m, '_run', side_effect=capture):
+            result, sha = self.execute()
+        self.assertEqual(result['status'], 'PASS')
+        argv, receipt = outputs[-1]
+        expected_blob = git(self.remote, 'rev-parse', sha+':'+self.p.report_relative)
+        self.assertIn('--required-manifest', argv)
+        self.assertEqual(receipt['verified_required_outputs'], [{'path': self.p.report_relative, 'blob_sha': expected_blob}])
+        self.assertEqual(receipt['store_commit_sha'], sha)
+        self.assertEqual(git(self.remote, 'rev-parse', 'refs/tags/market-data-read/'+sha), sha)
+        manifest = json.loads(git(self.remote, 'show', sha+':'+self.p.budget_relative))
+        self.assertEqual((manifest['request_id'], manifest['trade_date'], manifest['stage']), ('12-1', DAY, MODE))
+        self.assertEqual(manifest['credits'], 1)
+        self.assertEqual(manifest['minutes'][NOW.strftime('%Y-%m-%dT%H:%MZ')], 1)
+        self.assertEqual(set(git(self.repo, 'diff', '--name-only', self.base, sha).splitlines()), self.p.allowed)
+
+    def corrupt_manifest(self, kind):
+        self.p.verify = self.m.verify_durability
+        result, sha = self.execute()
+        manifest = json.loads(self.budget.read_text())
+        if kind == 'missing':
+            manifest['required_outputs'][0]['path'] = 'collector-state/missing.json'
+        elif kind == 'wrong_blob':
+            manifest['required_outputs'][0]['blob_sha'] = '0'*40
+        elif kind == 'wrong_path':
+            manifest['required_outputs'][0] = {'path': str(self.facts.relative_to(self.repo / 'data/market-data')),
+                                               'blob_sha': git(self.repo, 'rev-parse', sha+':'+str(self.facts.relative_to(self.repo)))}
+        elif kind == 'wrong_request':
+            manifest['request_id'] = '99-1'
+        elif kind == 'wrong_date':
+            manifest['trade_date'] = '2026-10-14'
+        elif kind == 'wrong_stage':
+            manifest['stage'] = 'other_mode'
+        elif kind == 'wrong_report_identity':
+            report_path = self.repo / self.p.report_relative
+            doc = json.loads(report_path.read_text())
+            doc['request_id'] = '99-1'
+            report_path.write_text(json.dumps(doc))
+            manifest['required_outputs'][0]['blob_sha'] = git(self.repo, 'hash-object', str(report_path))
+        self.budget.write_text(json.dumps(manifest))
+        git(self.repo, 'add', '.')
+        git(self.repo, 'commit', '-m', 'synthetic invalid closure')
+        candidate = git(self.repo, 'rev-parse', 'HEAD')
+        git(self.repo, 'push', 'origin', 'main')
+        return candidate
+
+    def test_required_closure_missing_output_rejected_by_real_helper(self):
+        self.assert_bad_closure('missing')
+
+    def test_required_closure_wrong_blob_rejected_by_real_helper(self):
+        self.assert_bad_closure('wrong_blob')
+
+    def test_required_closure_wrong_existing_path_rejected(self):
+        self.assert_bad_closure('wrong_path')
+
+    def test_required_closure_wrong_request_rejected(self):
+        self.assert_bad_closure('wrong_request')
+
+    def test_required_closure_wrong_date_rejected(self):
+        self.assert_bad_closure('wrong_date')
+
+    def test_required_closure_wrong_stage_rejected(self):
+        self.assert_bad_closure('wrong_stage')
+
+    def test_required_closure_wrong_report_identity_rejected(self):
+        self.assert_bad_closure('wrong_report_identity')
+
+    def assert_bad_closure(self, kind):
+        candidate = self.corrupt_manifest(kind)
+        expected_blob = git(self.repo, 'rev-parse', candidate+':'+self.p.report_relative)
+        with self.assertRaises(self.m.AdmissionError) as ctx:
+            self.m.verify_durability(self.repo, candidate, required_manifest=self.p.budget_relative,
+                expected_report={'path': self.p.report_relative, 'blob_sha': expected_blob,
+                                 'request_id': '12-1', 'trade_date': DAY, 'mode': MODE})
+        self.assertEqual(ctx.exception.code, 'durability_failed')
+
+    def test_required_closure_failure_never_returns_final_pass(self):
+        real_verify = self.m.verify_durability
+        def fail_final(repo, sha, **kwargs):
+            report = json.loads(git(repo, 'show', sha+':'+self.p.report_relative))
+            if report['status'] == 'PASS':
+                raise self.m.AdmissionError('durability_failed')
+            return real_verify(repo, sha, **kwargs)
+        self.p.verify = fail_final
+        with self.assertRaises(self.m.AdmissionError) as ctx:
+            self.execute()
+        self.assertEqual(ctx.exception.code, 'durability_failed')
+        self.assertEqual(self.fetch.call_count, 1)
 
 
 if __name__ == '__main__':

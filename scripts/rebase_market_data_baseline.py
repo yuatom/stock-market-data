@@ -19,7 +19,7 @@ import os
 import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import collection_universe as collection
 import market_data_collectors as collectors
@@ -280,6 +280,7 @@ def _fetch_replacement_daily(
     outputsize: int,
     trade_date: str,
     effective: str | None,
+    before_request: Callable[[], None] | None = None,
 ) -> list[dict[str, Any]]:
     """Strict maintenance reader; do not use the normal EOD skip-bad-row parser.
 
@@ -292,11 +293,14 @@ def _fetch_replacement_daily(
         "symbol": symbol, "interval": spec["interval_daily"],
         "outputsize": outputsize, "apikey": api_key, "format": "JSON",
     })
-    payload = collectors._http_json(
-        f"{spec['base_url']}{spec['time_series_path']}?{params}",
-        timeout=int(access["http"]["timeout_seconds"]),
-        user_agent=str(access["http"]["user_agent"]),
-    )
+    url = f"{spec['base_url']}{spec['time_series_path']}?{params}"
+    timeout = int(access["http"]["timeout_seconds"])
+    user_agent = str(access["http"]["user_agent"])
+    # Admission can revalidate its durable debit after all request preparation.
+    # Existing maintenance callers have no callback and retain the same HTTP/parser.
+    if before_request is not None:
+        before_request()
+    payload = collectors._http_json(url, timeout=timeout, user_agent=user_agent)
     if payload.get("status") == "error":
         raise ExplicitRebaseError("provider daily replacement request failed")
     values = payload.get("values")

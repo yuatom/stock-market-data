@@ -14,6 +14,7 @@ import re
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -61,10 +62,42 @@ def git(repo: Path, *args: str) -> str:
     return _run(['git', '-C', str(repo), *args])
 
 
-def verify_durability(repo: Path, sha: str) -> None:
-    _run([sys.executable, str(Path(__file__).with_name('verify_store_publication.py')),
-          '--store-root', str(repo), '--expected-commit', sha,
-          '--writer-status', 'store_persisted'], code='durability_failed')
+def verify_durability(repo: Path, sha: str, *, required_manifest: str | None = None,
+                      expected_report: dict[str, str] | None = None) -> dict:
+    argv = [sys.executable, str(Path(__file__).with_name('verify_store_publication.py')),
+            '--store-root', str(repo), '--expected-commit', sha,
+            '--writer-status', 'store_persisted']
+    if required_manifest is not None:
+        argv.extend(['--required-manifest', required_manifest])
+    try:
+        receipt = json.loads(_run(argv, code='durability_failed'))
+        if (receipt.get('status') != 'durability_verified' or
+            receipt.get('store_commit_sha') != sha or receipt.get('remote_main_sha') != sha or
+            receipt.get('durability_ref') != f'refs/tags/market-data-read/{sha}'):
+            raise ValueError
+        if required_manifest is not None:
+            if expected_report is None:
+                raise ValueError
+            path, blob = expected_report['path'], expected_report['blob_sha']
+            expected_outputs = [{'path': path, 'blob_sha': blob}]
+            if receipt.get('verified_required_outputs') != expected_outputs:
+                raise ValueError
+            # Read only the same immutable commit the real verifier fetched.
+            manifest = json.loads(git(repo, 'show', f'{sha}:{required_manifest}'))
+            diagnostic = json.loads(git(repo, 'show', f'{sha}:{path}'))
+            if (manifest.get('request_id') != expected_report['request_id'] or
+                manifest.get('trade_date') != expected_report['trade_date'] or
+                manifest.get('stage') != MODE or
+                manifest.get('required_outputs') != [
+                    {'path': str(Path(path).relative_to('data/market-data')), 'blob_sha': blob}] or
+                any(diagnostic.get(k) != expected_report[k] for k in ('request_id', 'trade_date', 'mode'))):
+                raise ValueError
+        elif expected_report is not None:
+            raise ValueError
+        return receipt
+    except Exception:
+        # Raw helper output, private diagnostics and arbitrary Git errors stay private.
+        raise AdmissionError('durability_failed') from None
 
 
 def validate_target(day: str, maturity: str, now: datetime) -> None:
@@ -86,13 +119,14 @@ def validate_target(day: str, maturity: str, now: datetime) -> None:
 class StorePublisher:
     """Exact fast-forward budget/diagnostic writer under the collector's job lock."""
     def __init__(self, repo: Path, expected: str, day: str, request_id: str,
-                 *, verify: Callable[[Path, str], None] = verify_durability):
+                 *, verify: Callable[..., dict] = verify_durability):
         self.repo = repo.resolve()
         if not re.fullmatch(r'[0-9a-f]{40}', expected):
             raise AdmissionError('object_drift')
         if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', day) or not re.fullmatch(r'\d+-\d+', request_id):
             raise AdmissionError('invalid_target')
         self.base = self.head = expected
+        self.day, self.request_id = day, request_id
         self.verify = verify
         prefix = f'data/market-data/collector-state/{day[:7]}/{day}'
         self.budget_relative = f'{prefix}-twelve-data-budget.json'
@@ -135,7 +169,15 @@ class StorePublisher:
             if not path.is_file():
                 raise AdmissionError('unexpected_store_change')
 
-    def publish(self, paths: list[str]) -> str:
+    def assert_current(self, expected: str | None = None) -> None:
+        expected = expected or self.head
+        if (self.head != expected or git(self.repo, 'rev-parse', 'HEAD') != expected or
+            self.remote_head() != expected):
+            raise AdmissionError('object_drift')
+        if git(self.repo, 'status', '--porcelain') or git(self.repo, 'ls-files', '--others'):
+            raise AdmissionError('dirty_checkout')
+
+    def publish(self, paths: list[str], *, expected_report: dict[str, str] | None = None) -> str:
         if not paths or not set(paths) <= self.allowed:
             raise AdmissionError('unsafe_path')
         self.assert_allowed()
@@ -148,26 +190,48 @@ class StorePublisher:
             if not self.safe_path(relative).is_file():
                 raise AdmissionError('unsafe_path')
         git(self.repo, 'add', '--', *paths)
-        if not git(self.repo, 'diff', '--cached', '--name-only'):
-            return self.head
-        git(self.repo, '-c', 'user.name=stock-market-data-bot', '-c',
-            'user.email=stock-market-data-bot@users.noreply.github.com',
-            'commit', '--quiet', '--no-gpg-sign', '-m', 'data: record daily admission budget or diagnostic')
-        candidate = git(self.repo, 'rev-parse', 'HEAD')
-        # No pull/rebase/force retry: a concurrent writer invalidates this operation.
-        git(self.repo, 'push', 'origin', f'{candidate}:refs/heads/main')
+        if git(self.repo, 'diff', '--cached', '--name-only'):
+            git(self.repo, '-c', 'user.name=stock-market-data-bot', '-c',
+                'user.email=stock-market-data-bot@users.noreply.github.com',
+                'commit', '--quiet', '--no-gpg-sign', '-m', 'data: record daily admission budget or diagnostic')
+            candidate = git(self.repo, 'rev-parse', 'HEAD')
+            # No pull/rebase/force retry: a concurrent writer invalidates this operation.
+            git(self.repo, 'push', 'origin', f'{candidate}:refs/heads/main')
+        else:
+            candidate = self.head
         if self.remote_head() != candidate:
             raise AdmissionError('object_drift')
-        self.verify(self.repo, candidate)
+        if expected_report is None:
+            self.verify(self.repo, candidate)
+        else:
+            self.verify(self.repo, candidate, required_manifest=self.budget_relative,
+                        expected_report=expected_report)
         self.head = candidate
         return candidate
 
     def report(self, value: dict[str, Any]) -> str:
+        # Do not hide a post-debit local edit inside a new diagnostic commit.
+        self.assert_current()
+        if (value.get('request_id') != self.request_id or value.get('trade_date') != self.day or
+            value.get('mode') != MODE):
+            raise AdmissionError('contract_invalid')
+        budget_path = self.safe_path(self.budget_relative)
+        budget = read_budget_state(budget_path, self.day)
         path = self.safe_path(self.report_relative)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(value, ensure_ascii=False, allow_nan=False,
                                    sort_keys=True, separators=(',', ':')) + '\n', encoding='utf-8')
-        return self.publish([self.report_relative])
+        blob = git(self.repo, 'hash-object', '--', str(path))
+        # The budget is also the retained protocol's manifest. No third Store
+        # path or circular self-blob declaration; existing counters are preserved.
+        budget.update(schema_version=1, request_id=self.request_id, stage=MODE,
+                      required_outputs=[{'path': str(Path(self.report_relative).relative_to('data/market-data')),
+                                         'blob_sha': blob}])
+        budget_path.write_text(json.dumps(budget, ensure_ascii=False, allow_nan=False,
+                                         sort_keys=True, separators=(',', ':')) + '\n', encoding='utf-8')
+        return self.publish([self.budget_relative, self.report_relative], expected_report={
+            'path': self.report_relative, 'blob_sha': blob, 'request_id': self.request_id,
+            'trade_date': self.day, 'mode': MODE})
 
 
 def load_helpers():
@@ -251,13 +315,34 @@ def validate_budget_file(path: Path, day: str, per_day: int, per_minute: int) ->
         raise AdmissionError('budget_state_invalid') from None
 
 
+def read_budget_state(path: Path, day: str) -> dict:
+    if not path.exists():
+        return {'schema_version': 1, 'trade_date': day, 'credits': 0, 'minutes': {}}
+    try:
+        state = json.loads(path.read_text(encoding='utf-8'))
+        if (not isinstance(state, dict) or state.get('trade_date') != day or
+            type(state.get('credits')) is not int or state['credits'] < 0 or
+            not isinstance(state.get('minutes'), dict)):
+            raise ValueError
+        return state
+    except (ValueError, TypeError, OSError):
+        raise AdmissionError('budget_state_invalid') from None
+
+
+@dataclass(frozen=True)
+class BudgetDebit:
+    store_commit_sha: str
+    budget_blob_sha: str | None
+    minute: str
+
+
 def debit_before_request(h, writer, root: Path, day: str, budget: dict,
-                         *, clock: Callable[[], datetime] = utc_now) -> None:
+                         *, clock: Callable[[], datetime] = utc_now) -> BudgetDebit:
     if clock().astimezone(ET).date().isoformat() != day:
         raise AdmissionError('invalid_target')
     kwargs = {'per_day': int(budget['hard_credits_per_day']), 'per_minute': int(budget['hard_credits_per_minute'])}
-    if hasattr(writer, 'safe_path'):
-        path = writer.safe_path(writer.budget_relative)
+    path = writer.safe_path(writer.budget_relative) if hasattr(writer, 'safe_path') else None
+    if path is not None:
         validate_budget_file(path, day, **kwargs)
     h.collectors.wait_for_twelve_budget(root, day, **kwargs)
     stamp = clock()
@@ -266,14 +351,52 @@ def debit_before_request(h, writer, root: Path, day: str, budget: dict,
         stamp = clock()
     if stamp.astimezone(ET).date().isoformat() != day:
         raise AdmissionError('invalid_target')
-    # Check the real path before the existing helper can follow a symlink.
-    if hasattr(writer, 'safe_path'):
+    if path is not None:
         writer.safe_path(writer.budget_relative)
+        before = read_budget_state(path, day)
     h.collectors.consume_twelve_credit(root, day, amount=1, **kwargs)
-    writer.publish([writer.budget_relative])
-    after = clock()
-    if after.strftime('%Y-%m-%dT%H:%MZ') != stamp.strftime('%Y-%m-%dT%H:%MZ') or after.second >= 58:
-        raise AdmissionError('budget_slot_expired', debited=True)
+    minute = stamp.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%MZ')
+    if path is not None:
+        validate_budget_file(path, day, **kwargs)
+        state = read_budget_state(path, day)
+        changes = {k: v - before['minutes'].get(k, 0) for k, v in state['minutes'].items()
+                   if v != before['minutes'].get(k, 0)}
+        if state['credits'] != before['credits'] + 1 or len(changes) != 1 or next(iter(changes.values())) != 1:
+            raise AdmissionError('budget_state_invalid')
+        # The helper owns its clock; bind the actual ledger delta, not our earlier timestamp.
+        minute = next(iter(changes))
+    sha = writer.publish([writer.budget_relative])
+    try:
+        blob = git(writer.repo, 'rev-parse', f'{sha}:{writer.budget_relative}') if path is not None else None
+        after = clock().astimezone(timezone.utc)
+        if after.strftime('%Y-%m-%dT%H:%MZ') != minute or after.second >= 58:
+            raise AdmissionError('budget_slot_expired')
+    except AdmissionError as exc:
+        exc.debited = True
+        raise
+    return BudgetDebit(sha, blob, minute)
+
+
+def guard_provider_request(writer, debit: BudgetDebit, compute: Path, compute_sha: str,
+                           day: str, *, clock: Callable[[], datetime], deadline: float) -> None:
+    writer.assert_current(debit.store_commit_sha)
+    budget_path = writer.safe_path(writer.budget_relative)
+    if (git(writer.repo, 'rev-parse', f'{debit.store_commit_sha}:{writer.budget_relative}') != debit.budget_blob_sha or
+        git(writer.repo, 'hash-object', '--', str(budget_path)) != debit.budget_blob_sha):
+        raise AdmissionError('object_drift')
+    if git(compute, 'rev-parse', 'HEAD') != compute_sha or git(compute, 'status', '--porcelain'):
+        raise AdmissionError('object_drift')
+    remote = git(compute, 'ls-remote', 'origin', 'refs/heads/main').split()
+    if remote != [compute_sha, 'refs/heads/main']:
+        raise AdmissionError('object_drift')
+    if time.monotonic() > deadline:
+        raise AdmissionError('deadline_exceeded')
+    # Last gate after all potentially slow Git operations, directly before HTTP.
+    now = clock().astimezone(timezone.utc)
+    if now.astimezone(ET).date().isoformat() != day:
+        raise AdmissionError('invalid_target')
+    if now.strftime('%Y-%m-%dT%H:%MZ') != debit.minute or now.second >= 58:
+        raise AdmissionError('budget_slot_expired')
 
 
 def public_summary(report: dict[str, Any]) -> dict[str, Any]:
@@ -313,7 +436,7 @@ def execute(h, writer, *, compute: Path, compute_sha: str, day: str, request_id:
                 raise AdmissionError('deadline_exceeded')
             if git(compute, 'ls-remote', 'origin', 'refs/heads/main').split()[0] != compute_sha:
                 raise AdmissionError('object_drift')
-            debit_before_request(h, writer, root, day, budget, clock=clock)
+            debit = debit_before_request(h, writer, root, day, budget, clock=clock)
             report['budget_debits'] += 1
         except Exception as exc:
             code = exc.code if isinstance(exc, AdmissionError) else (
@@ -323,10 +446,21 @@ def execute(h, writer, *, compute: Path, compute_sha: str, day: str, request_id:
             report['failures'].append({'symbol': candidate['symbol'], 'code': code})
             report['status'] = 'BLOCKED'
             break
-        report['requests_attempted'] += 1
+        attempted = False
+        def before_request():
+            nonlocal attempted
+            if attempted:
+                raise AdmissionError('contract_invalid')
+            guard_provider_request(writer, debit, compute, compute_sha, day,
+                                   clock=clock, deadline=started + 600)
+            attempted = True
+            report['requests_attempted'] += 1
         try:
             fetched = h.rebaser._fetch_replacement_daily(candidate['symbol'], key, access,
-                outputsize=candidate['outputsize'], trade_date=day, effective=candidate['effective'])
+                outputsize=candidate['outputsize'], trade_date=day, effective=candidate['effective'],
+                before_request=before_request)
+            if not attempted:
+                raise AdmissionError('contract_invalid')
             report['results'].append(compare_replacement(h, candidate, fetched, day, limits))
         except Exception as exc:
             code = exc.code if isinstance(exc, AdmissionError) else 'provider_response_rejected'
@@ -334,6 +468,9 @@ def execute(h, writer, *, compute: Path, compute_sha: str, day: str, request_id:
             if isinstance(exc, AdmissionError):
                 failure['evidence'] = exc.evidence
             report['failures'].append(failure)
+            if not attempted:
+                report['status'] = 'BLOCKED'
+                break
     if report['status'] != 'BLOCKED':
         report['status'] = 'PASS' if not report['failures'] and len(report['results']) == len(candidates) else 'FAIL'
     report['finished_at'] = clock().isoformat()

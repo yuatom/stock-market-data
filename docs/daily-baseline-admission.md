@@ -85,3 +85,28 @@ HEAD. Native manual credentials/provider/budget/runtime execution are a separate
 post-merge acceptance, never implied by CI. PR44 remains merged; its two P2 issues
 (non-ok rebase exit semantics and nontransactional historical replacement)
 remain open for real rebase and are not repaired by this read-only mode.
+
+## Request-boundary and required-output proof
+
+The predebit proof binds the actual minute increment in the helper-written
+ledger, its blob and the durably published Store commit. After URL/config
+preparation, the strict replacement reader invokes the admission-only callback
+before its HTTP call. The callback checks the current clean Store/debit object
+and current clean Compute/source identity; it checks the clock last, after
+potentially slow Git reads. Rejection leaves the debit charged and does not
+increment `requests_attempted`. Store drift or a dirty ledger also forbids a
+final report push. These checks are not an atomic distributed lock against
+unrelated writers or provider-account consumers.
+
+The budget JSON also carries the retained publication contract's manifest
+fields (`schema_version`, `request_id`, `trade_date`, `stage`, `required_outputs`).
+It declares the invocation diagnostic's path and blob without adding a third
+Store path. Initial/final diagnostic and declaration are committed together;
+credit and minute counters are preserved. Per-request budget commits preserve
+that declaration. The existing real verifier receives `--required-manifest`
+for diagnostic publication, and its receipt must contain exactly that output.
+The producer also reads the same verified immutable commit to check the
+manifest and diagnostic request/date/stage identities. Empty closure, an
+incorrect path/blob/identity, malformed receipt or failed verification is not
+terminal success, even when a push or local `rev-parse` succeeded. A remotely
+written diagnostic alone is not a successful producer receipt.
