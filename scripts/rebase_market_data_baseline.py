@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -260,6 +261,68 @@ def _replacement_history_outputsize(
     return outputsize
 
 
+def _validated_replacement_bar(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Apply normal Store validation before the maintenance-only shard writer."""
+    bar = store._normalize_bar(row)
+    for field in ("open", "high", "low", "close", "volume"):
+        value = bar.get(field)
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            raise ExplicitRebaseError(f"replacement {field} must be numeric")
+    store.canonical_bytes(bar)  # Reject non-finite values in every numeric field.
+    return bar
+
+
+def _fetch_replacement_daily(
+    symbol: str,
+    api_key: str,
+    access: Mapping[str, Any],
+    *,
+    outputsize: int,
+    trade_date: str,
+    effective: str | None,
+) -> list[dict[str, Any]]:
+    """Strict maintenance reader; do not use the normal EOD skip-bad-row parser.
+
+    Reuse the same HTTP owner and request configuration, not its lossy parser.
+    Only a valid date can prove a row is outside the maintenance cutoff/identity
+    scope. Any malformed in-scope row rejects this symbol's entire replacement.
+    """
+    spec = access["twelve_data_basic"]
+    params = urllib.parse.urlencode({
+        "symbol": symbol, "interval": spec["interval_daily"],
+        "outputsize": outputsize, "apikey": api_key, "format": "JSON",
+    })
+    payload = collectors._http_json(
+        f"{spec['base_url']}{spec['time_series_path']}?{params}",
+        timeout=int(access["http"]["timeout_seconds"]),
+        user_agent=str(access["http"]["user_agent"]),
+    )
+    if payload.get("status") == "error":
+        raise ExplicitRebaseError("provider daily replacement request failed")
+    values = payload.get("values")
+    if not isinstance(values, list):
+        raise ExplicitRebaseError("provider daily replacement values must be a list")
+    bars: list[dict[str, Any]] = []
+    for row in values:
+        if not isinstance(row, Mapping):
+            raise ExplicitRebaseError("provider daily replacement row must be an object")
+        # Never truncate/coerce a bad date into a valid or out-of-scope date.
+        day = store._date(row.get("datetime"))
+        if day >= trade_date or (effective is not None and day < effective):
+            continue
+        bar: dict[str, Any] = {"trade_date": day}
+        for field in ("open", "high", "low", "close", "volume"):
+            value = row.get(field)
+            if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+                raise ExplicitRebaseError(f"provider replacement {field} is missing or invalid")
+            try:
+                bar[field] = float(value)
+            except (TypeError, ValueError, OverflowError):
+                raise ExplicitRebaseError(f"provider replacement {field} is invalid") from None
+        bars.append(_validated_replacement_bar(bar))
+    return sorted(bars, key=lambda row: row["trade_date"])
+
+
 def rebase(
     *,
     trade_date: str,
@@ -328,10 +391,11 @@ def rebase(
                 per_day=int(budget["hard_credits_per_day"]),
                 per_minute=int(budget["hard_credits_per_minute"]),
             )
-            fetched = collectors.fetch_twelve_daily(
-                symbol, key, access, outputsize=history_outputsize
-            )
             effective = collection.ticker_effective_at(universe_config, symbol)
+            fetched = _fetch_replacement_daily(
+                symbol, key, access, outputsize=history_outputsize,
+                trade_date=trade_date, effective=effective,
+            )
             eligible = [
                 row for row in fetched
                 if row["trade_date"] < trade_date
@@ -351,6 +415,7 @@ def rebase(
                 eligible = [row for row in eligible if row["trade_date"] >= first_required]
             # Validate every selected row before creating an irreversible archive,
             # including new rows that overlap-comparison would not serialize.
+            eligible = [_validated_replacement_bar(row) for row in eligible]
             store.canonical_bytes(eligible)
             revisions = validate_replacement(
                 existing,

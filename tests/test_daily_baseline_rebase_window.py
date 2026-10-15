@@ -11,6 +11,7 @@ from contextlib import ExitStack
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import market_data_store as store
@@ -57,6 +58,12 @@ class DailyBaselineRebaseWindowTests(unittest.TestCase):
             "collector": {"budgets": {"twelve_data_basic": {
                 "hard_credits_per_day": 200, "hard_credits_per_minute": 8}}},
         }
+        self.access = {
+            "twelve_data_basic": {"base_url": "https://provider.invalid",
+                                  "time_series_path": "/time_series", "interval_daily": "1day"},
+            "http": {"timeout_seconds": 10, "user_agent": "offline-test"},
+        }
+        self.raw_mutator = lambda rows: None
         self.index_path = self.root / "series/daily" / PROVIDER / SYMBOL / "_index.json"
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
@@ -65,16 +72,36 @@ class DailyBaselineRebaseWindowTests(unittest.TestCase):
         self.stack.enter_context(patch.object(rebaser.collection, "load_collection_universe", return_value={}))
         self.stack.enter_context(patch.object(rebaser.collection, "daily_universe", return_value=[(SYMBOL, "etf")]))
         self.stack.enter_context(patch.object(rebaser.collection, "ticker_effective_at", side_effect=lambda *a: self.effective))
-        self.stack.enter_context(patch.object(rebaser.collectors, "load_yaml", side_effect=lambda path: self.config if str(path) == "store.yaml" else {}))
+        self.stack.enter_context(patch.object(rebaser.collectors, "load_yaml", side_effect=lambda path: self.config if str(path) == "store.yaml" else self.access))
         self.wait = self.stack.enter_context(patch.object(rebaser.collectors, "wait_for_twelve_budget"))
         self.charge = self.stack.enter_context(patch.object(rebaser.collectors, "consume_twelve_credit"))
-        self.fetch = self.stack.enter_context(patch.object(rebaser.collectors, "fetch_twelve_daily", side_effect=self.fetch_latest))
+        self.fetch = self.stack.enter_context(patch.object(rebaser.collectors, "_http_json", side_effect=self.fetch_latest))
 
-    def fetch_latest(self, symbol, key, access, *, outputsize):
-        self.assertEqual(symbol, SYMBOL)
+    def raw_payload(self, rows):
+        values = []
+        for original in rows:
+            row = copy.deepcopy(original)
+            row["datetime"] = row.pop("trade_date")
+            for field in ("open", "high", "low", "close", "volume"):
+                value = row.get(field)
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    row[field] = str(value)
+            values.append(row)
+        self.raw_mutator(values)
+        return {"status": "ok", "values": values}
+
+    def fetch_latest(self, url, *, timeout, user_agent):
+        query = parse_qs(urlparse(url).query)
+        self.assertEqual(query["symbol"], [SYMBOL])
+        self.assertEqual(query["interval"], ["1day"])
+        self.assertEqual(query["format"], ["JSON"])
+        self.assertEqual(query["apikey"], ["unit-test-only"])
+        self.assertEqual(timeout, 10)
+        self.assertEqual(user_agent, "offline-test")
+        outputsize = int(query["outputsize"][0])
         self.assertGreaterEqual(outputsize, 1)
         self.assertLessEqual(outputsize, 5000)
-        return copy.deepcopy(self.provider_rows[-outputsize:])
+        return self.raw_payload(self.provider_rows[-outputsize:])
 
     def seed(self):
         store.append_daily_bars(self.root, provider=PROVIDER, symbol=SYMBOL,
@@ -160,7 +187,7 @@ class DailyBaselineRebaseWindowTests(unittest.TestCase):
 
     def test_provider_truncation_cannot_drop_retained_history(self):
         self.seed()
-        self.fetch.side_effect = lambda *a, **k: copy.deepcopy(self.provider_rows[-256:])
+        self.fetch.side_effect = lambda *a, **k: self.raw_payload(self.provider_rows[-256:])
         self.assert_rejected_without_write(self.run_rebase())
 
     def test_provider_missing_one_old_date_is_rejected(self):
@@ -220,7 +247,7 @@ class DailyBaselineRebaseWindowTests(unittest.TestCase):
         self.seed()
         self.assert_success_preserves_archive(self.run_rebase())
         index = json.loads(self.index_path.read_text())
-        self.assertEqual(index["lineage_segments"][0]["history_outputsize"], self.fetch.call_args.kwargs["outputsize"])
+        self.assertEqual(index["lineage_segments"][0]["history_outputsize"], int(parse_qs(urlparse(self.fetch.call_args.args[0]).query)["outputsize"][0]))
         self.assertEqual(index["baseline_initialization"]["target_records"], 256)
 
     def test_future_target_is_rejected_before_provider_access(self):
@@ -257,6 +284,134 @@ class DailyBaselineRebaseWindowTests(unittest.TestCase):
         self.assertEqual(result["status"], "secret_missing")
         self.assertEqual(self.all_bytes(), self.old_bytes)
         self.fetch.assert_not_called()
+
+
+    def assert_invalid_provider_row(self):
+        result = self.run_rebase()
+        self.assert_rejected_without_write(result)
+        self.assertEqual(len(result["failures"]), 1)
+        self.assertEqual(result["failures"][0]["symbol"], SYMBOL)
+        self.assertEqual(store.read_daily_series(self.root, provider=PROVIDER, symbol=SYMBOL), self.existing)
+        self.assertFalse((self.root / "recovery").exists())
+        return result
+
+    def test_invalid_new_calendar_date_cannot_rebuild_history(self):
+        self.seed()
+        self.provider_rows[-2]["trade_date"] = "2026-09-31"
+        self.assert_invalid_provider_row()
+
+    def test_invalid_new_date_format_cannot_be_excluded_as_future(self):
+        self.seed()
+        self.provider_rows[-2]["trade_date"] = "not-a-date"
+        self.assert_invalid_provider_row()
+
+    def test_daily_datetime_is_not_silently_truncated(self):
+        self.seed()
+        self.provider_rows[-2]["trade_date"] += "T00:00:00Z"
+        self.assert_invalid_provider_row()
+
+    def test_negative_new_volume_cannot_rebuild_history(self):
+        self.seed()
+        self.provider_rows[-2]["volume"] = -1.0
+        self.assert_invalid_provider_row()
+
+    def test_malformed_new_close_cannot_create_a_gap(self):
+        self.seed()
+        self.provider_rows[-3]["close"] = "not-a-number"
+        self.assert_invalid_provider_row()
+
+    def test_missing_new_numeric_field_cannot_create_a_gap(self):
+        self.seed()
+        original = copy.deepcopy(self.provider_rows)
+        for field in ("open", "high", "low", "close", "volume"):
+            with self.subTest(field=field):
+                self.provider_rows = copy.deepcopy(original)
+                del self.provider_rows[-3][field]
+                self.assert_invalid_provider_row()
+
+    def test_invalid_new_numeric_field_cannot_create_a_gap(self):
+        self.seed()
+        original = copy.deepcopy(self.provider_rows)
+        for field in ("open", "high", "low", "close", "volume"):
+            for value in ("invalid", None, "", True, [], {}, "NaN", "Infinity", "-Infinity"):
+                with self.subTest(field=field, value=repr(value)):
+                    self.provider_rows = copy.deepcopy(original)
+                    self.provider_rows[-3][field] = value
+                    self.assert_invalid_provider_row()
+
+    def test_missing_raw_datetime_cannot_be_silently_skipped(self):
+        self.seed()
+        self.raw_mutator = lambda rows: rows[-3].pop("datetime")
+        self.assert_invalid_provider_row()
+
+    def test_nonobject_raw_row_is_rejected_before_archive(self):
+        self.seed()
+        self.raw_mutator = lambda rows: rows.__setitem__(-3, "bad-row")
+        self.assert_invalid_provider_row()
+
+    def test_invalid_values_container_is_rejected_before_archive(self):
+        self.seed()
+        self.fetch.side_effect = lambda *a, **k: {"status": "ok", "values": {}}
+        self.assert_invalid_provider_row()
+
+    def test_zero_new_volume_is_valid_and_preserved(self):
+        self.seed()
+        self.provider_rows[-2]["volume"] = 0.0
+        rows = self.assert_success_preserves_archive(self.run_rebase())
+        self.assertEqual(rows[-1]["volume"], 0.0)
+
+    def test_malformed_numbers_on_valid_post_cutoff_dates_are_excluded(self):
+        self.seed()
+        for row in self.provider_rows:
+            if row["trade_date"] >= "2026-09-01":
+                row["volume"] = "not-a-volume"
+                row.pop("close")
+        rows = self.assert_success_preserves_archive(self.run_rebase("2026-09-01"))
+        self.assertTrue(all(row["trade_date"] < "2026-09-01" for row in rows))
+
+    def test_malformed_numbers_before_effective_date_are_excluded(self):
+        self.effective = "2026-10-01"
+        self.existing = [copy.deepcopy(row) for row in self.provider_rows
+                         if self.effective <= row["trade_date"] < "2026-10-15"]
+        self.seed()
+        for row in self.provider_rows:
+            if row["trade_date"] < self.effective:
+                row["volume"] = -1.0
+                row.pop("open")
+        rows = self.assert_success_preserves_archive(self.run_rebase())
+        self.assertEqual(rows, self.existing)
+
+    def test_normal_eod_parser_behavior_is_not_changed(self):
+        self.seed()
+        missing_day = self.provider_rows[-3]["trade_date"]
+        del self.provider_rows[-3]["close"]
+        parsed = rebaser.collectors.fetch_twelve_daily(
+            SYMBOL, "unit-test-only", self.access, outputsize=500)
+        self.assertNotIn(missing_day, {row["trade_date"] for row in parsed})
+        self.assertEqual(self.all_bytes(), self.old_bytes)
+
+    def test_every_selected_bar_uses_canonical_store_validation(self):
+        self.seed()
+        with patch.object(store, "_normalize_bar", wraps=store._normalize_bar) as normalize:
+            rows = self.assert_success_preserves_archive(self.run_rebase())
+        validated_dates = {call.args[0]["trade_date"] for call in normalize.call_args_list}
+        self.assertTrue({row["trade_date"] for row in rows} <= validated_dates)
+
+    def test_provider_error_does_not_create_recovery_archive(self):
+        self.seed()
+        self.fetch.side_effect = lambda *a, **k: {"status": "error", "message": "provider failure"}
+        self.assert_invalid_provider_row()
+
+    def test_corrected_payload_can_retry_after_rejected_replacement(self):
+        self.seed()
+        old_volume = self.provider_rows[-3]["volume"]
+        self.provider_rows[-3]["volume"] = -1.0
+        self.assert_invalid_provider_row()
+        self.provider_rows[-3]["volume"] = old_volume
+        self.fetch.reset_mock()
+        self.charge.reset_mock()
+        rows = self.assert_success_preserves_archive(self.run_rebase())
+        self.assertEqual(rows[-1]["trade_date"], "2026-10-14")
 
 
 if __name__ == "__main__":
