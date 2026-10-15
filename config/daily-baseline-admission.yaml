@@ -1,0 +1,32 @@
+schema_version: 1
+mode: daily_baseline_admission
+ownership_authority: config/data-plane.yaml
+baseline_authority: config/market-data-store.yaml
+universe_authority: config/collection-universe.json
+provider_authority: config/market-data-collector-access.yaml
+entrypoint: .github/workflows/market-data-collector.yml
+job: admission
+manual_only: true
+current_et_date_only: true
+mature_input_required: true
+expected_compute_and_store_sha_required: true
+concurrency_group: market-data-collector
+market_facts_read_only: true
+durable_predebit_required: true
+budget_source: collector.budgets.twelve_data_basic
+budget_debit_before_provider_request: true
+budget_refund_on_failed_or_unused_request: false
+budget_minute_expiry_behavior: stop_without_request_keep_debit
+single_provider_request_per_symbol: true
+provider_retry: false
+allowed_writes:
+  - data/market-data/collector-state/{YYYY-MM}/{trade_date}-twelve-data-budget.json
+  - data/market-data/collector-state/{YYYY-MM}/{trade_date}-daily-baseline-admission-{run_id}-{run_attempt}.json
+forbidden_write_surfaces: [series, sessions, snapshots, recovery, inventory]
+required_output: invocation_specific_private_diagnostic
+public_output: fixed_status_counts_reason_codes_and_exact_refs_only
+private_output: bounded_revision_differences_and_record_hashes
+terminal_statuses: [PASS, FAIL, BLOCKED]
+interrupted_status: IN_PROGRESS
+non_pass_exit_code: 2
+admission_is_recovery_or_future_write_authorization: false
