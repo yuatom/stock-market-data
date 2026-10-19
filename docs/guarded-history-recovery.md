@@ -7,18 +7,20 @@ and `config/store-publication-durability.yaml`. The existing maintenance mode is
 
 ## Candidate status and intended native route
 
-**NOT OPERATIONAL:** the recovery script and tests are staged as a Draft source
-candidate. Workflow integration has NOT been applied: its connector write was
-blocked by the platform safety check. Do not use the current legacy rebase route
-as a substitute. The required workflow-exclusion test must remain failing until
-the integration is legitimately resolved and the full candidate is revalidated.
+**PR CANDIDATE WIRED; NOT ACTIVE ON MAIN:** PR #46 contains the recovery script,
+tests and workflow integration, but remains Draft and unmerged. The route is not
+available from `main` until this candidate passes validation and review and is
+merged. Do not use the current legacy rebase route as a substitute. The workflow
+tests require the ordinary publisher to exclude this mode and the guarded job to
+call the recovery wrapper.
 
-The intended integration, after validation, independent review and merge, is the
-existing `.github/workflows/market-data-collector.yml`, `main`,
-`daily_baseline_rebase`: a guarded recovery job excluding the generic writer.
-Supply current ET `trade_date`, full current `expected_compute_sha` and full
-current `expected_store_sha` from their respective repositories. The current-day
-07:00 ET maturity gate applies. Queued drift stops, never silently repins.
+After the candidate is accepted and merged, use the existing
+`.github/workflows/market-data-collector.yml` on `main` with the existing
+`daily_baseline_rebase` mode: the guarded recovery job excludes the generic
+writer. Supply current ET `trade_date`, full current `expected_compute_sha` and
+full current `expected_store_sha` from their respective repositories. The
+current-day 07:00 ET maturity gate applies. Queued drift stops, never silently
+repins.
 
 This is an explicit historical-write operation, not the read-only admission.
 Ordinary continuation, admission PASS, source merge and successful CI do not
