@@ -28,11 +28,11 @@ on:
         required: false
         type: string
       expected_compute_sha:
-        description: Required exact current main SHA for daily_baseline_admission only
+        description: Required exact current main SHA for daily_baseline_admission and daily_baseline_rebase only
         required: false
         type: string
       expected_store_sha:
-        description: Required exact starting private Store SHA for daily_baseline_admission only
+        description: Required exact starting private Store SHA for daily_baseline_admission and daily_baseline_rebase only
         required: false
         type: string
   schedule:
@@ -53,7 +53,7 @@ permissions:
 
 jobs:
   run:
-    if: inputs.mode != 'daily_baseline_admission'
+    if: inputs.mode != 'daily_baseline_admission' && inputs.mode != 'daily_baseline_rebase'
     uses: ./.github/workflows/market-data-collector-runtime.yml
     with:
       trigger_kind: ${{ github.event_name }}
@@ -122,6 +122,79 @@ jobs:
         run: |
           set -euo pipefail
           python scripts/admit_market_data_baseline.py \
+            --trade-date "$TRADE_DATE" \
+            --compute-sha "$EXPECTED_COMPUTE_SHA" \
+            --store-sha "$EXPECTED_STORE_SHA" \
+            --store-repo ../store \
+            --request-id "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+
+  recovery:
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'daily_baseline_rebase'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    concurrency:
+      group: market-data-collector
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - name: Validate manual recovery identities before checkout
+        env:
+          TRADE_DATE: ${{ inputs.trade_date }}
+          EXPECTED_COMPUTE_SHA: ${{ inputs.expected_compute_sha }}
+          EXPECTED_STORE_SHA: ${{ inputs.expected_store_sha }}
+        shell: python
+        run: |
+          import datetime
+          import os
+          import re
+          if os.environ['GITHUB_REF'] != 'refs/heads/main':
+              raise SystemExit('recovery requires main')
+          for key in ('EXPECTED_COMPUTE_SHA', 'EXPECTED_STORE_SHA'):
+              if not re.fullmatch(r'[0-9a-f]{40}', os.environ.get(key, '')):
+                  raise SystemExit('recovery requires exact expected commits')
+          if os.environ['EXPECTED_COMPUTE_SHA'] != os.environ['GITHUB_SHA']:
+              raise SystemExit('recovery compute event identity mismatch')
+          try:
+              if datetime.date.fromisoformat(os.environ.get('TRADE_DATE', '')).isoformat() != os.environ['TRADE_DATE']:
+                  raise ValueError
+          except ValueError:
+              raise SystemExit('recovery requires an exact YYYY-MM-DD trade date')
+
+      - name: Checkout exact public recovery contract
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.expected_compute_sha }}
+          fetch-depth: 1
+          path: compute
+
+      - name: Checkout exact private Store
+        uses: actions/checkout@v4
+        with:
+          repository: yuatom/stock-market-data-store
+          token: ${{ secrets.MARKET_DATA_STORE_TOKEN }}
+          ref: ${{ inputs.expected_store_sha }}
+          fetch-depth: 0
+          path: store
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install bounded recovery dependency
+        run: python -m pip install --disable-pip-version-check PyYAML
+
+      - name: Recover complete daily baseline with guarded publisher
+        working-directory: compute
+        env:
+          TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
+          EXPECTED_COMPUTE_SHA: ${{ inputs.expected_compute_sha }}
+          EXPECTED_STORE_SHA: ${{ inputs.expected_store_sha }}
+          TRADE_DATE: ${{ inputs.trade_date }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/recover_market_data_baseline.py \
             --trade-date "$TRADE_DATE" \
             --compute-sha "$EXPECTED_COMPUTE_SHA" \
             --store-sha "$EXPECTED_STORE_SHA" \
