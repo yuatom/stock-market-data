@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -75,6 +76,52 @@ def build_manifest(
         raise PublicationManifestError("store_root must equal repository data/market-data root")
 
     result = _last_json(result_file)
+    if stage == "previous_session_eod" and not result.get("result_state_path"):
+        raise PublicationManifestError("ordinary EOD result is missing required private diagnostic output")
+    if stage == "previous_session_eod":
+        relative = result["result_state_path"]
+        path_pattern = (
+            rf"collector-state/{re.escape(trade_date[:7])}/"
+            rf"{re.escape(trade_date)}-previous_session_eod-[0-9a-f]{{16}}-conflicts\.json"
+        )
+        if not isinstance(relative, str) or not re.fullmatch(path_pattern, relative):
+            raise PublicationManifestError("ordinary EOD diagnostic path is invalid")
+        diagnostic_path = store_root / relative
+        try:
+            diagnostic = json.loads(diagnostic_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise PublicationManifestError("ordinary EOD diagnostic is missing or invalid JSON") from exc
+        if not isinstance(diagnostic, dict):
+            raise PublicationManifestError("ordinary EOD diagnostic is missing required evidence")
+        invocation = diagnostic.get("invocation") if isinstance(diagnostic, dict) else None
+        conflicts = diagnostic.get("conflicts") if isinstance(diagnostic, dict) else None
+        counts_valid = (
+            isinstance(diagnostic, dict)
+            and isinstance(diagnostic.get("failure_target_count"), int)
+            and isinstance(diagnostic.get("conflict_record_count"), int)
+            and isinstance(diagnostic.get("conflict_diagnostic_record_count"), int)
+            and isinstance(conflicts, list)
+            and diagnostic["conflict_diagnostic_record_count"] == len(conflicts)
+            and diagnostic["conflict_record_count"] >= len(conflicts)
+            and diagnostic.get("conflict_diagnostics_truncated")
+                == (diagnostic["conflict_record_count"] > len(conflicts))
+        )
+        identity_valid = (
+            isinstance(invocation, dict)
+            and invocation.get("mode") == "previous_session_eod"
+            and isinstance(invocation.get("invocation_id"), str)
+            and bool(invocation["invocation_id"])
+            and all(re.fullmatch(r"[0-9a-f]{40}", str(diagnostic.get(key) or ""))
+                    for key in ("compute_sha", "store_input_sha"))
+        )
+        if (diagnostic.get("schema_version") != 1
+                or diagnostic.get("diagnostic_authority") != "non_authoritative_conflict_evidence"
+                or diagnostic.get("trade_date") != trade_date
+                or not counts_valid or not identity_valid):
+            raise PublicationManifestError("ordinary EOD diagnostic is missing required evidence")
+        expected_token = hashlib.sha256(invocation["invocation_id"].encode("utf-8")).hexdigest()[:16]
+        if not relative.endswith(f"{expected_token}-conflicts.json"):
+            raise PublicationManifestError("ordinary EOD diagnostic path does not match invocation identity")
     declared: set[str] = set()
     for path in _declared_paths(result):
         if path.startswith("data/market-data/"):

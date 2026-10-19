@@ -109,6 +109,9 @@ jobs:
           compute_sha = subprocess.check_output(
               ['git', '-C', 'compute', 'rev-parse', 'HEAD'], text=True
           ).strip()
+          store_sha = subprocess.check_output(
+              ['git', '-C', 'store', 'rev-parse', 'HEAD'], text=True
+          ).strip()
           mode = ''
           trade_date = ''
           request_id = ''
@@ -312,6 +315,7 @@ jobs:
               fh.write(f'probe_path={probe_path}\n')
               fh.write(f'probe_blob_sha={probe_blob_sha}\n')
               fh.write(f'market_data_contract_sha={compute_sha}\n')
+              fh.write(f'market_data_store_input_sha={store_sha}\n')
               fh.write(f"maintenance_authorized={'true' if maintenance_authorized else 'false'}\n")
           print(json.dumps({
               'logical_trigger': event,
@@ -323,6 +327,7 @@ jobs:
               'probe_path': probe_path or None,
               'probe_blob_sha': probe_blob_sha or None,
               'market_data_contract_sha': compute_sha,
+              'market_data_store_input_sha': store_sha,
               'maintenance_authorized': maintenance_authorized,
               'schedule_delivery_observation': schedule_delivery_observation,
           }, sort_keys=True))
@@ -406,6 +411,9 @@ jobs:
           TRADE_DATE: ${{ steps.invocation.outputs.trade_date }}
           PROBE_PATH: ${{ steps.invocation.outputs.probe_path }}
           MAINTENANCE_AUTHORIZED: ${{ steps.invocation.outputs.maintenance_authorized }}
+          MARKET_DATA_COMPUTE_SHA: ${{ steps.invocation.outputs.market_data_contract_sha }}
+          MARKET_DATA_STORE_INPUT_SHA: ${{ steps.invocation.outputs.market_data_store_input_sha }}
+          MARKET_DATA_REQUEST_ID: ${{ steps.invocation.outputs.request_id }}
         run: |
           set -euo pipefail
           collector_failed() {
@@ -492,6 +500,12 @@ jobs:
           safe = {k: result[k] for k in sorted(result) if k in allowed}
           if isinstance(result.get('failures'), list):
               safe['failure_count'] = len(result['failures'])
+              if result.get('mode') == 'previous_session_eod':
+                  for key in ('failure_target_count','conflict_record_count',
+                              'conflict_diagnostic_record_count','conflict_diagnostics_truncated',
+                              'result_state_path'):
+                      if key in result:
+                          safe[key] = result[key]
               safe['failure_classes'] = sorted({
                   str(x.get('reason') or 'unknown') for x in result['failures'] if isinstance(x, dict)
               })[:12]

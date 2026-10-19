@@ -7,6 +7,7 @@ report research, decision, projection, or canonical report finalization.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import time
@@ -23,8 +24,10 @@ import yaml
 try:
     from market_data_store import (
         MarketDataConflict,
+        canonical_bytes,
         append_daily_bars,
         git_blob_sha_bytes,
+        json_sha256,
         read_daily_series,
         write_capture,
         write_snapshot,
@@ -32,8 +35,10 @@ try:
 except ImportError:  # pragma: no cover
     from scripts.market_data_store import (
         MarketDataConflict,
+        canonical_bytes,
         append_daily_bars,
         git_blob_sha_bytes,
+        json_sha256,
         read_daily_series,
         write_capture,
         write_snapshot,
@@ -42,6 +47,8 @@ except ImportError:  # pragma: no cover
 ET = ZoneInfo("America/New_York")
 TWELVE_PROVIDER = "twelve_data_basic"
 NASDAQ_PROVIDER = "nasdaq_public_intraday"
+MAX_CONFLICT_DIAGNOSTIC_RECORDS = 32
+_DAILY_BAR_FIELDS = ("open", "high", "low", "close", "volume", "source_timestamp")
 
 
 class BudgetExceeded(RuntimeError):
@@ -221,6 +228,113 @@ def _series_index_path(store_root: Path, provider: str, symbol: str) -> Path:
     return store_root / "series" / "daily" / provider / symbol.upper() / "_index.json"
 
 
+def _store_source_reference(store_root: Path, symbol: str, trade_date: str) -> dict[str, Any]:
+    index_path = _series_index_path(store_root, TWELVE_PROVIDER, symbol)
+    index_bytes = index_path.read_bytes()
+    index = json.loads(index_bytes)
+    row_number = None
+    shard_ref = None
+    for shard in index.get("shards", []):
+        shard_path = index_path.parent / str(shard["path"])
+        shard_doc = json.loads(shard_path.read_text(encoding="utf-8"))
+        for offset, row in enumerate(shard_doc.get("records", [])):
+            if row.get("trade_date") == trade_date:
+                row_number = int(shard["start"]) + offset
+                shard_ref = {
+                    "path": shard_path.relative_to(store_root).as_posix(),
+                    "blob_sha": git_blob_sha_bytes(shard_path.read_bytes()),
+                }
+                break
+        if shard_ref:
+            break
+    return {
+        "provider": TWELVE_PROVIDER,
+        "index_path": index_path.relative_to(store_root).as_posix(),
+        "index_blob_sha": git_blob_sha_bytes(index_bytes),
+        "row_number": row_number,
+        "shard": shard_ref,
+    }
+
+
+def _conflict_record(
+    *, store_root: Path, symbol: str, old: Mapping[str, Any], new: Mapping[str, Any],
+    outputsize: int, effective_date: str | None, trade_date: str,
+    access: Mapping[str, Any],
+) -> dict[str, Any]:
+    differences = []
+    for field in _DAILY_BAR_FIELDS:
+        old_value = old.get(field)
+        new_value = new.get(field)
+        if type(old_value) is not type(new_value) or old_value != new_value:
+            differences.append({
+                "field": field,
+                "old_type": type(old_value).__name__,
+                "old_value": old_value,
+                "old_sha256": json_sha256({"type": type(old_value).__name__, "value": old_value}),
+                "new_type": type(new_value).__name__,
+                "new_value": new_value,
+                "new_sha256": json_sha256({"type": type(new_value).__name__, "value": new_value}),
+            })
+    return {
+        "symbol": symbol,
+        "trade_date": str(new["trade_date"]),
+        "fields": differences,
+        "old_row_sha256": json_sha256(dict(old)),
+        "new_row_sha256": json_sha256(dict(new)),
+        "store_source": _store_source_reference(store_root, symbol, str(new["trade_date"])),
+        "request_parameters": {
+            "provider": TWELVE_PROVIDER,
+            "endpoint_host": urllib.parse.urlparse(str(access["twelve_data_basic"]["base_url"])).hostname,
+            "endpoint_path": str(access["twelve_data_basic"]["time_series_path"]),
+            "symbol": symbol,
+            "interval": str(access["twelve_data_basic"]["interval_daily"]),
+            "outputsize": outputsize,
+            "format": "JSON",
+            "trade_date_exclusive_upper_bound": trade_date,
+            "identity_effective_from": effective_date,
+        },
+    }
+
+
+def _write_private_eod_diagnostic(
+    *, store_root: Path, trade_date: str, result: dict[str, Any], diagnostics: list[dict[str, Any]],
+    conflict_count: int,
+) -> None:
+    request_id = os.environ.get("MARKET_DATA_REQUEST_ID", "")
+    invocation_id = "-".join(filter(None, (
+        os.environ.get("GITHUB_RUN_ID"), os.environ.get("GITHUB_RUN_ATTEMPT")
+    ))) or request_id or "local"
+    token = hashlib.sha256(invocation_id.encode("utf-8")).hexdigest()[:16]
+    relative = Path("collector-state") / trade_date[:7] / f"{trade_date}-previous_session_eod-{token}-conflicts.json"
+    payload = {
+        "schema_version": 1,
+        "diagnostic_authority": "non_authoritative_conflict_evidence",
+        "trade_date": trade_date,
+        "invocation": {
+            "request_id": request_id or None,
+            "invocation_id": invocation_id,
+            "repository": os.environ.get("GITHUB_REPOSITORY"),
+            "workflow": os.environ.get("GITHUB_WORKFLOW"),
+            "run_id": os.environ.get("GITHUB_RUN_ID"),
+            "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
+            "event": os.environ.get("GITHUB_EVENT_NAME"),
+            "mode": "previous_session_eod",
+        },
+        "compute_sha": os.environ.get("MARKET_DATA_COMPUTE_SHA"),
+        "store_input_sha": os.environ.get("MARKET_DATA_STORE_INPUT_SHA"),
+        "symbols_requested": result.get("symbols_requested", 0),
+        "failure_target_count": len(result.get("failures", [])),
+        "conflict_record_count": conflict_count,
+        "conflict_diagnostic_record_count": len(diagnostics),
+        "conflict_diagnostics_truncated": conflict_count > len(diagnostics),
+        "conflicts": diagnostics,
+    }
+    destination = store_root / relative
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+    result["result_state_path"] = relative.as_posix()
+
+
 def collect_previous_session_eod(
     *,
     trade_date: str,
@@ -247,6 +361,8 @@ def collect_previous_session_eod(
     changed_series = 0
     bootstrapped_series = 0
     failures: list[dict[str, Any]] = []
+    conflict_diagnostics: list[dict[str, Any]] = []
+    conflict_record_count = 0
     universe = _daily_universe(watchlist, completeness)
 
     for symbol, asset_class in universe:
@@ -285,12 +401,25 @@ def collect_previous_session_eod(
                 existing = read_daily_series(store_root, provider=TWELVE_PROVIDER, symbol=symbol)
                 existing_by_date = {row["trade_date"]: row for row in existing}
                 phase = "historical_overlap_comparison"
+                has_conflict = False
                 for row in eligible:
                     old = existing_by_date.get(row["trade_date"])
-                    if old is not None and old != row:
-                        raise MarketDataConflict(
-                            f"provider historical revision detected for {symbol} {row['trade_date']}"
-                        )
+                    if old is not None and canonical_bytes(old) != canonical_bytes(row):
+                        has_conflict = True
+                        conflict_record_count += 1
+                        if len(conflict_diagnostics) < MAX_CONFLICT_DIAGNOSTIC_RECORDS:
+                            conflict_diagnostics.append(_conflict_record(
+                                store_root=store_root,
+                                symbol=symbol,
+                                old=old,
+                                new=row,
+                                outputsize=outputsize,
+                                effective_date=effective,
+                                trade_date=trade_date,
+                                access=access,
+                            ))
+                if has_conflict:
+                    raise MarketDataConflict("provider historical revision detected")
             elif len(eligible) < bootstrap_minimum:
                 failures.append(
                     {
@@ -340,14 +469,27 @@ def collect_previous_session_eod(
                 }.get(phase, "unclassified_market_data_conflict")
             failures.append(failure)
 
-    return {
+    result = {
         "mode": "previous_session_eod",
         "status": "ok" if not failures else "partial",
         "symbols_requested": len(universe),
         "changed_series": changed_series,
         "bootstrapped_series": bootstrapped_series,
+        "failure_target_count": len(failures),
+        "conflict_record_count": conflict_record_count,
+        "conflict_diagnostic_record_count": len(conflict_diagnostics),
+        "conflict_diagnostics_truncated": conflict_record_count > len(conflict_diagnostics),
+        "conflict_diagnostics": conflict_diagnostics,
         "failures": failures,
     }
+    _write_private_eod_diagnostic(
+        store_root=store_root,
+        trade_date=trade_date,
+        result=result,
+        diagnostics=conflict_diagnostics,
+        conflict_count=conflict_record_count,
+    )
+    return result
 
 
 def fetch_nasdaq_regular(
