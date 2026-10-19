@@ -81,6 +81,74 @@ class StorePublicationManifestTest(unittest.TestCase):
                 stage="open_30m",
             )
 
+    def test_ordinary_eod_requires_persisted_private_diagnostic(self):
+        tmp, root, store = self._repo()
+        self.addCleanup(tmp.cleanup)
+        result_file = root / "result.txt"
+        result_file.write_text(json.dumps({"mode": "previous_session_eod", "status": "ok"}) + "\n")
+        with self.assertRaisesRegex(MODULE.PublicationManifestError, "missing required private diagnostic"):
+            MODULE.build_manifest(
+                store_root=store,
+                result_file=result_file,
+                request_id="req-1",
+                trade_date="2026-09-22",
+                stage="previous_session_eod",
+            )
+
+    def test_ordinary_eod_private_diagnostic_is_required_output(self):
+        tmp, root, store = self._repo()
+        self.addCleanup(tmp.cleanup)
+        invocation_id = "123-1"
+        token = MODULE.hashlib.sha256(invocation_id.encode()).hexdigest()[:16]
+        diagnostic_rel = f"collector-state/2026-09/2026-09-22-previous_session_eod-{token}-conflicts.json"
+        diagnostic = store / diagnostic_rel
+        diagnostic.parent.mkdir(parents=True, exist_ok=True)
+        diagnostic.write_text(json.dumps({
+            "schema_version": 1,
+            "diagnostic_authority": "non_authoritative_conflict_evidence",
+            "trade_date": "2026-09-22",
+            "invocation": {"mode": "previous_session_eod", "invocation_id": invocation_id},
+            "compute_sha": "a" * 40,
+            "store_input_sha": "b" * 40,
+            "failure_target_count": 0,
+            "conflict_record_count": 0,
+            "conflict_diagnostic_record_count": 0,
+            "conflict_diagnostics_truncated": False,
+            "conflicts": [],
+        }) + "\n")
+        result_file = root / "result.txt"
+        result_file.write_text(json.dumps({"mode": "previous_session_eod", "result_state_path": diagnostic_rel}) + "\n")
+        manifest = MODULE.build_manifest(
+            store_root=store,
+            result_file=result_file,
+            request_id="req-1",
+            trade_date="2026-09-22",
+            stage="previous_session_eod",
+        )
+        value = json.loads(manifest.read_text())
+        outputs = {row["path"]: row["blob_sha"] for row in value["required_outputs"]}
+        self.assertEqual(outputs[diagnostic_rel], MODULE._git_blob_sha(diagnostic.read_bytes()))
+
+    def test_ordinary_eod_malformed_diagnostic_blocks_manifest(self):
+        tmp, root, store = self._repo()
+        self.addCleanup(tmp.cleanup)
+        invocation_id = "123-1"
+        token = MODULE.hashlib.sha256(invocation_id.encode()).hexdigest()[:16]
+        diagnostic_rel = f"collector-state/2026-09/2026-09-22-previous_session_eod-{token}-conflicts.json"
+        diagnostic = store / diagnostic_rel
+        diagnostic.parent.mkdir(parents=True, exist_ok=True)
+        diagnostic.write_text('{"schema_version":1}\n')
+        result_file = root / "result.txt"
+        result_file.write_text(json.dumps({"result_state_path": diagnostic_rel}) + "\n")
+        with self.assertRaisesRegex(MODULE.PublicationManifestError, "missing required evidence"):
+            MODULE.build_manifest(
+                store_root=store,
+                result_file=result_file,
+                request_id="req-1",
+                trade_date="2026-09-22",
+                stage="previous_session_eod",
+            )
+
     def test_changed_readiness_state_commits_manifest_and_closes_exact_publication(self):
         tmp, root, store = self._repo()
         self.addCleanup(tmp.cleanup)
