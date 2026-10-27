@@ -125,6 +125,9 @@ def test_close_proof_selects_tail_and_verifier_rejects_inherited_morning(tmp_pat
     assert aaa['target']['event_time']=='2026-09-05T15:59:00-04:00'
     assert aaa['benchmark_metrics']['SPY']['status']=='available'
     assert aaa['metrics']['returns_pct']['1session']==round((170/159-1)*100,6)
+    omitted=copy.deepcopy(proof); omitted['subjects'].pop()
+    with pytest.raises(proofmod.MetricProofError):
+        proofmod.verify_proof_source_blobs(root,omitted)
     altered=copy.deepcopy(proof);next(s for s in altered['subjects'] if s['symbol']=='AAA')['target']['event_time']='2026-09-05T10:29:00-04:00'
     with pytest.raises(proofmod.MetricProofError,match='not the snapshot-selected'):
         proofmod.verify_proof_source_blobs(root,altered)
@@ -148,3 +151,47 @@ def test_close_build_records_missing_if_only_inherited_morning(tmp_path):
     proof['missing']=[]
     with pytest.raises(proofmod.MetricProofError,match='missing target'):
         proofmod.verify_proof_source_blobs(root,proof)
+
+
+def _partition_fixture(tmp_path):
+    from test_deterministic_metric_proof import _seed
+    root,_ = _seed(tmp_path)
+    ref=_capture(root,capture_id='partition-tail',provider='twelve_data_basic',timestamp='2026-09-05T15:59:00-04:00',field='close',price=170,contract='twelve_data_basic_regular_1min_v1',date='2026-09-05')
+    store.write_snapshot(root,stage='close',trade_date='2026-09-05',snapshot_id='partition-fixture',generated_at='2026-09-05T16:01:00-04:00',data_refs=[ref],coverage={'available':1},missing=[],target_window={'start':'15:45','end':'16:00'},actual_data_cutoff='2026-09-05T15:59:00-04:00')
+    proof,_=proofmod.build_proof(root,trade_date='2026-09-05',stage='close',data_plane_commit_sha='a'*40)
+    return root,proof
+
+
+@pytest.mark.parametrize('mutation', ['empty','omit','duplicate','false_missing_daily','overlap','extra','invalid_missing'])
+def test_reference_verifier_rejects_incomplete_or_forged_partition(tmp_path,mutation):
+    import copy
+    root,proof=_partition_fixture(tmp_path); altered=copy.deepcopy(proof)
+    if mutation in ('empty','omit'): altered['subjects']=[]
+    if mutation=='duplicate': altered['subjects'].append(copy.deepcopy(altered['subjects'][0]))
+    if mutation=='false_missing_daily':
+        altered['subjects']=[]; altered['missing']=[{'symbol':'AAA','reason':'provider_affine_daily_series_unavailable'}]
+    if mutation=='overlap': altered['missing']=[{'symbol':'AAA','reason':'provider_affine_daily_series_unavailable'}]
+    if mutation=='extra': altered['missing']=[{'symbol':'EXTRA','reason':'qualified_stage_target_unavailable'}]
+    if mutation=='invalid_missing': altered['missing']=[{'symbol':'AAA','reason':'fabricated','extra':'invalid'}]
+    with pytest.raises(proofmod.MetricProofError): proofmod.verify_proof_source_blobs(root,altered)
+
+
+def test_reference_verifier_accepts_proven_missing_daily_series_and_rejects_corruption(tmp_path):
+    import shutil
+    root,proof=_partition_fixture(tmp_path)
+    shutil.rmtree(root/'series/daily/twelve_data_basic/AAA')
+    missing=dict(proof);missing['subjects']=[];missing['missing']=[{'symbol':'AAA','reason':'provider_affine_daily_series_unavailable'}]
+    proofmod.verify_proof_source_blobs(root,missing)
+    bad=root/'series/daily/twelve_data_basic/AAA/_index.json';bad.parent.mkdir(parents=True);bad.write_text('{bad json')
+    with pytest.raises((proofmod.MetricProofError,ValueError)): proofmod.verify_proof_source_blobs(root,missing)
+
+
+def test_missing_target_includes_observed_symbol_without_timestamp(tmp_path):
+    root=tmp_path/'data'/'market-data';ts='2026-09-05T15:59:00-04:00'
+    fact={'symbol':'AAA','session':'regular','close':105,'source_contract':'twelve_data_basic_regular_1min_v1'}
+    path,blob=store.write_capture(root,trade_date='2026-09-05',session='regular',provider='twelve_data_basic',capture_id='no-event',generated_at=ts,actual_data_cutoff=ts,window={'start':'15:45','end':'16:00'},feed_scope='fixture',qualified_facts=[fact])
+    store.write_snapshot(root,stage='close',trade_date='2026-09-05',snapshot_id='no-event',generated_at='2026-09-05T16:01:00-04:00',data_refs=[{'path':path,'blob_sha':blob}],coverage={'available':1},missing=[],target_window={'start':'15:45','end':'16:00'},actual_data_cutoff=ts)
+    proof,_=proofmod.build_proof(root,trade_date='2026-09-05',stage='close',data_plane_commit_sha='a'*40)
+    assert proof['subjects']==[]
+    assert proof['missing']==[{'symbol':'AAA','reason':'qualified_stage_target_unavailable'}]
+    proofmod.verify_proof_source_blobs(root,proof)
