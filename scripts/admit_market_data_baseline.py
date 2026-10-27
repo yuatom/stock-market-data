@@ -344,49 +344,120 @@ class BudgetDebit:
     minute: str
 
 
+# Reserve 20 seconds before the existing strict :58 guard: the synthetic
+# reproduction used about 8 seconds for publication, plus 12 seconds of
+# allowance for rechecks/jitter. Actual RPC latency is not guaranteed.
+PREDEBIT_HEADROOM_SECONDS = 20.0
+
+
 def debit_before_request(h, writer, root: Path, day: str, budget: dict,
-                         *, clock: Callable[[], datetime] = utc_now) -> BudgetDebit:
-    if clock().astimezone(ET).date().isoformat() != day:
-        raise AdmissionError('invalid_target')
+                         *, clock: Callable[[], datetime] = utc_now,
+                         deadline: float | None = None, maturity: str = '00:00',
+                         compute: Path | None = None, compute_sha: str | None = None,
+                         timing: list | None = None, sleep=None, monotonic=None) -> BudgetDebit:
+    sleep = sleep or time.sleep
+    monotonic = monotonic or time.monotonic
+    deadline = deadline if deadline is not None else monotonic() + 600
     kwargs = {'per_day': int(budget['hard_credits_per_day']), 'per_minute': int(budget['hard_credits_per_minute'])}
     path = writer.safe_path(writer.budget_relative) if hasattr(writer, 'safe_path') else None
-    if path is not None:
-        validate_budget_file(path, day, **kwargs)
-    h.collectors.wait_for_twelve_budget(root, day, **kwargs)
-    stamp = clock()
-    if stamp.second >= 55:
-        time.sleep(61 - stamp.second)
-        stamp = clock()
-    if stamp.astimezone(ET).date().isoformat() != day:
-        raise AdmissionError('invalid_target')
-    if path is not None:
-        writer.safe_path(writer.budget_relative)
-        before = read_budget_state(path, day)
-    h.collectors.consume_twelve_credit(root, day, amount=1, **kwargs)
-    minute = stamp.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%MZ')
-    if path is not None:
-        validate_budget_file(path, day, **kwargs)
-        state = read_budget_state(path, day)
-        changes = {k: v - before['minutes'].get(k, 0) for k, v in state['minutes'].items()
-                   if v != before['minutes'].get(k, 0)}
-        if state['credits'] != before['credits'] + 1 or len(changes) != 1 or next(iter(changes.values())) != 1:
-            raise AdmissionError('budget_state_invalid')
-        # The helper owns its clock; bind the actual ledger delta, not our earlier timestamp.
-        minute = next(iter(changes))
-    sha = writer.publish([writer.budget_relative])
-    try:
-        blob = git(writer.repo, 'rev-parse', f'{sha}:{writer.budget_relative}') if path is not None else None
-        after = clock().astimezone(timezone.utc)
-        if after.strftime('%Y-%m-%dT%H:%MZ') != minute or after.second >= 58:
-            raise AdmissionError('budget_slot_expired')
-    except AdmissionError as exc:
-        exc.debited = True
-        raise
-    return BudgetDebit(sha, blob, minute)
+
+    def check_deadline():
+        if monotonic() >= deadline:
+            raise AdmissionError('deadline_exceeded')
+
+    def event(stage: str, stamp: datetime) -> None:
+        if timing is not None:
+            timing.append({'stage': stage, 'at_utc': stamp.astimezone(timezone.utc).isoformat()})
+
+    def wait_next(stamp: datetime) -> None:
+        delay = 61.0 - (stamp.second + stamp.microsecond / 1_000_000)
+        check_deadline()
+        if monotonic() + delay >= deadline:
+            raise AdmissionError('deadline_exceeded')
+        event('window_wait_start', stamp)
+        sleep(delay)
+        check_deadline()
+        event('window_wait_end', clock())
+
+    while True:
+        check_deadline()
+        validate_target(day, maturity, clock())
+        if path is not None:
+            validate_budget_file(path, day, **kwargs)
+        try:
+            h.collectors.wait_for_twelve_budget(root, day, **kwargs, deadline=deadline)
+        except TimeoutError:
+            raise AdmissionError('deadline_exceeded') from None
+        except Exception as exc:
+            if isinstance(exc, getattr(h.collectors, 'BudgetExceeded', ())):
+                raise AdmissionError('budget_exhausted') from None
+            raise
+        check_deadline()
+        stamp = clock().astimezone(timezone.utc)
+        validate_target(day, maturity, stamp)
+        event('window_check', stamp)
+        if stamp.second + stamp.microsecond / 1_000_000 >= 58.0 - PREDEBIT_HEADROOM_SECONDS:
+            wait_next(stamp)
+            continue
+        # Waiting and remote reads are not locks: revalidate immediately before debit.
+        if compute is not None:
+            writer.assert_current()
+            if (compute_sha is None or git(compute, 'rev-parse', 'HEAD') != compute_sha or
+                git(compute, 'status', '--porcelain') or
+                git(compute, 'ls-remote', 'origin', 'refs/heads/main').split() != [compute_sha, 'refs/heads/main']):
+                raise AdmissionError('object_drift')
+        check_deadline()
+        stamp = clock().astimezone(timezone.utc)
+        validate_target(day, maturity, stamp)
+        if path is not None:
+            writer.safe_path(writer.budget_relative)
+            validate_budget_file(path, day, **kwargs)
+            before = read_budget_state(path, day)
+            minute = stamp.strftime('%Y-%m-%dT%H:%MZ')
+            if before['credits'] >= kwargs['per_day']:
+                raise AdmissionError('budget_exhausted')
+            if before['minutes'].get(minute, 0) >= kwargs['per_minute']:
+                wait_next(stamp)
+                continue
+        # Local budget validation can itself cross the reserved boundary.
+        check_deadline()
+        final_stamp = clock().astimezone(timezone.utc)
+        validate_target(day, maturity, final_stamp)
+        if final_stamp.strftime('%Y-%m-%dT%H:%MZ') != stamp.strftime('%Y-%m-%dT%H:%MZ'):
+            continue
+        stamp = final_stamp
+        if stamp.second + stamp.microsecond / 1_000_000 >= 58.0 - PREDEBIT_HEADROOM_SECONDS:
+            wait_next(stamp)
+            continue
+        check_deadline()
+        event('debit_start', stamp)
+        h.collectors.consume_twelve_credit(root, day, amount=1, **kwargs)
+        minute = stamp.strftime('%Y-%m-%dT%H:%MZ')
+        if path is not None:
+            validate_budget_file(path, day, **kwargs)
+            state = read_budget_state(path, day)
+            changes = {k: v - before['minutes'].get(k, 0) for k, v in state['minutes'].items()
+                       if v != before['minutes'].get(k, 0)}
+            if state['credits'] != before['credits'] + 1 or len(changes) != 1 or next(iter(changes.values())) != 1:
+                raise AdmissionError('budget_state_invalid')
+            minute = next(iter(changes))
+        sha = writer.publish([writer.budget_relative])
+        try:
+            blob = git(writer.repo, 'rev-parse', f'{sha}:{writer.budget_relative}') if path is not None else None
+            after = clock().astimezone(timezone.utc)
+            event('publication_verified', after)
+            if after.strftime('%Y-%m-%dT%H:%MZ') != minute or after.second >= 58:
+                raise AdmissionError('budget_slot_expired')
+            check_deadline()
+        except AdmissionError as exc:
+            exc.debited = True
+            raise
+        return BudgetDebit(sha, blob, minute)
 
 
 def guard_provider_request(writer, debit: BudgetDebit, compute: Path, compute_sha: str,
-                           day: str, *, clock: Callable[[], datetime], deadline: float) -> None:
+                           day: str, *, clock: Callable[[], datetime], deadline: float,
+                           timing: list | None = None) -> None:
     writer.assert_current(debit.store_commit_sha)
     budget_path = writer.safe_path(writer.budget_relative)
     if (git(writer.repo, 'rev-parse', f'{debit.store_commit_sha}:{writer.budget_relative}') != debit.budget_blob_sha or
@@ -403,6 +474,8 @@ def guard_provider_request(writer, debit: BudgetDebit, compute: Path, compute_sh
     now = clock().astimezone(timezone.utc)
     if now.astimezone(ET).date().isoformat() != day:
         raise AdmissionError('invalid_target')
+    if timing is not None:
+        timing.append({'stage': 'pre_http_guard', 'at_utc': now.isoformat()})
     if now.strftime('%Y-%m-%dT%H:%MZ') != debit.minute or now.second >= 58:
         raise AdmissionError('budget_slot_expired')
 
@@ -444,7 +517,7 @@ def execute(h, writer, *, compute: Path, compute_sha: str, day: str, request_id:
               'status': 'IN_PROGRESS', 'compute_sha': compute_sha, 'store_start_sha': writer.base,
               'trade_date': day, 'request_id': request_id, 'started_at': clock().isoformat(),
               'target_count': len(candidates), 'requests_attempted': 0, 'budget_debits': 0,
-              'results': [], 'failures': [], 'production_recovery_accepted': False}
+              'results': [], 'failures': [], 'timing_diagnostics': [], 'production_recovery_accepted': False}
     if dynamic_selector is not None:
         report['dynamic_selection'] = dynamic_selector
         report['source_result_commit_sha'] = targets[0]['source_result_commit_sha']
@@ -457,7 +530,9 @@ def execute(h, writer, *, compute: Path, compute_sha: str, day: str, request_id:
                 raise AdmissionError('deadline_exceeded')
             if git(compute, 'ls-remote', 'origin', 'refs/heads/main').split()[0] != compute_sha:
                 raise AdmissionError('object_drift')
-            debit = debit_before_request(h, writer, root, day, budget, clock=clock)
+            debit = debit_before_request(h, writer, root, day, budget, clock=clock,
+                deadline=started + 600, maturity=maturity, compute=compute, compute_sha=compute_sha,
+                timing=report['timing_diagnostics'])
             report['budget_debits'] += 1
         except Exception as exc:
             code = exc.code if isinstance(exc, AdmissionError) else (
@@ -473,7 +548,7 @@ def execute(h, writer, *, compute: Path, compute_sha: str, day: str, request_id:
             if attempted:
                 raise AdmissionError('contract_invalid')
             guard_provider_request(writer, debit, compute, compute_sha, day,
-                                   clock=clock, deadline=started + 600)
+                                   clock=clock, deadline=started + 600, timing=report['timing_diagnostics'])
             attempted = True
             report['requests_attempted'] += 1
         try:

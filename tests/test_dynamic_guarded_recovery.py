@@ -57,6 +57,10 @@ class DynamicGuardedRecoveryTests(RecoveryIntegrationTests):
             path=f'data/market-data/series/daily/twelve_data_basic/{symbol}/_index.json'
             self.assertEqual(git(self.repo,'rev-parse',self.base+':'+path),git(self.repo,'rev-parse',commit+':'+path))
         self.assertTrue(result['verified_required_outputs'])
+        diagnostic=json.loads(git(self.repo,'show',commit+':'+result['result_state_path']))
+        stages={item['stage'] for item in diagnostic['timing_diagnostics']}
+        self.assertTrue({'window_check','debit_start','publication_verified','pre_http_guard'} <= stages)
+        self.assertTrue(all(set(item)=={'stage','at_utc'} for item in diagnostic['timing_diagnostics']))
 
     def test_invalid_selection_causes_no_debit_or_provider_call(self):
         selector=copy.deepcopy(self.selector);selector['targets'][1]['index_blob_sha']='0'*40
@@ -83,6 +87,8 @@ class DynamicGuardedRecoveryTests(RecoveryIntegrationTests):
         paths=git(self.repo,'diff','--name-only',self.base,commit).splitlines()
         self.assertTrue(all(p.startswith('data/market-data/collector-state/') for p in paths))
         self.assertEqual(report['dynamic_selection'],self.selector)
+        stages={item['stage'] for item in report['timing_diagnostics']}
+        self.assertTrue({'window_check','debit_start','publication_verified','pre_http_guard'} <= stages)
 
     def test_invalid_dynamic_admission_does_not_debit_or_write(self):
         selector=copy.deepcopy(self.selector);selector['result_blob_sha']='0'*40
