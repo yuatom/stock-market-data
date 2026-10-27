@@ -110,3 +110,27 @@ manifest and diagnostic request/date/stage identities. Empty closure, an
 incorrect path/blob/identity, malformed receipt or failed verification is not
 terminal success, even when a push or local `rev-parse` succeeded. A remotely
 written diagnostic alone is not a successful producer receipt.
+
+## Explicit existing dynamic histories
+
+The guarded admission and recovery jobs accept an optional `dynamic_selection`
+JSON object. Omission keeps the fixed universe. An explicitly supplied value
+must contain `request_commit_sha`, `request_blob_sha`, `result_blob_sha`, and
+`targets`, each target containing only `symbol` and `index_blob_sha`. The
+request commit must be an ancestor of the fetched `discovery-requests` branch.
+The request commit must be the first introduction of that request ID on the
+branch; later edits cannot replace its original bytes. The request and exact
+pinned Store result must agree on identity and candidate
+list; each selected existing stock series must have its own recorded history
+conflict and matching index, shard, provider and security semantics. The index and each shard
+blob must also match the result publication commit, so later series changes
+invalidate that evidence. The Store
+SHA is the ordinary starting pin, not a selector-provided alternative. An empty,
+invalid or stale selection stops before debit/provider access; it never falls
+back to the fixed universe. No collection or personal membership changes.
+
+This is maintenance capability, not a grant to run recovery. Admission never
+writes market facts. A separate authorized recovery still fetches and qualifies
+all selected replacements, keeps all retained dates and the existing tail
+revision limits, and publishes one complete archived candidate with the same
+manifest and durability checks. Unconfirmed publication is never retried.

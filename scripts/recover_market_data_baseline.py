@@ -18,6 +18,8 @@ import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+from dynamic_baseline_targets import parse_dynamic_selection
 from typing import Any
 
 MODE = 'daily_baseline_rebase'
@@ -173,11 +175,15 @@ def series_paths(repo: Path, provider: str, symbol: str, index: dict) -> set[str
     return paths
 
 
-def original_entries(h, repo: Path, universe: dict, config: dict, day: str) -> list[dict]:
+def original_entries(h, repo: Path, universe: dict, config: dict, day: str, *, targets: list[dict] | None = None) -> list[dict]:
     a = admission()
     provider = h.collectors.TWELVE_PROVIDER
     originals = {}
-    for symbol, _ in h.collection.daily_universe(universe):
+    selected = targets if targets is not None else [
+        {'symbol': symbol, 'asset_class': asset, 'effective': h.collection.ticker_effective_at(universe, symbol)}
+        for symbol, asset in h.collection.daily_universe(universe)]
+    for selected_item in selected:
+        symbol = selected_item['symbol']
         index_rel = f'{PREFIX}series/daily/{provider}/{symbol}/_index.json'
         index = json.loads(safe_path(repo, index_rel).read_text())
         paths = series_paths(repo, provider, symbol, index)  # Before any helper follows shard paths.
@@ -187,7 +193,8 @@ def original_entries(h, repo: Path, universe: dict, config: dict, day: str) -> l
         originals[symbol] = {'old_index': index, 'index_relative': index_rel,
             'old_files': {p: a.git(repo, 'hash-object', '--', str(repo / p)) for p in paths},
             'archive_relative': archive_rel}
-    entries = a.prepare_series(h, repo / PREFIX, universe, config, day)
+    entries = (a.prepare_series(h, repo / PREFIX, universe, config, day) if targets is None else
+               a.prepare_series(h, repo / PREFIX, universe, config, day, targets=selected))
     for item in entries:
         item.update(originals[item['symbol']])
     require_complete(list(originals), entries)
@@ -341,7 +348,7 @@ def stage_and_publish(h, writer, entries: list[dict], report: dict, *, compute: 
 
 def recover(h, *, compute: Path, compute_sha: str, repo: Path, store_sha: str, day: str,
             request_id: str, config: dict, universe: dict, access: dict, key: str,
-            clock=now_utc) -> dict:
+            clock=now_utc, dynamic_selector: dict | None = None, discovery_repo: Path | None = None) -> dict:
     a = admission()
     maturity = config['collector']['twelve_data_daily']['settlement_maturity']['minimum_next_day_et']
     a.validate_target(day, maturity, clock())
@@ -349,14 +356,27 @@ def recover(h, *, compute: Path, compute_sha: str, repo: Path, store_sha: str, d
     if not key:
         raise RecoveryError('credential_missing')
     writer = make_writer(repo, store_sha, day, request_id)
-    entries = original_entries(h, writer.repo, universe, config, day)
-    targets = [symbol for symbol, _ in h.collection.daily_universe(universe)]
+    if dynamic_selector is None:
+        entries = original_entries(h, writer.repo, universe, config, day)
+        targets = [symbol for symbol, _ in h.collection.daily_universe(universe)]
+    else:
+        from dynamic_baseline_targets import resolve_dynamic_targets
+        try:
+            selected = resolve_dynamic_targets(h, store_repo=writer.repo, store_sha=store_sha,
+                discovery_repo=discovery_repo, selector=dynamic_selector, universe=universe, day=day)
+            entries = original_entries(h, writer.repo, universe, config, day, targets=selected)
+        except Exception:
+            raise RecoveryError('original_invalid') from None
+        targets = [item['symbol'] for item in selected]
     require_complete(targets, entries)
     report = {'schema_version': 1, 'mode': MODE, 'status': 'IN_PROGRESS',
               'compute_sha': compute_sha, 'store_start_sha': store_sha, 'trade_date': day,
               'request_id': request_id, 'target_count': len(entries), 'requests_attempted': 0,
               'budget_debits': 0, 'started_at': clock().isoformat(), 'market_fact_authority': False,
               'production_recovery_accepted': False}
+    if dynamic_selector is not None:
+        report['dynamic_selection'] = dynamic_selector
+        report['source_result_commit_sha'] = selected[0]['source_result_commit_sha']
     writer.report(report)
     deadline = time.monotonic() + 600
     budget = config['collector']['budgets']['twelve_data_basic']
@@ -409,6 +429,8 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
     for flag in ('trade-date', 'compute-sha', 'store-sha', 'store-repo', 'request-id'):
         p.add_argument('--' + flag, required=True)
+    p.add_argument('--dynamic-selection', default=None)
+    p.add_argument('--discovery-repo', default=None)
     args = p.parse_args(argv)
     os.umask(0o077)
     try:
@@ -426,7 +448,9 @@ def main(argv=None) -> int:
             config=h.collectors.load_yaml(root / 'config/market-data-store.yaml'),
             universe=h.collection.load_collection_universe(root / 'config/collection-universe.json'),
             access=h.collectors.load_yaml(root / 'config/market-data-collector-access.yaml'),
-            key=os.environ.get('TWELVE_DATA_API_KEY', ''))
+            key=os.environ.get('TWELVE_DATA_API_KEY', ''),
+            dynamic_selector=parse_dynamic_selection(args.dynamic_selection),
+            discovery_repo=Path(args.discovery_repo) if args.discovery_repo else None)
         # Detailed closure paths are available in the private manifest, not public logs.
         public = {k: v for k, v in result.items() if k != 'verified_required_outputs'}
         public['verified_required_output_count'] = len(result['verified_required_outputs'])

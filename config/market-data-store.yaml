@@ -57,6 +57,13 @@ series:
     explicit_rebase:
       mode: daily_baseline_rebase
       purpose: resolve_provider_settlement_revision_only_after_explicit_audited_rebase
+      dynamic_existing_series_selection:
+        default: fixed_collection_universe
+        authority: config/dynamic-candidate-collection.yaml#bounded_existing_history_recovery
+        admission_and_recovery_must_resolve_identical_targets: true
+        only_existing_conflicted_request_scoped_stocks: true
+        source_and_index_must_match_exact_starting_store: true
+        selection_does_not_relax_existing_revision_or_archive_guards: true
       same_provider_required: true
       same_session_interval_series_and_adjustment_semantics_required: true
       security_identity_effective_date_must_still_pass: true

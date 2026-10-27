@@ -82,3 +82,18 @@ result:
   publication_manifest_authority: config/store-publication-durability.yaml#required_output_closure
   snapshot_path_when_written_must_be_declared_with_blob_sha: true
   result_state_path_must_be_declared_with_blob_sha: true
+
+# History repair is a separately authorized maintenance operation, never membership.
+bounded_existing_history_recovery:
+  entrypoint: .github/workflows/market-data-collector.yml
+  modes: [daily_baseline_admission, daily_baseline_rebase]
+  selector_fields: [request_commit_sha, request_blob_sha, result_blob_sha, targets]
+  target_fields: [symbol, index_blob_sha]
+  request_authority_ref: refs/remotes/origin/discovery-requests
+  require_ancestral_request_and_exact_request_result_and_index_blobs: true
+  request_commit_must_be_first_introduction_of_request_id: true
+  index_and_shard_blobs_must_match_result_publication_commit: true
+  require_recorded_dynamic_history_conflict_and_existing_tail: true
+  require_provider_symbol_asset_class_session_interval_adjustment_and_identity: true
+  explicit_invalid_or_empty_selection_never_falls_back_to_fixed_universe: true
+  permanent_collection_or_personal_membership_write_forbidden: true
