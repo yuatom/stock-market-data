@@ -141,11 +141,13 @@ class AdmissionBoundaryTests(unittest.TestCase):
 
     def test_expired_debit_minute_stops_without_refund(self):
         h = SimpleNamespace(collectors=SimpleNamespace(wait_for_twelve_budget=Mock(), consume_twelve_credit=Mock()))
-        writer = SimpleNamespace(publish=Mock(), budget_relative='budget.json')
-        clock = Mock(side_effect=[NOW, NOW, NOW.replace(minute=1)])
+        current = [NOW]
+        def publish(paths):
+            current[0] = NOW.replace(minute=1)
+        writer = SimpleNamespace(publish=Mock(side_effect=publish), budget_relative='budget.json')
         with self.assertRaises(self.m.AdmissionError) as ctx:
             self.m.debit_before_request(h, writer, Path('/unused'), DAY,
-                {'hard_credits_per_day': 200, 'hard_credits_per_minute': 8}, clock=clock)
+                {'hard_credits_per_day': 200, 'hard_credits_per_minute': 8}, clock=lambda: current[0])
         self.assertEqual(ctx.exception.code, 'budget_slot_expired')
         writer.publish.assert_called_once()
 

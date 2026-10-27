@@ -106,8 +106,11 @@ def wait_for_twelve_budget(
     *,
     per_day: int,
     per_minute: int,
+    deadline: float | None = None,
 ) -> None:
     while True:
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("budget wait deadline exceeded")
         path = _budget_path(store_root, trade_date)
         now = datetime.now(timezone.utc)
         minute = now.strftime("%Y-%m-%dT%H:%MZ")
@@ -116,7 +119,10 @@ def wait_for_twelve_budget(
             raise BudgetExceeded(f"Twelve Data daily budget exhausted: {per_day}")
         if int((state.get("minutes") or {}).get(minute, 0)) < per_minute:
             return
-        time.sleep(max(1.0, 61.0 - now.second - now.microsecond / 1_000_000.0))
+        delay = max(1.0, 61.0 - now.second - now.microsecond / 1_000_000.0)
+        if deadline is not None and time.monotonic() + delay >= deadline:
+            raise TimeoutError("budget wait deadline exceeded")
+        time.sleep(delay)
 
 
 def consume_twelve_credit(

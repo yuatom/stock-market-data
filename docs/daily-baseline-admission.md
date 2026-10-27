@@ -134,3 +134,18 @@ writes market facts. A separate authorized recovery still fetches and qualifies
 all selected replacements, keeps all retained dates and the existing tail
 revision limits, and publishes one complete archived candidate with the same
 manifest and durability checks. Unconfirmed publication is never retried.
+
+## Predebit publication headroom
+
+Both guarded modes use the same predebit window. Before a new debit they
+reserve 20 seconds before the strict :58 UTC-second cutoff: the isolated
+late-window reproduction used approximately 8 seconds for publication, with
+an additional 12-second allowance for final identity checks and jitter. This
+is a conservative scheduling margin, not a measured or guaranteed RPC bound.
+Insufficient headroom or a full minute slot causes a bounded wait before any
+debit; the operation deadline governs that wait. After waiting, the ET date,
+maturity, budget and exact Compute/Store identities are checked again. The
+minute recorded by the actual ledger delta and the existing same-minute and
+strict :58 checks remain authoritative after publication and before HTTP.
+Failed, expired or uncertain debits are neither refunded nor retried. Private
+run diagnostics record only bounded timing stages and UTC timestamps.

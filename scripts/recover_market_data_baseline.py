@@ -373,7 +373,7 @@ def recover(h, *, compute: Path, compute_sha: str, repo: Path, store_sha: str, d
               'compute_sha': compute_sha, 'store_start_sha': store_sha, 'trade_date': day,
               'request_id': request_id, 'target_count': len(entries), 'requests_attempted': 0,
               'budget_debits': 0, 'started_at': clock().isoformat(), 'market_fact_authority': False,
-              'production_recovery_accepted': False}
+              'production_recovery_accepted': False, 'timing_diagnostics': []}
     if dynamic_selector is not None:
         report['dynamic_selection'] = dynamic_selector
         report['source_result_commit_sha'] = selected[0]['source_result_commit_sha']
@@ -386,14 +386,17 @@ def recover(h, *, compute: Path, compute_sha: str, repo: Path, store_sha: str, d
         for item in entries:
             source_guard(compute, compute_sha)
             a.validate_target(day, maturity, clock())
-            debit = a.debit_before_request(h, writer, writer.repo / PREFIX, day, budget, clock=clock)
+            debit = a.debit_before_request(h, writer, writer.repo / PREFIX, day, budget, clock=clock,
+                deadline=deadline, maturity=maturity, compute=compute, compute_sha=compute_sha,
+                timing=report['timing_diagnostics'])
             report['budget_debits'] += 1
             attempted = False
             def before_request():
                 nonlocal attempted
                 if attempted:
                     raise RecoveryError('candidate_invalid')
-                a.guard_provider_request(writer, debit, compute, compute_sha, day, clock=clock, deadline=deadline)
+                a.guard_provider_request(writer, debit, compute, compute_sha, day, clock=clock, deadline=deadline,
+                    timing=report['timing_diagnostics'])
                 attempted = True
                 report['requests_attempted'] += 1
             fetched = h.rebaser._fetch_replacement_daily(item['symbol'], key, access,
