@@ -13,6 +13,8 @@ import hashlib
 import json
 import math
 import re
+from datetime import datetime, time
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -126,6 +128,9 @@ def _load_daily_series(root: Path, symbol: str, target_trade_date: str) -> tuple
     try:
         index, index_blob = _read_json_exact(root, index_rel)
     except FileNotFoundError as exc:
+        series_dir = root / Path(index_rel).parent
+        if series_dir.exists() or series_dir.is_symlink():
+            raise MetricProofError(f"provider-affine daily series index missing: {symbol}") from exc
         raise MetricProofUnavailable(f"provider-affine daily series unavailable: {symbol}") from exc
     if index.get("provider") != PROVIDER or index.get("symbol") != symbol.upper():
         raise MetricProofError(f"series affinity mismatch: {symbol}")
@@ -242,11 +247,18 @@ def _load_snapshot(root: Path, trade_date: str, stage: str) -> tuple[dict[str, A
     return snapshot, snapshot_rel, actual
 
 
-def _target_observations(root: Path, snapshot: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+def _target_observations(
+    root: Path, snapshot: Mapping[str, Any], *, missing_symbols: set[str] | None = None,
+) -> dict[str, dict[str, Any]]:
     targets: dict[str, dict[str, Any]] = {}
+    target_times: dict[str, Any] = {}
     refs = snapshot.get("data_refs") or []
     if not isinstance(refs, list):
         raise MetricProofError("snapshot data_refs must be a list")
+    close_stage = snapshot.get("stage") == "close"
+    trade_date = str(snapshot.get("trade_date") or "")
+    if close_stage and snapshot.get("target_window") != {"start": "15:45", "end": "16:00"}:
+        raise MetricProofError("close snapshot target window does not match owner")
     for ref in refs:
         if not isinstance(ref, Mapping):
             raise MetricProofError("snapshot data ref must be an object")
@@ -263,34 +275,74 @@ def _target_observations(root: Path, snapshot: Mapping[str, Any]) -> dict[str, d
                 continue
             symbol = str(fact.get("symbol") or "").upper()
             event_time = str(fact.get("event_time") or fact.get("source_timestamp") or "")
-            price = fact.get("last_sale")
             fact_session = str(fact.get("session") or capture_session)
             if fact_session != capture_session:
                 raise MetricProofError(f"capture/fact session mismatch: {rel}/{symbol}")
-            if not symbol or not event_time or price is None:
+            if symbol and missing_symbols is not None:
+                missing_symbols.add(symbol)
+            if not symbol or not event_time:
                 continue
-            candidate = {
-                "capture_path": rel,
-                "capture_blob_sha": actual_blob,
-                "event_time": event_time,
-                "last_sale": _number(price, f"last_sale[{symbol}]"),
-            }
+            price_field = "last_sale"
+            semantics = None
+            if close_stage:
+                if capture_session != "regular" or capture.get("trade_date") != trade_date:
+                    continue
+                try:
+                    ts = datetime.fromisoformat(event_time.replace("Z", "+00:00"))
+                    if ts.tzinfo is None:
+                        raise ValueError("missing timezone")
+                    et = ts.astimezone(ZoneInfo("America/New_York"))
+                except ValueError as exc:
+                    raise MetricProofError(f"invalid capture event time: {rel}/{symbol}") from exc
+                if et.date().isoformat() != trade_date or not time(15, 45) <= et.time().replace(tzinfo=None) < time(16, 0):
+                    continue
+                if fact.get("source_timestamp") and fact.get("source_timestamp") != event_time:
+                    raise MetricProofError(f"capture event/source timestamp mismatch: {rel}/{symbol}")
+                if fact.get("last_sale") is not None and fact.get("close") is not None:
+                    raise MetricProofError(f"ambiguous price fields: {rel}/{symbol}")
+                source = (capture.get("provider"), fact.get("source_contract"))
+                if source == ("nasdaq_public_intraday", "nasdaq_public_chart_last_sale_volume_v1"):
+                    semantics = "nasdaq_public_chart_last_sale"
+                elif source == ("twelve_data_basic", "twelve_data_basic_regular_1min_v1"):
+                    price_field = "close"
+                    semantics = "twelve_data_basic_regular_1min_close"
+                else:
+                    raise MetricProofError(f"unregistered close price source: {rel}/{symbol}")
+            price = fact.get(price_field)
+            if price is None:
+                continue
+            price = _number(price, f"{price_field}[{symbol}]")
+            if price <= 0:
+                raise MetricProofError(f"{price_field}[{symbol}] must be positive")
+            candidate = {"capture_path": rel, "capture_blob_sha": actual_blob,
+                         "event_time": event_time, price_field: price}
+            if close_stage:
+                candidate.update(price_field=price_field, price_semantics=semantics)
             prior = targets.get(symbol)
-            if prior is None or candidate["event_time"] > prior["event_time"]:
+            comparable_time = et if close_stage else candidate["event_time"]
+            if prior is None or comparable_time > target_times[symbol]:
                 targets[symbol] = candidate
+                target_times[symbol] = comparable_time
                 continue
-            if candidate["event_time"] == prior["event_time"] and candidate != prior:
+            if comparable_time == target_times[symbol] and candidate != prior:
                 raise MetricProofError(f"ambiguous selected target observation: {symbol}/{event_time}")
     return targets
 
 
+def _target_price(target: Mapping[str, Any], symbol: str) -> float:
+    field = str(target.get("price_field") or "last_sale")
+    if field not in {"last_sale", "close"}:
+        raise MetricProofError(f"unsupported target price field: {symbol}/{field}")
+    return _number(target.get(field), f"target {field}[{symbol}]")
+
+
 def _target_matches_selected(target: Mapping[str, Any], selected: Mapping[str, Any], symbol: str) -> bool:
-    for key in ("capture_path", "capture_blob_sha", "event_time"):
-        if str(target.get(key) or "") != str(selected.get(key) or ""):
+    if set(target) != set(selected):
+        return False
+    for key in set(selected) - {"last_sale", "close"}:
+        if target.get(key) != selected.get(key):
             return False
-    return _number(target.get("last_sale"), f"proof target last_sale[{symbol}]") == _number(
-        selected.get("last_sale"), f"selected target last_sale[{symbol}]"
-    )
+    return _target_price(target, symbol) == _target_price(selected, symbol)
 
 
 def verify_proof_source_blobs(root: Path, proof: Mapping[str, Any]) -> None:
@@ -307,7 +359,44 @@ def verify_proof_source_blobs(root: Path, proof: Mapping[str, Any]) -> None:
         raise MetricProofError("proof snapshot identity mismatch")
     if str(snapshot.get("snapshot_id") or "") != str(snapshot_ref.get("snapshot_id") or ""):
         raise MetricProofError("proof snapshot id mismatch")
-    selected_targets = _target_observations(root, snapshot)
+    observed_symbols: set[str] = set()
+    selected_targets = _target_observations(root, snapshot, missing_symbols=observed_symbols)
+    if stage == "close":
+        subjects = proof.get("subjects")
+        missing = proof.get("missing")
+        if not isinstance(subjects, list) or not isinstance(missing, list):
+            raise MetricProofError("proof subjects and missing must be arrays")
+        subject_symbols: set[str] = set()
+        for subject in subjects:
+            if not isinstance(subject, Mapping) or set(subject) != {"symbol", "target", "daily_series", "metrics", "benchmark_metrics"}:
+                raise MetricProofError("invalid proof subject fields")
+            symbol = subject.get("symbol")
+            if not isinstance(symbol, str) or not symbol or symbol != symbol.upper() or symbol in subject_symbols:
+                raise MetricProofError("invalid or duplicate proof subject symbol")
+            subject_symbols.add(symbol)
+        missing_by_symbol: dict[str, str] = {}
+        for row in missing:
+            if not isinstance(row, Mapping) or set(row) != {"symbol", "reason"}:
+                raise MetricProofError("invalid proof missing fields")
+            symbol, reason = row.get("symbol"), row.get("reason")
+            if (not isinstance(symbol, str) or not symbol or symbol != symbol.upper()
+                    or symbol in missing_by_symbol or symbol in subject_symbols
+                    or reason not in {"qualified_stage_target_unavailable", "provider_affine_daily_series_unavailable"}):
+                raise MetricProofError("invalid, duplicate or overlapping proof missing target")
+            missing_by_symbol[symbol] = reason
+        no_target = observed_symbols - selected_targets.keys()
+        missing_daily: set[str] = set()
+        for symbol in selected_targets:
+            try:
+                _load_daily_series(root, symbol, trade_date)
+            except MetricProofUnavailable:
+                missing_daily.add(symbol)
+            except (OSError, ValueError) as exc:
+                raise MetricProofError(f"daily-series integrity failure: {symbol}") from exc
+        expected_missing = {symbol: "qualified_stage_target_unavailable" for symbol in no_target}
+        expected_missing.update({symbol: "provider_affine_daily_series_unavailable" for symbol in missing_daily})
+        if missing_by_symbol != expected_missing or subject_symbols != set(selected_targets) - missing_daily:
+            raise MetricProofError("proof subject/missing target partition does not match verified snapshot and daily series")
 
     for subject in proof.get("subjects") or []:
         if not isinstance(subject, Mapping):
@@ -364,7 +453,8 @@ def build_proof(root: Path, *, trade_date: str, stage: str, data_plane_commit_sh
     if not HEX40.fullmatch(data_plane_commit_sha):
         raise MetricProofError("data_plane_commit_sha must be a 40-char SHA")
     snapshot, snapshot_rel, snapshot_blob = _load_snapshot(root, trade_date, stage)
-    targets = _target_observations(root, snapshot)
+    observed_symbols: set[str] = set()
+    targets = _target_observations(root, snapshot, missing_symbols=observed_symbols)
     daily_cache: dict[str, tuple[list[dict[str, Any]], dict[str, Any]]] = {}
     for symbol in sorted(set(targets) | {"SPY", "QQQ"}):
         try:
@@ -373,14 +463,17 @@ def build_proof(root: Path, *, trade_date: str, stage: str, data_plane_commit_sh
             continue
 
     subjects: list[dict[str, Any]] = []
-    missing: list[dict[str, str]] = []
+    missing: list[dict[str, str]] = [
+        {"symbol": symbol, "reason": "qualified_stage_target_unavailable"}
+        for symbol in sorted(observed_symbols - targets.keys())
+    ]
     for symbol in sorted(targets):
         if symbol not in daily_cache:
             missing.append({"symbol": symbol, "reason": "provider_affine_daily_series_unavailable"})
             continue
         prior, daily_meta = daily_cache[symbol]
         target = targets[symbol]
-        base_metrics = compute_metrics(prior, target_trade_date=trade_date, target_close=target["last_sale"])
+        base_metrics = compute_metrics(prior, target_trade_date=trade_date, target_close=_target_price(target, symbol))
         benchmark_metrics: dict[str, Any] = {}
         for benchmark in ("SPY", "QQQ"):
             benchmark_target = targets.get(benchmark)
@@ -395,9 +488,9 @@ def build_proof(root: Path, *, trade_date: str, stage: str, data_plane_commit_sh
             benchmark_metrics[benchmark] = compute_metrics(
                 prior,
                 target_trade_date=trade_date,
-                target_close=target["last_sale"],
+                target_close=_target_price(target, symbol),
                 benchmark_prior_records=benchmark_prior,
-                benchmark_target_close=benchmark_target["last_sale"],
+                benchmark_target_close=_target_price(benchmark_target, benchmark),
             )["relative_strength_pct"]
         subjects.append(
             {

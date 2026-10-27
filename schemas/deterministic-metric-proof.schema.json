@@ -31,12 +31,20 @@
           "symbol": {"type": "string", "minLength": 1},
           "target": {
             "type": "object",
-            "required": ["capture_path", "capture_blob_sha", "event_time", "last_sale"],
+            "required": ["capture_path", "capture_blob_sha", "event_time"],
+            "oneOf": [
+              {"required": ["last_sale"], "not": {"anyOf": [{"required": ["close"]}, {"required": ["price_field"]}, {"required": ["price_semantics"]}]}},
+              {"required": ["last_sale", "price_field", "price_semantics"], "properties": {"price_field": {"const": "last_sale"}, "price_semantics": {"const": "nasdaq_public_chart_last_sale"}}, "not": {"required": ["close"]}},
+              {"required": ["close", "price_field", "price_semantics"], "properties": {"price_field": {"const": "close"}, "price_semantics": {"const": "twelve_data_basic_regular_1min_close"}}, "not": {"required": ["last_sale"]}}
+            ],
             "properties": {
               "capture_path": {"type": "string", "minLength": 1},
               "capture_blob_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
               "event_time": {"type": "string", "format": "date-time"},
-              "last_sale": {"type": "number", "exclusiveMinimum": 0}
+              "last_sale": {"type": "number", "exclusiveMinimum": 0},
+              "close": {"type": "number", "exclusiveMinimum": 0},
+              "price_field": {"enum": ["last_sale", "close"]},
+              "price_semantics": {"enum": ["nasdaq_public_chart_last_sale", "twelve_data_basic_regular_1min_close"]}
             },
             "additionalProperties": false
           },

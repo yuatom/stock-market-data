@@ -28,6 +28,11 @@ scope:
   provider_affine_daily_series_provider: twelve_data_basic
   benchmarks: [SPY, QQQ]
   target_observation_source: latest_qualified_stage_snapshot_fact
+  close_target_window_et: {start: "15:45", end: "16:00"}
+  close_price_fields_by_source_contract:
+    nasdaq_public_chart_last_sale_volume_v1: last_sale
+    twelve_data_basic_regular_1min_v1: close
+  close_target_is_provider_specific_not_official_close: true
   target_volume_compatibility: unavailable_for_intraday_nasdaq_chart_reported_volume
 
 formulas:
@@ -68,7 +73,7 @@ source_identity:
     - stage
     - symbol
     - target_event_time
-    - target_last_sale
+    - source_price_field_value_and_semantics
   mixed_store_blob_identity_forbidden: true
   source_blob_mismatch_or_tamper_is_integrity_failure_not_unavailable: true
   post_proof_source_mutation_inside_same_store_commit_forbidden: true
