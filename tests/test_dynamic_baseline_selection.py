@@ -203,3 +203,12 @@ def test_selector_json_duplicate_keys_are_rejected():
     m=importlib.import_module('dynamic_baseline_targets')
     with pytest.raises(m.DynamicTargetError):
         m.parse_dynamic_selection('{"targets":[],"targets":[]}')
+
+
+def test_result_commit_must_contain_original_matching_shards(source):
+    h,repo,sha,discovery,selector,universe=source
+    path='data/market-data/series/daily/twelve_data_basic/AAA/000000.json'
+    git(repo,'rm','--cached',path);git(repo,'commit','--amend','--no-edit','-q')
+    git(repo,'add',path);git(repo,'commit','-qm','later shard restoration')
+    new_sha=git(repo,'rev-parse','HEAD')
+    with pytest.raises(Exception):resolve(source,copy.deepcopy(selector),store_sha=new_sha)

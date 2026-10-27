@@ -122,8 +122,8 @@ The request commit must be the first introduction of that request ID on the
 branch; later edits cannot replace its original bytes. The request and exact
 pinned Store result must agree on identity and candidate
 list; each selected existing stock series must have its own recorded history
-conflict and matching index, shard, provider and security semantics. The index
-blob must also match the result publication commit, so later index changes
+conflict and matching index, shard, provider and security semantics. The index and each shard
+blob must also match the result publication commit, so later series changes
 invalidate that evidence. The Store
 SHA is the ordinary starting pin, not a selector-provided alternative. An empty,
 invalid or stale selection stops before debit/provider access; it never falls

@@ -160,7 +160,10 @@ def resolve_dynamic_targets(h, *, store_repo: Path, store_sha: str, discovery_re
                 if shard.get('start') != cursor or type(shard.get('count')) is not int or shard['count'] <= 0 or shard.get('end') != cursor + shard['count'] - 1:
                     raise ValueError
                 names.add(name); cursor += shard['count']
-                _exact_file(store_repo, store_sha, f'{STORE_PREFIX}series/daily/twelve_data_basic/{symbol}/{name}', shard['blob_sha'])
+                shard_path = f'{STORE_PREFIX}series/daily/twelve_data_basic/{symbol}/{name}'
+                _exact_file(store_repo, store_sha, shard_path, shard['blob_sha'])
+                if _git(store_repo, 'rev-parse', f"{result_commit}:{shard_path}") != shard['blob_sha']:
+                    raise ValueError
             if cursor != index.get('record_count'):
                 raise ValueError
             directory = store_repo / f'{STORE_PREFIX}series/daily/twelve_data_basic/{symbol}'
