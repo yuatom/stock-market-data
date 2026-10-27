@@ -27,6 +27,10 @@ on:
         description: Optional ET trade/calendar date YYYY-MM-DD
         required: false
         type: string
+      dynamic_selection:
+        description: Optional JSON proof selecting existing failed dynamic daily histories (guarded modes only)
+        required: false
+        type: string
       expected_compute_sha:
         description: Required exact current main SHA for daily_baseline_admission and daily_baseline_rebase only
         required: false
@@ -53,7 +57,7 @@ permissions:
 
 jobs:
   run:
-    if: inputs.mode != 'daily_baseline_admission' && inputs.mode != 'daily_baseline_rebase'
+    if: inputs.mode != 'daily_baseline_admission' && inputs.mode != 'daily_baseline_rebase' && (github.event_name != 'workflow_dispatch' || inputs.dynamic_selection == '')
     uses: ./.github/workflows/market-data-collector-runtime.yml
     with:
       trigger_kind: ${{ github.event_name }}
@@ -103,6 +107,14 @@ jobs:
           fetch-depth: 0
           path: store
 
+      - name: Checkout dynamic request authority for explicit target proof
+        if: inputs.dynamic_selection != ''
+        uses: actions/checkout@v4
+        with:
+          ref: discovery-requests
+          fetch-depth: 0
+          path: discovery
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -118,15 +130,21 @@ jobs:
           EXPECTED_COMPUTE_SHA: ${{ inputs.expected_compute_sha }}
           EXPECTED_STORE_SHA: ${{ inputs.expected_store_sha }}
           TRADE_DATE: ${{ inputs.trade_date }}
+          DYNAMIC_SELECTION: ${{ inputs.dynamic_selection }}
         shell: bash
         run: |
           set -euo pipefail
+          selection_args=()
+          if [[ -n "$DYNAMIC_SELECTION" ]]; then
+            selection_args=(--dynamic-selection "$DYNAMIC_SELECTION" --discovery-repo ../discovery)
+          fi
           python scripts/admit_market_data_baseline.py \
             --trade-date "$TRADE_DATE" \
             --compute-sha "$EXPECTED_COMPUTE_SHA" \
             --store-sha "$EXPECTED_STORE_SHA" \
             --store-repo ../store \
-            --request-id "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+            --request-id "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+            "${selection_args[@]}"
 
   recovery:
     if: github.event_name == 'workflow_dispatch' && inputs.mode == 'daily_baseline_rebase'
@@ -176,6 +194,14 @@ jobs:
           fetch-depth: 0
           path: store
 
+      - name: Checkout dynamic request authority for explicit target proof
+        if: inputs.dynamic_selection != ''
+        uses: actions/checkout@v4
+        with:
+          ref: discovery-requests
+          fetch-depth: 0
+          path: discovery
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -191,12 +217,18 @@ jobs:
           EXPECTED_COMPUTE_SHA: ${{ inputs.expected_compute_sha }}
           EXPECTED_STORE_SHA: ${{ inputs.expected_store_sha }}
           TRADE_DATE: ${{ inputs.trade_date }}
+          DYNAMIC_SELECTION: ${{ inputs.dynamic_selection }}
         shell: bash
         run: |
           set -euo pipefail
+          selection_args=()
+          if [[ -n "$DYNAMIC_SELECTION" ]]; then
+            selection_args=(--dynamic-selection "$DYNAMIC_SELECTION" --discovery-repo ../discovery)
+          fi
           python scripts/recover_market_data_baseline.py \
             --trade-date "$TRADE_DATE" \
             --compute-sha "$EXPECTED_COMPUTE_SHA" \
             --store-sha "$EXPECTED_STORE_SHA" \
             --store-repo ../store \
-            --request-id "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+            --request-id "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+            "${selection_args[@]}"

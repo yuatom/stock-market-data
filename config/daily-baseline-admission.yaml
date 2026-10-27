@@ -45,3 +45,9 @@ required_output_closure:
   verifier_requires_manifest: true
   verified_outputs_must_equal_exact_diagnostic_path_and_blob: true
   invocation_date_stage_and_diagnostic_identity_must_match: true
+
+dynamic_target_selection:
+  authority: config/dynamic-candidate-collection.yaml#bounded_existing_history_recovery
+  validation_before_first_debit_or_provider_access: true
+  explicit_invalid_selection_never_falls_back: true
+  selection_is_not_future_recovery_authorization: true

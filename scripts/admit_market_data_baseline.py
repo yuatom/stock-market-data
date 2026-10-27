@@ -17,6 +17,8 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+
+from dynamic_baseline_targets import parse_dynamic_selection
 from types import SimpleNamespace
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
@@ -242,17 +244,23 @@ def load_helpers():
     return SimpleNamespace(collection=collection, collectors=collectors, store=store, rebaser=rebaser)
 
 
-def prepare_series(h, root: Path, universe: dict, config: dict, day: str) -> list[dict]:
+def prepare_series(h, root: Path, universe: dict, config: dict, day: str, *, targets: list[dict] | None = None) -> list[dict]:
     target = max(int(x) for x in config['series']['analysis_windows_may_read_last_sessions'])
     candidates = []
-    for symbol, _asset in h.collection.daily_universe(universe):
+    selected = targets if targets is not None else [
+        {'symbol': symbol, 'asset_class': asset, 'effective': h.collection.ticker_effective_at(universe, symbol)}
+        for symbol, asset in h.collection.daily_universe(universe)]
+    for selected_item in selected:
+        symbol = selected_item['symbol']
         try:
             path = h.rebaser._series_index_path(root, h.collectors.TWELVE_PROVIDER, symbol)
             index = h.rebaser._read_json(path)
-            effective = h.collection.ticker_effective_at(universe, symbol)
+            effective = selected_item['effective']
             expected = {'provider': h.collectors.TWELVE_PROVIDER, 'symbol': symbol,
                         'session': 'regular', 'interval': '1d', 'series_semantics': 'daily_regular_ohlcv',
                         'adjustment_semantics': 'provider_reported', 'identity_effective_from': effective}
+            if targets is not None:
+                expected['asset_class'] = selected_item['asset_class']
             if any(index.get(k) != v for k, v in expected.items()):
                 raise ValueError
             existing = h.store.read_daily_series(root, provider=h.collectors.TWELVE_PROVIDER, symbol=symbol)
@@ -412,13 +420,23 @@ def public_summary(report: dict[str, Any]) -> dict[str, Any]:
 
 def execute(h, writer, *, compute: Path, compute_sha: str, day: str, request_id: str,
             config: dict, universe: dict, access: dict, key: str,
-            clock: Callable[[], datetime] = utc_now) -> tuple[dict, str]:
+            clock: Callable[[], datetime] = utc_now, dynamic_selector: dict | None = None,
+            discovery_repo: Path | None = None) -> tuple[dict, str]:
     maturity = config['collector']['twelve_data_daily']['settlement_maturity']['minimum_next_day_et']
     validate_target(day, maturity, clock())
     if not key:
         raise AdmissionError('credential_missing')
     root = writer.repo / 'data/market-data'
-    candidates = prepare_series(h, root, universe, config, day)
+    if dynamic_selector is None:
+        candidates = prepare_series(h, root, universe, config, day)
+    else:
+        from dynamic_baseline_targets import resolve_dynamic_targets
+        try:
+            targets = resolve_dynamic_targets(h, store_repo=writer.repo, store_sha=writer.base,
+                discovery_repo=discovery_repo, selector=dynamic_selector, universe=universe, day=day)
+            candidates = prepare_series(h, root, universe, config, day, targets=targets)
+        except Exception:
+            raise AdmissionError('contract_invalid') from None
     budget = config['collector']['budgets']['twelve_data_basic']
     limits = {k: int(config['series']['baseline_initialization']['explicit_rebase'][k]) for k in (
         'maximum_revised_overlap_records', 'revised_overlap_must_be_within_last_existing_sessions')}
@@ -427,6 +445,9 @@ def execute(h, writer, *, compute: Path, compute_sha: str, day: str, request_id:
               'trade_date': day, 'request_id': request_id, 'started_at': clock().isoformat(),
               'target_count': len(candidates), 'requests_attempted': 0, 'budget_debits': 0,
               'results': [], 'failures': [], 'production_recovery_accepted': False}
+    if dynamic_selector is not None:
+        report['dynamic_selection'] = dynamic_selector
+        report['source_result_commit_sha'] = targets[0]['source_result_commit_sha']
     writer.report(report)
     started = time.monotonic()
     for candidate in candidates:
@@ -486,6 +507,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--store-sha', required=True)
     parser.add_argument('--store-repo', required=True)
     parser.add_argument('--request-id', required=True)
+    parser.add_argument('--dynamic-selection', default=None)
+    parser.add_argument('--discovery-repo', default=None)
     args = parser.parse_args(argv)
     os.umask(0o077)
     try:
@@ -513,7 +536,9 @@ def main(argv: list[str] | None = None) -> int:
         report, sha = execute(h, writer, compute=compute, compute_sha=args.compute_sha,
             day=args.trade_date, request_id=args.request_id, config=config,
             universe=h.collection.load_collection_universe(compute / 'config/collection-universe.json'),
-            access=h.collectors.load_yaml(compute / 'config/market-data-collector-access.yaml'), key=key)
+            access=h.collectors.load_yaml(compute / 'config/market-data-collector-access.yaml'), key=key,
+            dynamic_selector=parse_dynamic_selection(args.dynamic_selection),
+            discovery_repo=Path(args.discovery_repo) if args.discovery_repo else None)
         summary = public_summary(report)
         summary.update(store_commit_sha=sha, result_state_path=writer.report_relative,
                        result_blob_sha=git(writer.repo, 'rev-parse', f'{sha}:{writer.report_relative}'))
