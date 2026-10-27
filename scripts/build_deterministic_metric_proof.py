@@ -356,7 +356,14 @@ def verify_proof_source_blobs(root: Path, proof: Mapping[str, Any]) -> None:
         raise MetricProofError("proof snapshot identity mismatch")
     if str(snapshot.get("snapshot_id") or "") != str(snapshot_ref.get("snapshot_id") or ""):
         raise MetricProofError("proof snapshot id mismatch")
-    selected_targets = _target_observations(root, snapshot)
+    observed_symbols: set[str] = set()
+    selected_targets = _target_observations(root, snapshot, missing_symbols=observed_symbols)
+    if stage == "close":
+        declared = [row.get("symbol") for row in proof.get("missing") or []
+                    if isinstance(row, Mapping) and row.get("reason") == "qualified_stage_target_unavailable"]
+        expected_missing = observed_symbols - selected_targets.keys()
+        if len(declared) != len(set(declared)) or set(declared) != expected_missing:
+            raise MetricProofError("proof missing target set does not match verified snapshot")
 
     for subject in proof.get("subjects") or []:
         if not isinstance(subject, Mapping):

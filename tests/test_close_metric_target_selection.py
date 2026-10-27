@@ -145,3 +145,6 @@ def test_close_build_records_missing_if_only_inherited_morning(tmp_path):
     proof,_=proofmod.build_proof(root,trade_date='2026-09-05',stage='close',data_plane_commit_sha='a'*40)
     assert proof['subjects']==[]
     assert {'symbol':'AAA','reason':'qualified_stage_target_unavailable'} in proof['missing']
+    proof['missing']=[]
+    with pytest.raises(proofmod.MetricProofError,match='missing target'):
+        proofmod.verify_proof_source_blobs(root,proof)
