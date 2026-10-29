@@ -361,47 +361,59 @@ def verify_proof_source_blobs(root: Path, proof: Mapping[str, Any]) -> None:
         raise MetricProofError("proof snapshot id mismatch")
     observed_symbols: set[str] = set()
     selected_targets = _target_observations(root, snapshot, missing_symbols=observed_symbols)
-    if stage == "close":
-        subjects = proof.get("subjects")
-        missing = proof.get("missing")
-        if not isinstance(subjects, list) or not isinstance(missing, list):
-            raise MetricProofError("proof subjects and missing must be arrays")
-        subject_symbols: set[str] = set()
-        for subject in subjects:
-            if not isinstance(subject, Mapping) or set(subject) != {"symbol", "target", "daily_series", "metrics", "benchmark_metrics"}:
-                raise MetricProofError("invalid proof subject fields")
-            symbol = subject.get("symbol")
-            if not isinstance(symbol, str) or not symbol or symbol != symbol.upper() or symbol in subject_symbols:
-                raise MetricProofError("invalid or duplicate proof subject symbol")
-            subject_symbols.add(symbol)
-        missing_by_symbol: dict[str, str] = {}
-        for row in missing:
-            if not isinstance(row, Mapping) or set(row) != {"symbol", "reason"}:
-                raise MetricProofError("invalid proof missing fields")
-            symbol, reason = row.get("symbol"), row.get("reason")
-            if (not isinstance(symbol, str) or not symbol or symbol != symbol.upper()
-                    or symbol in missing_by_symbol or symbol in subject_symbols
-                    or reason not in {"qualified_stage_target_unavailable", "provider_affine_daily_series_unavailable"}):
-                raise MetricProofError("invalid, duplicate or overlapping proof missing target")
-            missing_by_symbol[symbol] = reason
-        no_target = observed_symbols - selected_targets.keys()
-        missing_daily: set[str] = set()
-        for symbol in selected_targets:
-            try:
-                _load_daily_series(root, symbol, trade_date)
-            except MetricProofUnavailable:
-                missing_daily.add(symbol)
-            except (OSError, ValueError) as exc:
-                raise MetricProofError(f"daily-series integrity failure: {symbol}") from exc
-        expected_missing = {symbol: "qualified_stage_target_unavailable" for symbol in no_target}
-        expected_missing.update({symbol: "provider_affine_daily_series_unavailable" for symbol in missing_daily})
-        if missing_by_symbol != expected_missing or subject_symbols != set(selected_targets) - missing_daily:
-            raise MetricProofError("proof subject/missing target partition does not match verified snapshot and daily series")
+    # A later, exact provider-affine peer is positive evidence that an older
+    # series is behind. Equality is not proof of complete market-calendar coverage.
+    observed_daily = {}
+    for symbol in selected_targets:
+        try:
+            observed_daily[symbol] = _load_daily_series(root, symbol, trade_date)
+        except MetricProofUnavailable:
+            pass
+    latest_observed = max((meta['prior_last_trade_date'] for _,meta in observed_daily.values()), default=None)
+    behind = {symbol for symbol,(_,meta) in observed_daily.items() if meta['prior_last_trade_date'] < latest_observed} if latest_observed else set()
+    # All supported stages use one canonical subject identity and a complete
+    # exact-source partition. Do not normalize an unvalidated proof symbol only
+    # after checking peer membership, or intraday proofs can bypass the guard.
+    subjects = proof.get("subjects")
+    missing = proof.get("missing")
+    if not isinstance(subjects, list) or not isinstance(missing, list):
+        raise MetricProofError("proof subjects and missing must be arrays")
+    subject_symbols: set[str] = set()
+    for subject in subjects:
+        if not isinstance(subject, Mapping) or set(subject) != {"symbol", "target", "daily_series", "metrics", "benchmark_metrics"}:
+            raise MetricProofError("invalid proof subject fields")
+        symbol = subject.get("symbol")
+        if not isinstance(symbol, str) or not symbol or symbol != symbol.upper() or symbol in subject_symbols:
+            raise MetricProofError("invalid or duplicate proof subject symbol")
+        subject_symbols.add(symbol)
+    missing_by_symbol: dict[str, str] = {}
+    for row in missing:
+        if not isinstance(row, Mapping) or set(row) != {"symbol", "reason"}:
+            raise MetricProofError("invalid proof missing fields")
+        symbol, reason = row.get("symbol"), row.get("reason")
+        if (not isinstance(symbol, str) or not symbol or symbol != symbol.upper()
+                or symbol in missing_by_symbol or symbol in subject_symbols
+                or reason not in {"qualified_stage_target_unavailable", "provider_affine_daily_series_unavailable", "provider_affine_daily_series_behind_observed_peer"}):
+            raise MetricProofError("invalid, duplicate or overlapping proof missing target")
+        missing_by_symbol[symbol] = reason
+    no_target = observed_symbols - selected_targets.keys()
+    missing_daily: set[str] = set()
+    for symbol in selected_targets:
+        try:
+            _load_daily_series(root, symbol, trade_date)
+        except MetricProofUnavailable:
+            missing_daily.add(symbol)
+        except (OSError, ValueError) as exc:
+            raise MetricProofError(f"daily-series integrity failure: {symbol}") from exc
+    expected_missing = {symbol: "qualified_stage_target_unavailable" for symbol in no_target}
+    expected_missing.update({symbol: "provider_affine_daily_series_unavailable" for symbol in missing_daily})
+    expected_missing.update({symbol: "provider_affine_daily_series_behind_observed_peer" for symbol in behind})
+    if missing_by_symbol != expected_missing or subject_symbols != set(selected_targets) - missing_daily - behind:
+        raise MetricProofError("proof subject/missing target partition does not match verified snapshot and daily series")
 
-    for subject in proof.get("subjects") or []:
-        if not isinstance(subject, Mapping):
-            raise MetricProofError("proof subject must be an object")
-        symbol = str(subject.get("symbol") or "").upper()
+    for subject in subjects:
+        # Canonical identity and uniqueness were validated before partitioning.
+        symbol = subject["symbol"]
         target = subject.get("target") or {}
         if not isinstance(target, Mapping):
             raise MetricProofError(f"proof target must be an object: {symbol}")
@@ -462,6 +474,11 @@ def build_proof(root: Path, *, trade_date: str, stage: str, data_plane_commit_sh
         except MetricProofUnavailable:
             continue
 
+    target_dates = [daily_cache[s][1]['prior_last_trade_date'] for s in targets if s in daily_cache]
+    latest_observed = max(target_dates, default=None)
+    behind = {s for s in targets if s in daily_cache and latest_observed is not None
+              and daily_cache[s][1]['prior_last_trade_date'] < latest_observed}
+
     subjects: list[dict[str, Any]] = []
     missing: list[dict[str, str]] = [
         {"symbol": symbol, "reason": "qualified_stage_target_unavailable"}
@@ -471,6 +488,9 @@ def build_proof(root: Path, *, trade_date: str, stage: str, data_plane_commit_sh
         if symbol not in daily_cache:
             missing.append({"symbol": symbol, "reason": "provider_affine_daily_series_unavailable"})
             continue
+        if symbol in behind:
+            missing.append({"symbol":symbol,"reason":"provider_affine_daily_series_behind_observed_peer"})
+            continue
         prior, daily_meta = daily_cache[symbol]
         target = targets[symbol]
         base_metrics = compute_metrics(prior, target_trade_date=trade_date, target_close=_target_price(target, symbol))
@@ -478,7 +498,7 @@ def build_proof(root: Path, *, trade_date: str, stage: str, data_plane_commit_sh
         for benchmark in ("SPY", "QQQ"):
             benchmark_target = targets.get(benchmark)
             benchmark_daily = daily_cache.get(benchmark)
-            if benchmark_target is None or benchmark_daily is None:
+            if benchmark_target is None or benchmark_daily is None or benchmark in behind:
                 benchmark_metrics[benchmark] = None
                 continue
             if benchmark_target["event_time"] != target["event_time"]:

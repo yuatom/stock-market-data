@@ -97,6 +97,8 @@ execution:
   failure_behavior: fail_data_plane_invocation_before_store_commit
   final_store_push_must_not_integrate_remote_changes_after_proof_generation: true
   missing_subject_daily_series_behavior: record_explicit_missing_no_fabrication
+  behind_observed_peer_behavior: record_explicit_missing_no_metric
+  observed_peer_date_is_not_complete_session_calendar_or_freshness_proof: true
   malformed_or_identity_conflicting_daily_series_behavior: fail_integrity_not_missing
 
 consumer_contract:
