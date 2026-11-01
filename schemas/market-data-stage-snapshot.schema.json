@@ -6,7 +6,7 @@
   "properties": {
     "schema_version": {"const": 1},
     "snapshot_id": {"type": "string", "minLength": 1},
-    "stage": {"enum": ["premarket", "open_15m", "open_30m", "open_60m", "close"]},
+    "stage": {"enum": ["premarket", "open_15m", "open_30m", "open_60m", "close", "discovery_open_15m", "discovery_open_30m", "discovery_open_60m", "discovery_close"]},
     "trade_date": {"type": "string", "format": "date"},
     "target_window": {"type": ["object", "null"]},
     "generated_at": {"type": "string", "format": "date-time"},
