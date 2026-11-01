@@ -615,7 +615,12 @@ def _coverage_observability(
         "inherited_ref_count": len(prior_refs),
         "total_ref_count": len(prior_refs) + len(capture_refs),
         "provider_counts": dict(provider_counts),
-        "reason_classes": dict(reason_classes or {}),
+        # Retain one canonical reason per symbol/class in the persisted snapshot.
+        # Raw per-provider attempts remain available in diagnostic results.
+        "reason_classes": {
+            str(symbol).upper(): sorted(set(classes))
+            for symbol, classes in (reason_classes or {}).items()
+        },
         "increment": dict(increment_scope),
         "stage_snapshot": {
             **stage_scope,
