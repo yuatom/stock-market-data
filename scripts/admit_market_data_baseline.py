@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from dynamic_baseline_targets import parse_dynamic_selection
+from fixed_baseline_targets import parse_fixed_selection, resolve_fixed_targets, validate_selection_mix
 from types import SimpleNamespace
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
@@ -494,19 +495,25 @@ def public_summary(report: dict[str, Any]) -> dict[str, Any]:
 def execute(h, writer, *, compute: Path, compute_sha: str, day: str, request_id: str,
             config: dict, universe: dict, access: dict, key: str,
             clock: Callable[[], datetime] = utc_now, dynamic_selector: dict | None = None,
-            discovery_repo: Path | None = None) -> tuple[dict, str]:
+            discovery_repo: Path | None = None, fixed_selector: dict | None = None) -> tuple[dict, str]:
+    validate_selection_mix(fixed_selector=fixed_selector, dynamic_selector=dynamic_selector)
     maturity = config['collector']['twelve_data_daily']['settlement_maturity']['minimum_next_day_et']
     validate_target(day, maturity, clock())
     if not key:
         raise AdmissionError('credential_missing')
     root = writer.repo / 'data/market-data'
-    if dynamic_selector is None:
+    targets = None
+    if dynamic_selector is None and fixed_selector is None:
         candidates = prepare_series(h, root, universe, config, day)
     else:
-        from dynamic_baseline_targets import resolve_dynamic_targets
         try:
-            targets = resolve_dynamic_targets(h, store_repo=writer.repo, store_sha=writer.base,
-                discovery_repo=discovery_repo, selector=dynamic_selector, universe=universe, day=day)
+            if dynamic_selector is not None:
+                from dynamic_baseline_targets import resolve_dynamic_targets
+                targets = resolve_dynamic_targets(h, store_repo=writer.repo, store_sha=writer.base,
+                    discovery_repo=discovery_repo, selector=dynamic_selector, universe=universe, day=day)
+            else:
+                targets = resolve_fixed_targets(h, store_repo=writer.repo, store_sha=writer.base,
+                    selector=fixed_selector, universe=universe)
             candidates = prepare_series(h, root, universe, config, day, targets=targets)
         except Exception:
             raise AdmissionError('contract_invalid') from None
@@ -521,6 +528,8 @@ def execute(h, writer, *, compute: Path, compute_sha: str, day: str, request_id:
     if dynamic_selector is not None:
         report['dynamic_selection'] = dynamic_selector
         report['source_result_commit_sha'] = targets[0]['source_result_commit_sha']
+    if fixed_selector is not None:
+        report['fixed_selection'] = fixed_selector
     writer.report(report)
     started = time.monotonic()
     for candidate in candidates:
@@ -583,6 +592,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--store-repo', required=True)
     parser.add_argument('--request-id', required=True)
     parser.add_argument('--dynamic-selection', default=None)
+    parser.add_argument('--fixed-selection', default=None)
     parser.add_argument('--discovery-repo', default=None)
     args = parser.parse_args(argv)
     os.umask(0o077)
@@ -613,7 +623,8 @@ def main(argv: list[str] | None = None) -> int:
             universe=h.collection.load_collection_universe(compute / 'config/collection-universe.json'),
             access=h.collectors.load_yaml(compute / 'config/market-data-collector-access.yaml'), key=key,
             dynamic_selector=parse_dynamic_selection(args.dynamic_selection),
-            discovery_repo=Path(args.discovery_repo) if args.discovery_repo else None)
+            discovery_repo=Path(args.discovery_repo) if args.discovery_repo else None,
+            fixed_selector=parse_fixed_selection(args.fixed_selection))
         summary = public_summary(report)
         summary.update(store_commit_sha=sha, result_state_path=writer.report_relative,
                        result_blob_sha=git(writer.repo, 'rev-parse', f'{sha}:{writer.report_relative}'))

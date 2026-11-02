@@ -4,12 +4,15 @@ import copy
 import json
 from datetime import datetime
 from unittest.mock import patch
+import unittest
 from pathlib import Path
 
-from test_guarded_history_recovery import RecoveryIntegrationTests, git, DAY, NOW
+import test_guarded_history_recovery as recovery
+
+git, DAY, NOW = recovery.git, recovery.DAY, recovery.NOW
 
 
-class DynamicGuardedRecoveryTests(RecoveryIntegrationTests):
+class DynamicGuardedRecoveryTests(recovery.RecoveryIntegrationFixture, unittest.TestCase):
     def setUp(self):
         super().setUp()
         _, self.discovery = self.new_repo('discovery')

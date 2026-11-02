@@ -5,22 +5,22 @@ Owners remain `config/market-data-store.yaml`, `config/collection-universe.json`
 and `config/store-publication-durability.yaml`. The existing maintenance mode is
 `daily_baseline_rebase`, not a new scheduled mode or another provider.
 
-## Candidate status and intended native route
+## Native route and execution preconditions
 
-**PR CANDIDATE WIRED; NOT ACTIVE ON MAIN:** PR #46 contains the recovery script,
-tests and workflow integration, but remains Draft and unmerged. The route is not
-available from `main` until this candidate passes validation and review and is
-merged. Do not use the current legacy rebase route as a substitute. The workflow
-tests require the ordinary publisher to exclude this mode and the guarded job to
-call the recovery wrapper.
+The supported source entry point is
+`.github/workflows/market-data-collector.yml` on the current `main` branch,
+with mode `daily_baseline_rebase`. The guarded recovery job excludes the generic
+writer and validates the exact Compute and Store commit inputs before it calls
+the recovery wrapper. Use the fixed or dynamic selector only when its target
+proof is valid for the pinned Store commit; omitted selectors preserve their
+documented default behavior.
 
-After the candidate is accepted and merged, use the existing
-`.github/workflows/market-data-collector.yml` on `main` with the existing
-`daily_baseline_rebase` mode: the guarded recovery job excludes the generic
-writer. Supply current ET `trade_date`, full current `expected_compute_sha` and
-full current `expected_store_sha` from their respective repositories. The
-current-day 07:00 ET maturity gate applies. Queued drift stops, never silently
-repins.
+Before an authorized run, verify that the workflow and recovery contract exist
+at the exact Compute SHA being supplied, that the Store SHA is the intended
+current Store main, and that the ET trade date has passed the 07:00 ET maturity
+gate. Queued drift stops; the operation never silently repins. This runbook
+documents an entry point but does not authorize a dispatch. Source merge,
+successful CI, and admission PASS are not trigger authorization.
 
 This is an explicit historical-write operation, not the read-only admission.
 Ordinary continuation, admission PASS, source merge and successful CI do not
@@ -95,3 +95,45 @@ A source PASS is not real recovery. A successful recovery publishes qualified
 history only; verify resulting dates, archive integrity and ordinary append-only
 EOD operation separately. It does not create a research Snapshot, Frozen Input,
 Research result, Publication or Receipt and does not close the five-stage task.
+
+
+## Exact fixed-universe subset selection
+
+The guarded recovery wrapper accepts an optional `fixed_selection` workflow
+input (or `--fixed-selection` in the wrapper CLI). Its JSON shape is:
+
+```json
+{
+  "schema_version": 1,
+  "targets": [
+    {"symbol": "SYMBOL", "index_blob_sha": "40-lowercase-hex-git-blob-sha"}
+  ]
+}
+```
+
+The target array must be nonempty and unique. Every symbol must belong to the
+pinned Compute fixed daily universe; every index SHA must identify that
+symbol's `_index.json` in the exact `expected_store_sha`. The resolver also
+checks provider, asset class, session, interval, semantics, and identity start
+date before any predebit or Provider request. Fixed and dynamic selectors
+cannot be combined. A malformed or stale explicit selector fails closed and
+never falls back to the full fixed universe. Omitting both selectors preserves
+the existing all-fixed-universe default. Existing dynamic-selection provenance
+rules remain unchanged.
+
+The selector scopes the work only. It does not approve changed historical bars.
+The existing revision limits, full-history archive, identity checks, durable
+predebits, atomic Store publication, immutable pin, manifest and remote
+readback requirements still decide whether an attempted recovery can proceed.
+The selector does not confer persistent or future execution authority.
+
+For a one-time selected recovery, after the source is merged and after the user
+authorizes the exact run, use the workflow above with mode
+`daily_baseline_rebase`, today's ET trade date after 07:00 ET, current exact
+Compute main SHA, current exact Store main SHA, and a selector containing the
+approved symbols plus their index blob SHAs from that pinned Store commit.
+Leave `dynamic_selection` empty. A selection of 21 targets means 21 provider
+requests and uses the existing 200/day, 8/minute limits; no symbol outside the
+provided list is rewritten. The other fixed symbols remain on normal
+append-only EOD. A recovery PASS still requires all current quality and
+publication checks and is not a claim that research outputs are complete.

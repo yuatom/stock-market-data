@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from dynamic_baseline_targets import parse_dynamic_selection
+from fixed_baseline_targets import parse_fixed_selection, resolve_fixed_targets, validate_selection_mix
 from typing import Any
 
 MODE = 'daily_baseline_rebase'
@@ -348,7 +349,9 @@ def stage_and_publish(h, writer, entries: list[dict], report: dict, *, compute: 
 
 def recover(h, *, compute: Path, compute_sha: str, repo: Path, store_sha: str, day: str,
             request_id: str, config: dict, universe: dict, access: dict, key: str,
-            clock=now_utc, dynamic_selector: dict | None = None, discovery_repo: Path | None = None) -> dict:
+            clock=now_utc, dynamic_selector: dict | None = None, discovery_repo: Path | None = None,
+            fixed_selector: dict | None = None) -> dict:
+    validate_selection_mix(fixed_selector=fixed_selector, dynamic_selector=dynamic_selector)
     a = admission()
     maturity = config['collector']['twelve_data_daily']['settlement_maturity']['minimum_next_day_et']
     a.validate_target(day, maturity, clock())
@@ -356,14 +359,18 @@ def recover(h, *, compute: Path, compute_sha: str, repo: Path, store_sha: str, d
     if not key:
         raise RecoveryError('credential_missing')
     writer = make_writer(repo, store_sha, day, request_id)
-    if dynamic_selector is None:
+    if dynamic_selector is None and fixed_selector is None:
         entries = original_entries(h, writer.repo, universe, config, day)
         targets = [symbol for symbol, _ in h.collection.daily_universe(universe)]
     else:
-        from dynamic_baseline_targets import resolve_dynamic_targets
         try:
-            selected = resolve_dynamic_targets(h, store_repo=writer.repo, store_sha=store_sha,
-                discovery_repo=discovery_repo, selector=dynamic_selector, universe=universe, day=day)
+            if dynamic_selector is not None:
+                from dynamic_baseline_targets import resolve_dynamic_targets
+                selected = resolve_dynamic_targets(h, store_repo=writer.repo, store_sha=store_sha,
+                    discovery_repo=discovery_repo, selector=dynamic_selector, universe=universe, day=day)
+            else:
+                selected = resolve_fixed_targets(h, store_repo=writer.repo, store_sha=store_sha,
+                    selector=fixed_selector, universe=universe)
             entries = original_entries(h, writer.repo, universe, config, day, targets=selected)
         except Exception:
             raise RecoveryError('original_invalid') from None
@@ -377,6 +384,8 @@ def recover(h, *, compute: Path, compute_sha: str, repo: Path, store_sha: str, d
     if dynamic_selector is not None:
         report['dynamic_selection'] = dynamic_selector
         report['source_result_commit_sha'] = selected[0]['source_result_commit_sha']
+    if fixed_selector is not None:
+        report['fixed_selection'] = fixed_selector
     writer.report(report)
     deadline = time.monotonic() + 600
     budget = config['collector']['budgets']['twelve_data_basic']
@@ -433,6 +442,7 @@ def main(argv=None) -> int:
     for flag in ('trade-date', 'compute-sha', 'store-sha', 'store-repo', 'request-id'):
         p.add_argument('--' + flag, required=True)
     p.add_argument('--dynamic-selection', default=None)
+    p.add_argument('--fixed-selection', default=None)
     p.add_argument('--discovery-repo', default=None)
     args = p.parse_args(argv)
     os.umask(0o077)
@@ -453,7 +463,8 @@ def main(argv=None) -> int:
             access=h.collectors.load_yaml(root / 'config/market-data-collector-access.yaml'),
             key=os.environ.get('TWELVE_DATA_API_KEY', ''),
             dynamic_selector=parse_dynamic_selection(args.dynamic_selection),
-            discovery_repo=Path(args.discovery_repo) if args.discovery_repo else None)
+            discovery_repo=Path(args.discovery_repo) if args.discovery_repo else None,
+            fixed_selector=parse_fixed_selection(args.fixed_selection))
         # Detailed closure paths are available in the private manifest, not public logs.
         public = {k: v for k, v in result.items() if k != 'verified_required_outputs'}
         public['verified_required_output_count'] = len(result['verified_required_outputs'])
