@@ -5,22 +5,22 @@ Owners remain `config/market-data-store.yaml`, `config/collection-universe.json`
 and `config/store-publication-durability.yaml`. The existing maintenance mode is
 `daily_baseline_rebase`, not a new scheduled mode or another provider.
 
-## Candidate status and intended native route
+## Native route and execution preconditions
 
-**PR CANDIDATE WIRED; NOT ACTIVE ON MAIN:** PR #46 contains the recovery script,
-tests and workflow integration, but remains Draft and unmerged. The route is not
-available from `main` until this candidate passes validation and review and is
-merged. Do not use the current legacy rebase route as a substitute. The workflow
-tests require the ordinary publisher to exclude this mode and the guarded job to
-call the recovery wrapper.
+The supported source entry point is
+`.github/workflows/market-data-collector.yml` on the current `main` branch,
+with mode `daily_baseline_rebase`. The guarded recovery job excludes the generic
+writer and validates the exact Compute and Store commit inputs before it calls
+the recovery wrapper. Use the fixed or dynamic selector only when its target
+proof is valid for the pinned Store commit; omitted selectors preserve their
+documented default behavior.
 
-After the candidate is accepted and merged, use the existing
-`.github/workflows/market-data-collector.yml` on `main` with the existing
-`daily_baseline_rebase` mode: the guarded recovery job excludes the generic
-writer. Supply current ET `trade_date`, full current `expected_compute_sha` and
-full current `expected_store_sha` from their respective repositories. The
-current-day 07:00 ET maturity gate applies. Queued drift stops, never silently
-repins.
+Before an authorized run, verify that the workflow and recovery contract exist
+at the exact Compute SHA being supplied, that the Store SHA is the intended
+current Store main, and that the ET trade date has passed the 07:00 ET maturity
+gate. Queued drift stops; the operation never silently repins. This runbook
+documents an entry point but does not authorize a dispatch. Source merge,
+successful CI, and admission PASS are not trigger authorization.
 
 This is an explicit historical-write operation, not the read-only admission.
 Ordinary continuation, admission PASS, source merge and successful CI do not
