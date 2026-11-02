@@ -55,7 +55,7 @@ def _seed(tmp_path: Path, *, spy_event_time=None):
     generated = "2026-09-05T10:00:00-04:00"
     facts = []
     for symbol, price in (("AAA", 170.0), ("SPY", 470.0), ("QQQ", 580.0)):
-        event_time = spy_event_time if symbol == "SPY" and spy_event_time else generated
+        event_time = spy_event_time if symbol == "SPY" and spy_event_time else "2026-09-05T09:59:00-04:00"
         facts.append(
             {
                 "symbol": symbol,
@@ -63,6 +63,7 @@ def _seed(tmp_path: Path, *, spy_event_time=None):
                 "session": "regular",
                 "event_time": event_time,
                 "source_timestamp": event_time,
+                "source_contract": "nasdaq_public_chart_last_sale_volume_v1",
                 "last_sale": price,
                 "reported_volume": 12345.0,
             }
@@ -109,7 +110,179 @@ def _materialize_proof(root: Path, data_plane_commit_sha: str):
     return proof, rel
 
 
+
+def _seed_intraday_stage(
+    tmp_path: Path,
+    *,
+    stage: str,
+    provider: str = "twelve_data_basic",
+    source_contract: str = "twelve_data_basic_regular_1min_v1",
+    price_field: str | None = None,
+    capture_session: str = "regular",
+    fact_session: str | None = None,
+    capture_trade_date: str = "2026-09-05",
+    event_time: str | None = None,
+    source_timestamp: str | None = None,
+    capture_window: dict[str, str] | None = None,
+    snapshot_window: dict[str, str] | None = None,
+    include_both_prices: bool = False,
+):
+    root = tmp_path / "data" / "market-data"
+    for symbol, base in (("AAA", 100.0), ("SPY", 400.0), ("QQQ", 500.0)):
+        store.append_daily_bars(
+            root,
+            provider="twelve_data_basic",
+            symbol=symbol,
+            asset_class="stocks" if symbol == "AAA" else "etf",
+            bars=_bars(base),
+            series_semantics="daily_regular_ohlcv",
+            adjustment_semantics="provider_reported",
+        )
+
+    stage_defaults = {
+        "open_30m": {
+            "snapshot_window": {"start": "09:30", "end": "10:00"},
+            "capture_window": {"start": "09:45", "end": "10:00"},
+            "event_time": "2026-09-05T09:59:00-04:00",
+            "snapshot_generated_at": "2026-09-05T10:01:00-04:00",
+        },
+        "open_60m": {
+            "snapshot_window": {"start": "09:30", "end": "10:30"},
+            "capture_window": {"start": "10:00", "end": "10:30"},
+            "event_time": "2026-09-05T10:29:00-04:00",
+            "snapshot_generated_at": "2026-09-05T10:31:00-04:00",
+        },
+        "close": {
+            "snapshot_window": {"start": "15:45", "end": "16:00"},
+            "capture_window": {"start": "15:45", "end": "16:00"},
+            "event_time": "2026-09-05T15:59:00-04:00",
+            "snapshot_generated_at": "2026-09-05T16:01:00-04:00",
+        },
+    }[stage]
+    event_time = event_time or stage_defaults["event_time"]
+    source_timestamp = event_time if source_timestamp is None else source_timestamp
+    capture_window = capture_window or stage_defaults["capture_window"]
+    snapshot_window = snapshot_window or stage_defaults["snapshot_window"]
+    fact_session = capture_session if fact_session is None else fact_session
+    if price_field is None:
+        price_field = "close" if provider == "twelve_data_basic" else "last_sale"
+
+    facts = []
+    for symbol, price in (("AAA", 170.0), ("SPY", 470.0), ("QQQ", 580.0)):
+        fact = {
+            "symbol": symbol,
+            "asset_class": "stocks" if symbol == "AAA" else "etf",
+            "session": fact_session,
+            "event_time": event_time,
+            "source_timestamp": source_timestamp,
+            "source_contract": source_contract,
+            "reported_volume": 12345.0,
+            price_field: price,
+        }
+        if include_both_prices:
+            fact["last_sale" if price_field == "close" else "close"] = price
+        facts.append(fact)
+
+    capture_path, capture_blob = store.write_capture(
+        root,
+        trade_date=capture_trade_date,
+        session=capture_session,
+        provider=provider,
+        capture_id=f"{stage}-{provider}-{capture_trade_date}",
+        generated_at=stage_defaults["snapshot_generated_at"],
+        actual_data_cutoff=stage_defaults["snapshot_generated_at"],
+        window=capture_window,
+        feed_scope="synthetic fixture shaped from the exact provider capture contract",
+        qualified_facts=facts,
+    )
+    store.write_snapshot(
+        root,
+        stage=stage,
+        trade_date="2026-09-05",
+        snapshot_id=f"{stage}-provider-contract-fixture",
+        generated_at=stage_defaults["snapshot_generated_at"],
+        data_refs=[{"path": capture_path, "blob_sha": capture_blob, "kind": "regular_intraday_capture"}],
+        coverage={"available": len(facts)},
+        missing=[],
+        target_window=snapshot_window,
+        actual_data_cutoff=stage_defaults["snapshot_generated_at"],
+    )
+    return root, capture_path
+
+
 class DeterministicMetricProofTest(unittest.TestCase):
+
+    def test_registered_provider_price_fields_produce_open_stage_metrics(self):
+        cases = (
+            ("open_30m", "twelve_data_basic", "twelve_data_basic_regular_1min_v1", "close",
+             "twelve_data_basic_regular_1min_close"),
+            ("open_60m", "twelve_data_basic", "twelve_data_basic_regular_1min_v1", "close",
+             "twelve_data_basic_regular_1min_close"),
+            ("open_60m", "nasdaq_public_intraday", "nasdaq_public_chart_last_sale_volume_v1", "last_sale",
+             "nasdaq_public_chart_last_sale"),
+            ("close", "twelve_data_basic", "twelve_data_basic_regular_1min_v1", "close",
+             "twelve_data_basic_regular_1min_close"),
+            ("close", "nasdaq_public_intraday", "nasdaq_public_chart_last_sale_volume_v1", "last_sale",
+             "nasdaq_public_chart_last_sale"),
+        )
+        for stage, provider, source_contract, price_field, price_semantics in cases:
+            with self.subTest(stage=stage, provider=provider):
+                root, _ = _seed_intraday_stage(
+                    self.tmp_path / f"{stage}-{provider}",
+                    stage=stage,
+                    provider=provider,
+                    source_contract=source_contract,
+                    price_field=price_field,
+                )
+                proof, _ = proofmod.build_proof(
+                    root,
+                    trade_date="2026-09-05",
+                    stage=stage,
+                    data_plane_commit_sha="f" * 40,
+                )
+                self.assertEqual({row["symbol"] for row in proof["subjects"]}, {"AAA", "SPY", "QQQ"})
+                aaa = next(row for row in proof["subjects"] if row["symbol"] == "AAA")
+                self.assertEqual(aaa["target"]["price_field"], price_field)
+                self.assertEqual(aaa["target"]["price_semantics"], price_semantics)
+                self.assertEqual(aaa["target"][price_field], 170.0)
+                self.assertNotIn("close" if price_field == "last_sale" else "last_sale", aaa["target"])
+                self.assertEqual(aaa["metrics"]["returns_pct"]["1session"], round((170.0 / 159.0 - 1) * 100, 6))
+                self.assertEqual(aaa["metrics"]["moving_averages"]["ma20"], 149.5)
+                self.assertEqual(aaa["benchmark_metrics"]["SPY"]["status"], "available")
+
+    def test_registered_price_source_rejects_wrong_identity_or_time_context(self):
+        cases = (
+            ("unknown provider", {"provider": "unregistered_provider",
+                                  "source_contract": "twelve_data_basic_regular_1min_v1",
+                                  "price_field": "last_sale"}),
+            ("unknown contract", {"provider": "nasdaq_public_intraday",
+                                   "source_contract": "unregistered_contract"}),
+            ("ambiguous prices", {"include_both_prices": True}),
+            ("capture date mismatch", {"capture_trade_date": "2026-09-04"}),
+            ("capture session mismatch", {"capture_session": "premarket"}),
+            ("fact session mismatch", {"fact_session": "premarket"}),
+            ("source timestamp mismatch", {"source_timestamp": "2026-09-05T10:28:00-04:00"}),
+            ("capture window mismatch", {"capture_window": {"start": "09:30", "end": "10:00"}}),
+            ("stage target window mismatch", {"snapshot_window": {"start": "09:30", "end": "10:29"}}),
+            ("outside target window", {"event_time": "2026-09-05T10:30:00-04:00",
+                                       "capture_window": {"start": "10:00", "end": "10:31"}}),
+        )
+        for name, overrides in cases:
+            with self.subTest(case=name):
+                root, _ = _seed_intraday_stage(
+                    self.tmp_path / name.replace(" ", "-"),
+                    stage="open_60m",
+                    **overrides,
+                )
+                with self.assertRaises(proofmod.MetricProofError):
+                    proofmod.build_proof(
+                        root,
+                        trade_date="2026-09-05",
+                        stage="open_60m",
+                        data_plane_commit_sha="e" * 40,
+                    )
+
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.tmp_path = Path(self.temp.name)
@@ -197,7 +370,7 @@ class DeterministicMetricProofTest(unittest.TestCase):
         self.assertEqual({item["symbol"] for item in proof["missing"]}, {"AAA"})
 
     def test_intraday_relative_strength_requires_exact_target_timestamp_alignment(self):
-        root, _ = _seed(self.tmp_path, spy_event_time="2026-09-05T09:59:00-04:00")
+        root, _ = _seed(self.tmp_path, spy_event_time="2026-09-05T09:58:00-04:00")
         proof, _ = proofmod.build_proof(root, trade_date="2026-09-05", stage="open_30m", data_plane_commit_sha="c" * 40)
         aaa = next(item for item in proof["subjects"] if item["symbol"] == "AAA")
         self.assertIsNone(aaa["benchmark_metrics"]["SPY"])
@@ -255,7 +428,7 @@ class DeterministicMetricProofTest(unittest.TestCase):
     def test_reference_verifier_rejects_stale_snapshot_referenced_observation(self):
         root, current_capture_path = _seed(self.tmp_path)
         current_capture_blob = proofmod.git_blob_sha_bytes((root / current_capture_path).read_bytes())
-        old_time = "2026-09-05T09:59:00-04:00"
+        old_time = "2026-09-05T09:58:00-04:00"
         old_path, old_blob = store.write_capture(
             root,
             trade_date="2026-09-05",
@@ -272,6 +445,7 @@ class DeterministicMetricProofTest(unittest.TestCase):
                 "session": "regular",
                 "event_time": old_time,
                 "source_timestamp": old_time,
+                "source_contract": "nasdaq_public_chart_last_sale_volume_v1",
                 "last_sale": 169.0,
                 "reported_volume": 12000.0,
             }],
