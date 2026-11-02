@@ -450,6 +450,11 @@ def _target_observations(
             by_instant: dict[datetime, list[dict[str, Any]]] = {}
             for instant, candidate in observations:
                 by_instant.setdefault(instant, []).append(candidate)
+            # The snapshot contains the complete qualified observation set for
+            # this owner window. Any contradictory same-instant facts make
+            # that set ambiguous, even when a later instant would win target
+            # selection. Keep this Open-stage rule independent of ref order;
+            # Close retains its established selected-latest rule above.
             for instant, candidates in by_instant.items():
                 first = candidates[0]
                 first_field = str(first.get("price_field") or "")
@@ -657,6 +662,9 @@ def build_proof(root: Path, *, trade_date: str, stage: str, data_plane_commit_sh
             if benchmark_target is None or benchmark_daily is None or benchmark in behind:
                 benchmark_metrics[benchmark] = None
                 continue
+            # Target selection remains stage-specific (including Close's
+            # established selector); this shared benchmark gate compares the
+            # selected source timestamps as instants for Open and Close.
             if _event_instant(benchmark_target["event_time"], benchmark) != _event_instant(
                 target["event_time"], symbol
             ):
