@@ -5,6 +5,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from itertools import permutations
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -277,6 +278,108 @@ def _business_signature(proof):
     }, sort_keys=True)
 
 
+def _replace_symbol_timestamp(root: Path, *, stage: str, symbol: str, event_time: str):
+    snapshot, _, _ = proofmod._load_snapshot(root, "2026-09-05", stage)
+    original_ref = snapshot["data_refs"][0]
+    original_capture = json.loads((root / original_ref["path"]).read_text())
+    facts = json.loads(json.dumps(original_capture["qualified_facts"]))
+    for fact in facts:
+        if fact["symbol"] == symbol:
+            fact["event_time"] = event_time
+            fact["source_timestamp"] = event_time
+    capture_path, capture_blob = store.write_capture(
+        root,
+        trade_date="2026-09-05",
+        session=original_capture["session"],
+        provider=original_capture["provider"],
+        capture_id=f"{stage}-{symbol}-timestamp-replaced",
+        generated_at="2026-09-05T20:00:00+00:00",
+        actual_data_cutoff="2026-09-05T20:00:00+00:00",
+        window=original_capture["window"],
+        feed_scope="same source capture with one equivalent timezone representation",
+        qualified_facts=facts,
+    )
+    store.write_snapshot(
+        root,
+        stage=stage,
+        trade_date="2026-09-05",
+        snapshot_id=f"{stage}-{symbol}-timestamp-replaced",
+        generated_at="2026-09-05T20:15:00+00:00",
+        data_refs=[{"path": capture_path, "blob_sha": capture_blob,
+                    "kind": "regular_intraday_capture"}],
+        coverage={"available": len(facts)},
+        missing=[],
+        target_window=snapshot["target_window"],
+        actual_data_cutoff="2026-09-05T20:00:00+00:00",
+    )
+
+
+def _write_three_timestamp_facts(root: Path, *, stage: str, provider: str,
+                                 source_contract: str, price_field: str, specs,
+                                 order):
+    snapshot, _, _ = proofmod._load_snapshot(root, "2026-09-05", stage)
+    original_ref = snapshot["data_refs"][0]
+    original_capture = json.loads((root / original_ref["path"]).read_text())
+    benchmark_facts = [
+        json.loads(json.dumps(fact))
+        for fact in original_capture["qualified_facts"]
+        if fact["symbol"] != "AAA"
+    ]
+    bench_path, bench_blob = store.write_capture(
+        root,
+        trade_date="2026-09-05",
+        session="regular",
+        provider=provider,
+        capture_id=f"{stage}-{provider}-benchmark-only",
+        generated_at="2026-09-05T20:00:00+00:00",
+        actual_data_cutoff="2026-09-05T20:00:00+00:00",
+        window=original_capture["window"],
+        feed_scope="benchmark-only fixture capture",
+        qualified_facts=benchmark_facts,
+    )
+    refs = [
+        {"path": bench_path, "blob_sha": bench_blob, "kind": "regular_intraday_capture"}
+    ]
+    observation_refs = []
+    source_fact = next(fact for fact in original_capture["qualified_facts"]
+                       if fact["symbol"] == "AAA")
+    for observation_id, event_time, price in specs:
+        fact = json.loads(json.dumps(source_fact))
+        fact["event_time"] = event_time
+        fact["source_timestamp"] = event_time
+        fact["source_contract"] = source_contract
+        fact[price_field] = price
+        capture_path, capture_blob = store.write_capture(
+            root,
+            trade_date="2026-09-05",
+            session="regular",
+            provider=provider,
+            capture_id=f"{stage}-{provider}-aaa-{observation_id}",
+            generated_at="2026-09-05T20:00:00+00:00",
+            actual_data_cutoff="2026-09-05T20:00:00+00:00",
+            window=original_capture["window"],
+            feed_scope="single-symbol timestamp-order fixture",
+            qualified_facts=[fact],
+        )
+        observation_refs.append({
+            "path": capture_path, "blob_sha": capture_blob,
+            "kind": "regular_intraday_capture",
+        })
+    refs.extend(observation_refs[index] for index in order)
+    store.write_snapshot(
+        root,
+        stage=stage,
+        trade_date="2026-09-05",
+        snapshot_id=f"{stage}-{provider}-aaa-three-observations",
+        generated_at="2026-09-05T20:15:00+00:00",
+        data_refs=refs,
+        coverage={"available": 5},
+        missing=[],
+        target_window=snapshot["target_window"],
+        actual_data_cutoff="2026-09-05T20:00:00+00:00",
+    )
+
+
 class DeterministicMetricProofTest(unittest.TestCase):
 
     def test_close_build_and_verify_reject_snapshot_with_open_stage_owner_window(self):
@@ -531,6 +634,112 @@ class DeterministicMetricProofTest(unittest.TestCase):
                                            if fact["symbol"] == "AAA")
                         self.assertEqual(aaa["target"]["event_time"], source_fact["event_time"])
                         proofmod.verify_proof_source_blobs(root, proof)
+
+    def test_single_symbol_timezone_representation_preserves_benchmark_metrics(self):
+        sources = (
+            ("twelve_data_basic", "twelve_data_basic_regular_1min_v1", "close"),
+            ("nasdaq_public_intraday", "nasdaq_public_chart_last_sale_volume_v1", "last_sale"),
+        )
+        equivalent_utc = {
+            "open_30m": "2026-09-05T13:59:00+00:00",
+            "open_60m": "2026-09-05T14:29:00+00:00",
+        }
+        for stage in ("open_30m", "open_60m"):
+            for provider, source_contract, price_field in sources:
+                with self.subTest(stage=stage, provider=provider):
+                    base_root, _ = _seed_intraday_stage(
+                        self.tmp_path / f"{stage}-{provider}-benchmark-et",
+                        stage=stage,
+                        provider=provider,
+                        source_contract=source_contract,
+                        price_field=price_field,
+                    )
+                    changed_root, _ = _seed_intraday_stage(
+                        self.tmp_path / f"{stage}-{provider}-benchmark-single-symbol-utc",
+                        stage=stage,
+                        provider=provider,
+                        source_contract=source_contract,
+                        price_field=price_field,
+                    )
+                    _replace_symbol_timestamp(
+                        changed_root,
+                        stage=stage,
+                        symbol="AAA",
+                        event_time=equivalent_utc[stage],
+                    )
+                    base_proof, _ = proofmod.build_proof(
+                        base_root, trade_date="2026-09-05", stage=stage,
+                        data_plane_commit_sha="a" * 40,
+                    )
+                    changed_proof, _ = proofmod.build_proof(
+                        changed_root, trade_date="2026-09-05", stage=stage,
+                        data_plane_commit_sha="a" * 40,
+                    )
+                    aaa = next(row for row in changed_proof["subjects"] if row["symbol"] == "AAA")
+                    self.assertEqual(aaa["target"]["event_time"], equivalent_utc[stage])
+                    self.assertEqual(aaa["benchmark_metrics"]["SPY"]["status"], "available")
+                    self.assertEqual(aaa["benchmark_metrics"]["QQQ"]["status"], "available")
+                    self.assertEqual(_business_signature(base_proof), _business_signature(changed_proof))
+                    proofmod.verify_proof_source_blobs(changed_root, changed_proof)
+
+    def test_open_conflicts_at_any_instant_are_rejected_for_all_record_orders(self):
+        sources = (
+            ("twelve_data_basic", "twelve_data_basic_regular_1min_v1", "close"),
+            ("nasdaq_public_intraday", "nasdaq_public_chart_last_sale_volume_v1", "last_sale"),
+        )
+        observations = {
+            "open_30m": (
+                ("earlier", "2026-09-05T09:57:00-04:00", 170.0),
+                ("conflict", "2026-09-05T13:57:00+00:00", 180.0),
+                ("newest", "2026-09-05T09:59:00-04:00", 190.0),
+            ),
+            "open_60m": (
+                ("earlier", "2026-09-05T10:27:00-04:00", 170.0),
+                ("conflict", "2026-09-05T14:27:00+00:00", 180.0),
+                ("newest", "2026-09-05T10:29:00-04:00", 190.0),
+            ),
+        }
+        for stage in ("open_30m", "open_60m"):
+            for provider, source_contract, price_field in sources:
+                for order in permutations(range(3)):
+                    with self.subTest(stage=stage, provider=provider, order=order):
+                        root, _ = _seed_intraday_stage(
+                            self.tmp_path / f"{stage}-{provider}-three-instant-conflict-{''.join(map(str, order))}",
+                            stage=stage,
+                            provider=provider,
+                            source_contract=source_contract,
+                            price_field=price_field,
+                        )
+                        _write_three_timestamp_facts(
+                            root,
+                            stage=stage,
+                            provider=provider,
+                            source_contract=source_contract,
+                            price_field=price_field,
+                            specs=observations[stage],
+                            order=order,
+                        )
+                        with self.assertRaisesRegex(proofmod.MetricProofError, "ambiguous selected target"):
+                            proofmod.build_proof(
+                                root, trade_date="2026-09-05", stage=stage,
+                                data_plane_commit_sha="a" * 40,
+                            )
+                        snapshot, snapshot_rel, snapshot_blob = proofmod._load_snapshot(
+                            root, "2026-09-05", stage
+                        )
+                        forged = {
+                            "trade_date": "2026-09-05",
+                            "stage": stage,
+                            "snapshot": {
+                                "path": snapshot_rel,
+                                "blob_sha": snapshot_blob,
+                                "snapshot_id": snapshot["snapshot_id"],
+                            },
+                            "subjects": [],
+                            "missing": [],
+                        }
+                        with self.assertRaisesRegex(proofmod.MetricProofError, "ambiguous selected target"):
+                            proofmod.verify_proof_source_blobs(root, forged)
 
     def test_open_same_instant_conflicting_prices_fail_build_and_reference_verification(self):
         sources = (
