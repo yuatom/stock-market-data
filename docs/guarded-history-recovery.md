@@ -95,3 +95,45 @@ A source PASS is not real recovery. A successful recovery publishes qualified
 history only; verify resulting dates, archive integrity and ordinary append-only
 EOD operation separately. It does not create a research Snapshot, Frozen Input,
 Research result, Publication or Receipt and does not close the five-stage task.
+
+
+## Exact fixed-universe subset selection
+
+The guarded recovery wrapper accepts an optional `fixed_selection` workflow
+input (or `--fixed-selection` in the wrapper CLI). Its JSON shape is:
+
+```json
+{
+  "schema_version": 1,
+  "targets": [
+    {"symbol": "SYMBOL", "index_blob_sha": "40-lowercase-hex-git-blob-sha"}
+  ]
+}
+```
+
+The target array must be nonempty and unique. Every symbol must belong to the
+pinned Compute fixed daily universe; every index SHA must identify that
+symbol's `_index.json` in the exact `expected_store_sha`. The resolver also
+checks provider, asset class, session, interval, semantics, and identity start
+date before any predebit or Provider request. Fixed and dynamic selectors
+cannot be combined. A malformed or stale explicit selector fails closed and
+never falls back to the full fixed universe. Omitting both selectors preserves
+the existing all-fixed-universe default. Existing dynamic-selection provenance
+rules remain unchanged.
+
+The selector scopes the work only. It does not approve changed historical bars.
+The existing revision limits, full-history archive, identity checks, durable
+predebits, atomic Store publication, immutable pin, manifest and remote
+readback requirements still decide whether an attempted recovery can proceed.
+The selector does not confer persistent or future execution authority.
+
+For a one-time selected recovery, after the source is merged and after the user
+authorizes the exact run, use the workflow above with mode
+`daily_baseline_rebase`, today's ET trade date after 07:00 ET, current exact
+Compute main SHA, current exact Store main SHA, and a selector containing the
+approved symbols plus their index blob SHAs from that pinned Store commit.
+Leave `dynamic_selection` empty. A selection of 21 targets means 21 provider
+requests and uses the existing 200/day, 8/minute limits; no symbol outside the
+provided list is rewritten. The other fixed symbols remain on normal
+append-only EOD. A recovery PASS still requires all current quality and
+publication checks and is not a claim that research outputs are complete.

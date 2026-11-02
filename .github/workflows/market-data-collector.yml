@@ -31,6 +31,10 @@ on:
         description: Optional JSON proof selecting existing failed dynamic daily histories (guarded modes only)
         required: false
         type: string
+      fixed_selection:
+        description: Optional exact JSON selector for fixed-universe daily histories, pinned to each Store index blob
+        required: false
+        type: string
       expected_compute_sha:
         description: Required exact current main SHA for daily_baseline_admission and daily_baseline_rebase only
         required: false
@@ -56,8 +60,28 @@ permissions:
   contents: read
 
 jobs:
+  selector_guard:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reject ignored or mixed explicit target selectors
+        env:
+          MODE: ${{ inputs.mode }}
+          DYNAMIC_SELECTION: ${{ inputs.dynamic_selection }}
+          FIXED_SELECTION: ${{ inputs.fixed_selection }}
+        shell: python
+        run: |
+          import os
+          dynamic = bool(os.environ.get('DYNAMIC_SELECTION'))
+          fixed = bool(os.environ.get('FIXED_SELECTION'))
+          mode = os.environ.get('MODE', '')
+          if dynamic and fixed:
+              raise SystemExit('fixed and dynamic selections cannot be combined')
+          if (dynamic or fixed) and mode not in ('daily_baseline_admission', 'daily_baseline_rebase'):
+              raise SystemExit('explicit target selection requires a guarded daily baseline mode')
+
   run:
-    if: inputs.mode != 'daily_baseline_admission' && inputs.mode != 'daily_baseline_rebase' && (github.event_name != 'workflow_dispatch' || inputs.dynamic_selection == '')
+    if: inputs.mode != 'daily_baseline_admission' && inputs.mode != 'daily_baseline_rebase' && (github.event_name != 'workflow_dispatch' || (inputs.dynamic_selection == '' && inputs.fixed_selection == ''))
     uses: ./.github/workflows/market-data-collector-runtime.yml
     with:
       trigger_kind: ${{ github.event_name }}
@@ -131,12 +155,16 @@ jobs:
           EXPECTED_STORE_SHA: ${{ inputs.expected_store_sha }}
           TRADE_DATE: ${{ inputs.trade_date }}
           DYNAMIC_SELECTION: ${{ inputs.dynamic_selection }}
+          FIXED_SELECTION: ${{ inputs.fixed_selection }}
         shell: bash
         run: |
           set -euo pipefail
           selection_args=()
           if [[ -n "$DYNAMIC_SELECTION" ]]; then
-            selection_args=(--dynamic-selection "$DYNAMIC_SELECTION" --discovery-repo ../discovery)
+            selection_args+=(--dynamic-selection "$DYNAMIC_SELECTION" --discovery-repo ../discovery)
+          fi
+          if [[ -n "$FIXED_SELECTION" ]]; then
+            selection_args+=(--fixed-selection "$FIXED_SELECTION")
           fi
           python scripts/admit_market_data_baseline.py \
             --trade-date "$TRADE_DATE" \
@@ -218,12 +246,16 @@ jobs:
           EXPECTED_STORE_SHA: ${{ inputs.expected_store_sha }}
           TRADE_DATE: ${{ inputs.trade_date }}
           DYNAMIC_SELECTION: ${{ inputs.dynamic_selection }}
+          FIXED_SELECTION: ${{ inputs.fixed_selection }}
         shell: bash
         run: |
           set -euo pipefail
           selection_args=()
           if [[ -n "$DYNAMIC_SELECTION" ]]; then
-            selection_args=(--dynamic-selection "$DYNAMIC_SELECTION" --discovery-repo ../discovery)
+            selection_args+=(--dynamic-selection "$DYNAMIC_SELECTION" --discovery-repo ../discovery)
+          fi
+          if [[ -n "$FIXED_SELECTION" ]]; then
+            selection_args+=(--fixed-selection "$FIXED_SELECTION")
           fi
           python scripts/recover_market_data_baseline.py \
             --trade-date "$TRADE_DATE" \

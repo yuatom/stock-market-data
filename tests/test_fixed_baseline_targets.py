@@ -98,8 +98,9 @@ class FixedBaselineTargetsTest(unittest.TestCase):
     def test_empty_repeated_unknown_extra_and_bad_format_targets_are_rejected(self):
         cases = [
             {"schema_version": 1, "targets": []},
+            {"schema_version": 1, "targets": [{"symbol": self.symbols[0], "index_blob_sha": self.blobs[self.symbols[0]]}], "extra": True},
             self.selector([self.symbols[0], self.symbols[0]]),
-            self.selector(["UNKNOWN"]),
+            {"schema_version": 1, "targets": [{"symbol": "UNKNOWN", "index_blob_sha": "0" * 40}]},
             {"schema_version": 1, "targets": [{"symbol": "s01", "index_blob_sha": self.blobs[self.symbols[0]]}]},
             {"schema_version": 1, "targets": [
                 {"symbol": self.symbols[0], "index_blob_sha": self.blobs[self.symbols[0]], "extra": True}
