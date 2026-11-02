@@ -220,7 +220,10 @@ collector:
     runtime_short_wait_may_capture_on_demand_or_scheduled_collector_handoff: true
     runtime_must_not_wait_for_late_scheduled_workflow_beyond_bounded_window: true
     report_schedule_shift_required: false
-    daily_series_maturity_schedule_must_finish_before_premarket_report: true
+    daily_series_maturity_schedule_must_finish_before_premarket_report: false
+    premarket_daily_series_policy:
+      may_use_existing_qualified_previous_session_baseline: true
+      missing_or_unqualified_history_blocks_independent_observation: false
     live_premarket_scheduled: true
     live_premarket_source_contract: config/market-data-collector-access.yaml#nasdaq_public_extended_premarket
     shadow_probe_does_not_change_live_source_status: true
