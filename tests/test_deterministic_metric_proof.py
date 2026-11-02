@@ -540,8 +540,9 @@ class DeterministicMetricProofTest(unittest.TestCase):
         equivalent_utc = {
             "open_30m": "2026-09-05T13:59:00+00:00",
             "open_60m": "2026-09-05T14:29:00+00:00",
+            "close": "2026-09-05T19:59:00+00:00",
         }
-        for stage in ("open_30m", "open_60m"):
+        for stage in ("open_30m", "open_60m", "close"):
             for provider, source_contract, price_field in sources:
                 for reverse_refs in (False, True):
                     for reverse_facts in (False, True):
@@ -591,57 +592,61 @@ class DeterministicMetricProofTest(unittest.TestCase):
                                 proofmod.verify_proof_source_blobs(root, forged)
 
     def test_open_same_instant_equal_prices_are_accepted_with_stable_source_refs(self):
-        source = ("twelve_data_basic", "twelve_data_basic_regular_1min_v1", "close")
+        sources = (
+            ("twelve_data_basic", "twelve_data_basic_regular_1min_v1", "close"),
+            ("nasdaq_public_intraday", "nasdaq_public_chart_last_sale_volume_v1", "last_sale"),
+        )
         equivalent_utc = {
             "open_30m": "2026-09-05T13:59:00+00:00",
             "open_60m": "2026-09-05T14:29:00+00:00",
         }
         for stage in ("open_30m", "open_60m"):
-            selected = []
-            signatures = []
-            for reverse_refs in (False, True):
-                for reverse_facts in (False, True):
-                    with self.subTest(stage=stage, reverse_refs=reverse_refs, reverse_facts=reverse_facts):
-                        provider, source_contract, price_field = source
-                        root, _ = _seed_intraday_stage(
-                            self.tmp_path / f"{stage}-same-instant-equal-{reverse_refs}-{reverse_facts}",
-                            stage=stage,
-                            provider=provider,
-                            source_contract=source_contract,
-                            price_field=price_field,
-                            reverse_facts=reverse_facts,
-                        )
-                        _add_offset_capture(
-                            root,
-                            stage=stage,
-                            provider=provider,
-                            source_contract=source_contract,
-                            price_field=price_field,
-                            event_time=equivalent_utc[stage],
-                            price_delta=0,
-                            reverse_refs=reverse_refs,
-                            reverse_facts=reverse_facts,
-                        )
-                        proof, _ = proofmod.build_proof(
-                            root,
-                            trade_date="2026-09-05",
-                            stage=stage,
-                            data_plane_commit_sha="a" * 40,
-                        )
-                        aaa = next(row for row in proof["subjects"] if row["symbol"] == "AAA")
-                        self.assertEqual(aaa["target"][price_field], 170.0)
-                        source_capture = json.loads((root / aaa["target"]["capture_path"]).read_text())
-                        source_fact = next(fact for fact in source_capture["qualified_facts"]
-                                           if fact["symbol"] == "AAA")
-                        self.assertEqual(aaa["target"]["event_time"], source_fact["event_time"])
-                        selected.append((
-                            aaa["target"]["capture_path"],
-                            aaa["target"]["event_time"],
-                        ))
-                        signatures.append(_business_signature(proof))
-                        proofmod.verify_proof_source_blobs(root, proof)
-            self.assertTrue(all(item == selected[0] for item in selected[1:]))
-            self.assertTrue(all(signature == signatures[0] for signature in signatures[1:]))
+            for provider, source_contract, price_field in sources:
+                selected = []
+                signatures = []
+                for reverse_refs in (False, True):
+                    for reverse_facts in (False, True):
+                        with self.subTest(stage=stage, provider=provider, reverse_refs=reverse_refs,
+                                          reverse_facts=reverse_facts):
+                            root, _ = _seed_intraday_stage(
+                                self.tmp_path / f"{stage}-{provider}-same-instant-equal-{reverse_refs}-{reverse_facts}",
+                                stage=stage,
+                                provider=provider,
+                                source_contract=source_contract,
+                                price_field=price_field,
+                                reverse_facts=reverse_facts,
+                            )
+                            _add_offset_capture(
+                                root,
+                                stage=stage,
+                                provider=provider,
+                                source_contract=source_contract,
+                                price_field=price_field,
+                                event_time=equivalent_utc[stage],
+                                price_delta=0,
+                                reverse_refs=reverse_refs,
+                                reverse_facts=reverse_facts,
+                            )
+                            proof, _ = proofmod.build_proof(
+                                root,
+                                trade_date="2026-09-05",
+                                stage=stage,
+                                data_plane_commit_sha="a" * 40,
+                            )
+                            aaa = next(row for row in proof["subjects"] if row["symbol"] == "AAA")
+                            self.assertEqual(aaa["target"][price_field], 170.0)
+                            source_capture = json.loads((root / aaa["target"]["capture_path"]).read_text())
+                            source_fact = next(fact for fact in source_capture["qualified_facts"]
+                                               if fact["symbol"] == "AAA")
+                            self.assertEqual(aaa["target"]["event_time"], source_fact["event_time"])
+                            selected.append((
+                                aaa["target"]["capture_path"],
+                                aaa["target"]["event_time"],
+                            ))
+                            signatures.append(_business_signature(proof))
+                            proofmod.verify_proof_source_blobs(root, proof)
+                self.assertTrue(all(item == selected[0] for item in selected[1:]))
+                self.assertTrue(all(signature == signatures[0] for signature in signatures[1:]))
 
     def test_registered_provider_price_fields_produce_open_stage_metrics(self):
         cases = (
