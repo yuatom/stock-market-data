@@ -212,6 +212,96 @@ def _seed_intraday_stage(
 
 class DeterministicMetricProofTest(unittest.TestCase):
 
+    def test_close_build_and_verify_reject_snapshot_with_open_stage_owner_window(self):
+        root, capture_path = _seed_intraday_stage(
+            self.tmp_path / "close-owner-window", stage="close"
+        )
+        valid_proof, _ = proofmod.build_proof(
+            root,
+            trade_date="2026-09-05",
+            stage="close",
+            data_plane_commit_sha="d" * 40,
+        )
+        capture_blob = proofmod.git_blob_sha_bytes((root / capture_path).read_bytes())
+        invalid_snapshot_path, _ = store.write_snapshot(
+            root,
+            stage="close",
+            trade_date="2026-09-05",
+            snapshot_id="close-open-window-owner-violation",
+            generated_at="2026-09-05T16:02:00-04:00",
+            data_refs=[{"path": capture_path, "blob_sha": capture_blob,
+                        "kind": "regular_intraday_capture"}],
+            coverage={"available": 3},
+            missing=[],
+            target_window={"start": "09:30", "end": "10:30"},
+            actual_data_cutoff="2026-09-05T16:02:00-04:00",
+        )
+
+        with self.assertRaisesRegex(proofmod.MetricProofError, "close snapshot target window"):
+            proofmod.build_proof(
+                root,
+                trade_date="2026-09-05",
+                stage="close",
+                data_plane_commit_sha="d" * 40,
+            )
+
+        forged = json.loads(json.dumps(valid_proof))
+        forged["snapshot"] = {
+            "path": invalid_snapshot_path,
+            "blob_sha": proofmod.git_blob_sha_bytes((root / invalid_snapshot_path).read_bytes()),
+            "snapshot_id": "close-open-window-owner-violation",
+        }
+        with self.assertRaisesRegex(proofmod.MetricProofError, "close snapshot target window"):
+            proofmod.verify_proof_source_blobs(root, forged)
+
+    def test_open_stage_and_capture_windows_are_half_open_for_each_registered_source(self):
+        sources = (
+            ("twelve_data_basic", "twelve_data_basic_regular_1min_v1", "close"),
+            ("nasdaq_public_intraday", "nasdaq_public_chart_last_sale_volume_v1", "last_sale"),
+        )
+        stages = (
+            ("open_30m", "09:59", "10:00", "10:01", {"start": "09:45", "end": "10:02"},
+             {"start": "09:45", "end": "09:58"}, "09:57", "09:58", "09:59"),
+            ("open_60m", "10:29", "10:30", "10:31", {"start": "10:00", "end": "10:32"},
+             {"start": "10:00", "end": "10:28"}, "10:27", "10:28", "10:29"),
+        )
+        for stage, before, exact_end, after, broad_capture_window, capture_boundary_window, cap_before, cap_end, cap_after in stages:
+            for provider, contract, price_field in sources:
+                for boundary, event_clock, capture_window, should_pass in (
+                    ("stage-before", before, broad_capture_window, True),
+                    ("stage-end", exact_end, broad_capture_window, False),
+                    ("stage-after", after, broad_capture_window, False),
+                    ("capture-before", cap_before, capture_boundary_window, True),
+                    ("capture-end", cap_end, capture_boundary_window, False),
+                    ("capture-after", cap_after, capture_boundary_window, False),
+                ):
+                    with self.subTest(stage=stage, provider=provider, boundary=boundary):
+                        root, _ = _seed_intraday_stage(
+                            self.tmp_path / f"{stage}-{provider}-{boundary}",
+                            stage=stage,
+                            provider=provider,
+                            source_contract=contract,
+                            price_field=price_field,
+                            event_time=f"2026-09-05T{event_clock}:00-04:00",
+                            capture_window=capture_window,
+                        )
+                        if should_pass:
+                            proof, _ = proofmod.build_proof(
+                                root,
+                                trade_date="2026-09-05",
+                                stage=stage,
+                                data_plane_commit_sha="c" * 40,
+                            )
+                            proofmod.verify_proof_source_blobs(root, proof)
+                        else:
+                            with self.assertRaises(proofmod.MetricProofError):
+                                proofmod.build_proof(
+                                    root,
+                                    trade_date="2026-09-05",
+                                    stage=stage,
+                                    data_plane_commit_sha="c" * 40,
+                                )
+
     def test_registered_provider_price_fields_produce_open_stage_metrics(self):
         cases = (
             ("open_30m", "twelve_data_basic", "twelve_data_basic_regular_1min_v1", "close",
