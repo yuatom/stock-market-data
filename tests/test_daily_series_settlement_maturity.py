@@ -27,7 +27,7 @@ def config() -> dict:
 
 
 class DailySeriesSettlementMaturityTest(unittest.TestCase):
-    def test_winter_premarket_can_use_prior_baseline_without_current_date_append(self) -> None:
+    def test_settlement_maturity_blocks_early_current_date_and_accepts_past_date(self) -> None:
         now = datetime(2026, 11, 2, 6, 30, tzinfo=ET)
 
         current_date_mature, current_reason = MODULE.daily_series_settlement_mature(
@@ -35,6 +35,7 @@ class DailySeriesSettlementMaturityTest(unittest.TestCase):
             config=config(),
             now_et=now,
         )
+        # This helper answers only whether the requested trade date is mature; it does not inspect stored baseline quality or consumer eligibility.
         prior_session_mature, prior_reason = MODULE.daily_series_settlement_mature(
             trade_date="2026-10-30",
             config=config(),
