@@ -20,7 +20,7 @@ UNAVAILABLE = "provider_affine_daily_series_unavailable"
 def _stage_seed(tmp_path, stage, *, unpriced=False):
     root, _ = _seed(tmp_path)
     end = {"open_30m": "10:00", "open_60m": "10:30", "close": "16:00"}[stage]
-    event = "15:59" if stage == "close" else end
+    event = {"open_30m": "09:59", "open_60m": "10:29", "close": "15:59"}[stage]
     timestamp = f"{TRADE_DATE}T{event}:00-04:00"
     window = {"start": "15:45" if stage == "close" else "09:30", "end": end}
     facts = [
@@ -49,7 +49,7 @@ def _stage_seed(tmp_path, stage, *, unpriced=False):
         # The shared seed already has an Open30 snapshot at :00. Publish
         # this independent synthetic snapshot later without weakening CAS.
         snapshot_id=f"identity-proof-{stage}",
-        generated_at=f"{TRADE_DATE}T{event}:01-04:00",
+        generated_at=f"{TRADE_DATE}T{end}:01-04:00",
         data_refs=[{"path": path, "blob_sha": blob, "kind": "regular_intraday_capture"}],
         coverage={"available": 3}, missing=[], target_window=window,
         actual_data_cutoff=timestamp,
