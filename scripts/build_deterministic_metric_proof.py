@@ -276,6 +276,7 @@ def _target_observations(
 ) -> dict[str, dict[str, Any]]:
     targets: dict[str, dict[str, Any]] = {}
     target_times: dict[str, Any] = {}
+    open_observations: dict[str, list[tuple[datetime, dict[str, Any]]]] = {}
     refs = snapshot.get("data_refs") or []
     if not isinstance(refs, list):
         raise MetricProofError("snapshot data_refs must be a list")
@@ -430,6 +431,11 @@ def _target_observations(
                          "event_time": event_time, price_field: price}
             if close_stage or semantics:
                 candidate.update(price_field=price_field, price_semantics=semantics)
+            if not close_stage:
+                if et is None:
+                    raise MetricProofError(f"intraday observation instant is missing: {rel}/{symbol}")
+                open_observations.setdefault(symbol, []).append((et, candidate))
+                continue
             prior = targets.get(symbol)
             comparable_time = et
             if prior is None or comparable_time > target_times[symbol]:
@@ -437,27 +443,46 @@ def _target_observations(
                 target_times[symbol] = comparable_time
                 continue
             if comparable_time == target_times[symbol]:
-                if close_stage:
-                    if candidate != prior:
-                        raise MetricProofError(f"ambiguous selected target observation: {symbol}/{event_time}")
-                    continue
-                prior_field = str(prior.get("price_field") or "")
-                candidate_field = str(candidate.get("price_field") or "")
-                if (
-                    candidate_field != prior_field
-                    or candidate.get("price_semantics") != prior.get("price_semantics")
-                    or candidate.get(candidate_field) != prior.get(prior_field)
-                ):
+                if candidate != prior:
                     raise MetricProofError(f"ambiguous selected target observation: {symbol}/{event_time}")
-                candidate_key = (
+    if not close_stage:
+        for symbol, observations in open_observations.items():
+            by_instant: dict[datetime, list[dict[str, Any]]] = {}
+            for instant, candidate in observations:
+                by_instant.setdefault(instant, []).append(candidate)
+            for instant, candidates in by_instant.items():
+                first = candidates[0]
+                first_field = str(first.get("price_field") or "")
+                first_value = first.get(first_field)
+                first_semantics = first.get("price_semantics")
+                for candidate in candidates[1:]:
+                    field = str(candidate.get("price_field") or "")
+                    if (
+                        field != first_field
+                        or candidate.get("price_semantics") != first_semantics
+                        or candidate.get(field) != first_value
+                    ):
+                        raise MetricProofError(
+                            f"ambiguous selected target observation: {symbol}/{candidate['event_time']}"
+                        )
+            latest_instant = max(by_instant)
+            targets[symbol] = min(
+                by_instant[latest_instant],
+                key=lambda candidate: (
                     candidate["capture_path"], candidate["capture_blob_sha"], candidate["event_time"],
-                )
-                prior_key = (
-                    prior["capture_path"], prior["capture_blob_sha"], prior["event_time"],
-                )
-                if candidate_key < prior_key:
-                    targets[symbol] = candidate
+                ),
+            )
     return targets
+
+
+def _event_instant(value: Any, symbol: str) -> datetime:
+    try:
+        timestamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if timestamp.tzinfo is None:
+            raise ValueError("missing timezone")
+        return timestamp.astimezone(ZoneInfo("America/New_York"))
+    except (TypeError, ValueError) as exc:
+        raise MetricProofError(f"invalid target event time: {symbol}") from exc
 
 
 def _target_price(target: Mapping[str, Any], symbol: str) -> float:
@@ -632,7 +657,9 @@ def build_proof(root: Path, *, trade_date: str, stage: str, data_plane_commit_sh
             if benchmark_target is None or benchmark_daily is None or benchmark in behind:
                 benchmark_metrics[benchmark] = None
                 continue
-            if benchmark_target["event_time"] != target["event_time"]:
+            if _event_instant(benchmark_target["event_time"], benchmark) != _event_instant(
+                target["event_time"], symbol
+            ):
                 benchmark_metrics[benchmark] = None
                 continue
             benchmark_prior, _ = benchmark_daily
