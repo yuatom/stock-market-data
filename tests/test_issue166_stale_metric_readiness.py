@@ -49,7 +49,7 @@ def _stage_seed(tmp_path, stage, *, unpriced=False):
         # The shared seed already has an Open30 snapshot at :00. Publish
         # this independent synthetic snapshot later without weakening CAS.
         snapshot_id=f"identity-proof-{stage}",
-        generated_at=f"{TRADE_DATE}T{event}:01-04:00",
+        generated_at=f"{TRADE_DATE}T{end}:01-04:00",
         data_refs=[{"path": path, "blob_sha": blob, "kind": "regular_intraday_capture"}],
         coverage={"available": 3}, missing=[], target_window=window,
         actual_data_cutoff=timestamp,
