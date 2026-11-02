@@ -27,6 +27,25 @@ def config() -> dict:
 
 
 class DailySeriesSettlementMaturityTest(unittest.TestCase):
+    def test_winter_premarket_can_use_prior_baseline_without_current_date_append(self) -> None:
+        now = datetime(2026, 11, 2, 6, 30, tzinfo=ET)
+
+        current_date_mature, current_reason = MODULE.daily_series_settlement_mature(
+            trade_date="2026-11-02",
+            config=config(),
+            now_et=now,
+        )
+        prior_session_mature, prior_reason = MODULE.daily_series_settlement_mature(
+            trade_date="2026-10-30",
+            config=config(),
+            now_et=now,
+        )
+
+        self.assertFalse(current_date_mature)
+        self.assertEqual(current_reason, "provider_settlement_not_mature_before_07:00_ET")
+        self.assertTrue(prior_session_mature)
+        self.assertIsNone(prior_reason)
+
     def test_current_et_date_before_maturity_is_blocked(self) -> None:
         mature, reason = MODULE.daily_series_settlement_mature(
             trade_date="2026-08-18",
