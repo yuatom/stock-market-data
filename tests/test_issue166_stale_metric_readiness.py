@@ -20,7 +20,7 @@ UNAVAILABLE = "provider_affine_daily_series_unavailable"
 def _stage_seed(tmp_path, stage, *, unpriced=False):
     root, _ = _seed(tmp_path)
     end = {"open_30m": "10:00", "open_60m": "10:30", "close": "16:00"}[stage]
-    event = "15:59" if stage == "close" else end
+    event = {"open_30m": "09:59", "open_60m": "10:29", "close": "15:59"}[stage]
     timestamp = f"{TRADE_DATE}T{event}:00-04:00"
     window = {"start": "15:45" if stage == "close" else "09:30", "end": end}
     facts = [
