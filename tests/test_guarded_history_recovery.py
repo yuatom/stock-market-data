@@ -100,7 +100,7 @@ class RecoveryWorkflowTests(unittest.TestCase):
         self.assertEqual(w[True]['workflow_dispatch']['inputs']['mode']['options'].count('daily_baseline_rebase'), 1)
 
 
-class RecoveryIntegrationTests(unittest.TestCase):
+class RecoveryIntegrationFixture:
     """No skipped helpers: native CI must run these against the complete source."""
     def setUp(self):
         self.m = module()
@@ -173,6 +173,8 @@ class RecoveryIntegrationTests(unittest.TestCase):
         changes = git(self.repo, 'diff', '--name-only', self.base, head).splitlines()
         self.assertTrue(all(p.startswith('data/market-data/collector-state/') for p in changes), changes)
 
+class RecoveryIntegrationTests(RecoveryIntegrationFixture, unittest.TestCase):
+    """No skipped helpers: native CI must run these against the complete source."""
     def test_success_real_helpers_full_closure_and_one_fact_commit(self):
         result = self.run_recovery()
         self.assertEqual(result['status'], 'PASS')
