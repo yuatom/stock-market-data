@@ -25,6 +25,28 @@ PROVIDER = "twelve_data_basic"
 FORMULA_CONTRACT = "stock_dairy_calculation_policy_v2"
 
 
+INTRADAY_STAGE_WINDOWS = {
+    "open_30m": {"start": "09:30", "end": "10:00"},
+    "open_60m": {"start": "09:30", "end": "10:30"},
+    "close": {"start": "15:45", "end": "16:00"},
+}
+REGULAR_SESSION_START = time(9, 30)
+REGULAR_SESSION_END = time(16, 0)
+INTRADAY_PRICE_SOURCES = {
+    ("nasdaq_public_intraday", "nasdaq_public_chart_last_sale_volume_v1"): {
+        "price_field": "last_sale",
+        "price_semantics": "nasdaq_public_chart_last_sale",
+        "session": "regular",
+        "stages": frozenset(INTRADAY_STAGE_WINDOWS),
+    },
+    ("twelve_data_basic", "twelve_data_basic_regular_1min_v1"): {
+        "price_field": "close",
+        "price_semantics": "twelve_data_basic_regular_1min_close",
+        "session": "regular",
+        "stages": frozenset(INTRADAY_STAGE_WINDOWS),
+    },
+}
+
 class MetricProofError(RuntimeError):
     pass
 
@@ -251,14 +273,20 @@ def _target_observations(
     root: Path, snapshot: Mapping[str, Any], *, missing_symbols: set[str] | None = None,
 ) -> dict[str, dict[str, Any]]:
     targets: dict[str, dict[str, Any]] = {}
-    target_times: dict[str, Any] = {}
+    target_times: dict[str, datetime] = {}
     refs = snapshot.get("data_refs") or []
     if not isinstance(refs, list):
         raise MetricProofError("snapshot data_refs must be a list")
-    close_stage = snapshot.get("stage") == "close"
+    stage = str(snapshot.get("stage") or "")
+    stage_window = INTRADAY_STAGE_WINDOWS.get(stage)
+    if stage_window is None:
+        raise MetricProofError(f"unsupported metric-proof stage: {stage}")
+    if snapshot.get("target_window") != stage_window:
+        raise MetricProofError(f"{stage} snapshot target window does not match owner")
     trade_date = str(snapshot.get("trade_date") or "")
-    if close_stage and snapshot.get("target_window") != {"start": "15:45", "end": "16:00"}:
-        raise MetricProofError("close snapshot target window does not match owner")
+    stage_start = time.fromisoformat(stage_window["start"])
+    stage_end = time.fromisoformat(stage_window["end"])
+
     for ref in refs:
         if not isinstance(ref, Mapping):
             raise MetricProofError("snapshot data ref must be an object")
@@ -270,61 +298,95 @@ def _target_observations(
         capture_session = str(capture.get("session") or "")
         if not capture_session:
             raise MetricProofError(f"snapshot capture session is missing: {rel}")
+        if capture.get("trade_date") != trade_date:
+            raise MetricProofError(f"snapshot capture trade date mismatch: {rel}")
+        if capture_session != "regular":
+            raise MetricProofError(f"metric-proof capture is not regular session: {rel}")
+
+        capture_window = capture.get("window")
+        if not isinstance(capture_window, Mapping):
+            raise MetricProofError(f"snapshot capture window is missing: {rel}")
+        try:
+            capture_start = time.fromisoformat(str(capture_window.get("start") or ""))
+            capture_end = time.fromisoformat(str(capture_window.get("end") or ""))
+        except ValueError as exc:
+            raise MetricProofError(f"invalid snapshot capture window: {rel}") from exc
+        if (
+            capture_start.tzinfo is not None
+            or capture_end.tzinfo is not None
+            or not REGULAR_SESSION_START <= capture_start < capture_end <= REGULAR_SESSION_END
+        ):
+            raise MetricProofError(f"invalid regular-session capture window: {rel}")
+
         for fact in capture.get("qualified_facts") or []:
             if not isinstance(fact, Mapping):
                 continue
             symbol = str(fact.get("symbol") or "").upper()
-            event_time = str(fact.get("event_time") or fact.get("source_timestamp") or "")
+            if symbol and missing_symbols is not None:
+                missing_symbols.add(symbol)
+            if not symbol:
+                continue
             fact_session = str(fact.get("session") or capture_session)
             if fact_session != capture_session:
                 raise MetricProofError(f"capture/fact session mismatch: {rel}/{symbol}")
-            if symbol and missing_symbols is not None:
-                missing_symbols.add(symbol)
-            if not symbol or not event_time:
-                continue
-            price_field = "last_sale"
-            semantics = None
-            if close_stage:
-                if capture_session != "regular" or capture.get("trade_date") != trade_date:
+
+            source = (capture.get("provider"), fact.get("source_contract"))
+            source_spec = INTRADAY_PRICE_SOURCES.get(source)
+            if source_spec is None or stage not in source_spec["stages"]:
+                raise MetricProofError(f"unregistered intraday price source: {rel}/{symbol}")
+            if capture_session != source_spec["session"]:
+                raise MetricProofError(f"intraday source session mismatch: {rel}/{symbol}")
+
+            event_time = str(fact.get("event_time") or "")
+            source_timestamp = str(fact.get("source_timestamp") or "")
+            if not event_time or not source_timestamp or source_timestamp != event_time:
+                raise MetricProofError(f"capture event/source timestamp mismatch: {rel}/{symbol}")
+            try:
+                ts = datetime.fromisoformat(event_time.replace("Z", "+00:00"))
+                if ts.tzinfo is None:
+                    raise ValueError("missing timezone")
+                et = ts.astimezone(ZoneInfo("America/New_York"))
+            except ValueError as exc:
+                raise MetricProofError(f"invalid capture event time: {rel}/{symbol}") from exc
+            if et.date().isoformat() != trade_date:
+                raise MetricProofError(f"snapshot capture event date mismatch: {rel}/{symbol}")
+            event_clock = et.time().replace(tzinfo=None)
+            if not capture_start <= event_clock < capture_end:
+                raise MetricProofError(f"capture event outside declared capture window: {rel}/{symbol}")
+            if not stage_start <= event_clock < stage_end:
+                # Close snapshots may retain earlier regular-session captures;
+                # later-than-stage facts and out-of-window Open-stage facts are
+                # inconsistent with the requested snapshot contract.
+                if stage == "close" and event_clock < stage_start:
                     continue
-                try:
-                    ts = datetime.fromisoformat(event_time.replace("Z", "+00:00"))
-                    if ts.tzinfo is None:
-                        raise ValueError("missing timezone")
-                    et = ts.astimezone(ZoneInfo("America/New_York"))
-                except ValueError as exc:
-                    raise MetricProofError(f"invalid capture event time: {rel}/{symbol}") from exc
-                if et.date().isoformat() != trade_date or not time(15, 45) <= et.time().replace(tzinfo=None) < time(16, 0):
-                    continue
-                if fact.get("source_timestamp") and fact.get("source_timestamp") != event_time:
-                    raise MetricProofError(f"capture event/source timestamp mismatch: {rel}/{symbol}")
-                if fact.get("last_sale") is not None and fact.get("close") is not None:
-                    raise MetricProofError(f"ambiguous price fields: {rel}/{symbol}")
-                source = (capture.get("provider"), fact.get("source_contract"))
-                if source == ("nasdaq_public_intraday", "nasdaq_public_chart_last_sale_volume_v1"):
-                    semantics = "nasdaq_public_chart_last_sale"
-                elif source == ("twelve_data_basic", "twelve_data_basic_regular_1min_v1"):
-                    price_field = "close"
-                    semantics = "twelve_data_basic_regular_1min_close"
-                else:
-                    raise MetricProofError(f"unregistered close price source: {rel}/{symbol}")
-            price = fact.get(price_field)
-            if price is None:
-                continue
-            price = _number(price, f"{price_field}[{symbol}]")
+                raise MetricProofError(f"capture event outside {stage} target window: {rel}/{symbol}")
+
+            present_price_fields = {
+                field for field in ("last_sale", "close") if fact.get(field) is not None
+            }
+            if len(present_price_fields) > 1:
+                raise MetricProofError(f"ambiguous price fields: {rel}/{symbol}")
+            price_field = str(source_spec["price_field"])
+            if present_price_fields != {price_field}:
+                raise MetricProofError(f"registered source price field missing or mismatched: {rel}/{symbol}")
+            price = _number(fact.get(price_field), f"{price_field}[{symbol}]")
             if price <= 0:
                 raise MetricProofError(f"{price_field}[{symbol}] must be positive")
-            candidate = {"capture_path": rel, "capture_blob_sha": actual_blob,
-                         "event_time": event_time, price_field: price}
-            if close_stage:
-                candidate.update(price_field=price_field, price_semantics=semantics)
+
+            candidate = {
+                "capture_path": rel,
+                "capture_blob_sha": actual_blob,
+                "event_time": event_time,
+                price_field: price,
+                "price_field": price_field,
+                "price_semantics": source_spec["price_semantics"],
+            }
             prior = targets.get(symbol)
-            comparable_time = et if close_stage else candidate["event_time"]
-            if prior is None or comparable_time > target_times[symbol]:
+            if prior is None or et > target_times[symbol]:
                 targets[symbol] = candidate
-                target_times[symbol] = comparable_time
+                target_times[symbol] = et
                 continue
-            if comparable_time == target_times[symbol] and candidate != prior:
+            if et == target_times[symbol] and candidate != prior:
                 raise MetricProofError(f"ambiguous selected target observation: {symbol}/{event_time}")
     return targets
 
