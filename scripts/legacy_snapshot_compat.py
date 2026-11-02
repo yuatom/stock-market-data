@@ -11,6 +11,7 @@ import argparse
 import copy
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -18,13 +19,40 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping, Sequence
 
-TRANSFORM_VERSION = "legacy-reason-classes-canonicalize-v1"
+TRANSFORM_VERSION = "legacy-reason-classes-canonicalize-v2"
+EXPECTED_REPORT_ROWS = 499
+EXPECTED_REPAIR_TARGETS = 42
 SNAPSHOT_PREFIX = "data/market-data/snapshots/"
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 
 
 class CompatibilityTransformError(ValueError):
     """Raised when an input cannot be transformed without changing facts."""
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise CompatibilityTransformError(f"duplicate JSON member name: {key!r}")
+        result[key] = value
+    return result
+
+
+def _reject_nonfinite(value: str) -> None:
+    raise CompatibilityTransformError(f"nonfinite JSON literal is forbidden: {value}")
+
+
+def strict_json_loads(raw: str | bytes) -> Any:
+    """Reject duplicate JSON object member names at all nested levels."""
+    try:
+        text = raw.decode("utf-8") if isinstance(raw, bytes) else raw
+        return json.loads(
+            text, object_pairs_hook=_unique_json_object,
+            parse_constant=_reject_nonfinite,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise CompatibilityTransformError(f"invalid UTF-8/JSON input: {exc}") from exc
 
 
 def canonical_bytes(value: Any) -> bytes:
@@ -48,12 +76,21 @@ def json_pointer(parts: Iterable[Any]) -> str:
 
 
 def _safe_snapshot_path(value: str) -> str:
-    if not isinstance(value, str) or "\\" in value or value.startswith("/"):
-        raise CompatibilityTransformError("original path must be a repository-relative POSIX path")
+    if (
+        not isinstance(value, str) or not value or "\\" in value
+        or value.startswith("/") or "\x00" in value
+        or any(ord(char) < 32 for char in value)
+    ):
+        raise CompatibilityTransformError("original path must be a canonical relative POSIX path")
+    parts = value.split("/")
+    if any(part in {"", ".", ".."} for part in parts) or PurePosixPath(value).as_posix() != value:
+        raise CompatibilityTransformError("original path has noncanonical/unsafe components")
     path = PurePosixPath(value)
-    if any(part in {"", ".", ".."} for part in path.parts):
-        raise CompatibilityTransformError("original path contains an unsafe component")
-    if not value.startswith(SNAPSHOT_PREFIX) or path.suffix != ".json" or any(part == "latest" or part.startswith("latest.") for part in path.parts):
+    if (
+        len(parts) < 7 or not value.startswith(SNAPSHOT_PREFIX)
+        or path.suffix != ".json"
+        or any(part == "latest" or part.startswith("latest.") for part in parts)
+    ):
         raise CompatibilityTransformError("only immutable Snapshot JSON paths may be projected")
     return value
 
@@ -142,6 +179,37 @@ def _get_pointer(document: Any, pointer: str) -> Any:
     return current
 
 
+def _git_checked(repo: Path, *arguments: str) -> bytes:
+    try:
+        return subprocess.run(
+            ["git", "-C", str(repo), *arguments],
+            check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        ).stdout
+    except (subprocess.CalledProcessError, OSError) as exc:
+        raise CompatibilityTransformError(f"Git provenance command failed: {arguments!r}") from exc
+
+
+def _verify_transformer_identity(transformer_commit: str | None) -> str:
+    """Prove the executing script equals the pinned actual checkout commit."""
+    if not isinstance(transformer_commit, str) or not HEX40.fullmatch(transformer_commit):
+        raise CompatibilityTransformError("verified transformer commit SHA is required")
+    script = Path(__file__).resolve(strict=True)
+    root = script.parents[1]
+    if script != root / "scripts" / "legacy_snapshot_compat.py":
+        raise CompatibilityTransformError("executing transformer is not in canonical scripts path")
+    actual_root = _git_checked(root, "rev-parse", "--show-toplevel").decode("utf-8").strip()
+    if Path(actual_root).resolve(strict=True) != root:
+        raise CompatibilityTransformError("transformer is not in the claimed repository root")
+    if _git_checked(root, "rev-parse", "HEAD").decode("ascii").strip() != transformer_commit:
+        raise CompatibilityTransformError("transformer commit differs from checkout HEAD")
+    if _git_checked(root, "cat-file", "-t", transformer_commit).decode("ascii").strip() != "commit":
+        raise CompatibilityTransformError("transformer SHA is not a Git commit")
+    frozen_bytes = _git_checked(root, "show", f"{transformer_commit}:scripts/legacy_snapshot_compat.py")
+    if frozen_bytes != script.read_bytes():
+        raise CompatibilityTransformError("executed transformer script differs from pinned Git bytes")
+    return transformer_commit
+
+
 def transform_snapshot_bytes(
     raw: bytes,
     *,
@@ -161,14 +229,10 @@ def transform_snapshot_bytes(
         raise CompatibilityTransformError("expected original Git blob must be a lowercase 40-hex SHA")
     if not HEX40.fullmatch(original_schema_sha) or not HEX40.fullmatch(current_schema_sha):
         raise CompatibilityTransformError("schema blob identities must be lowercase 40-hex SHAs")
-    if transformer_commit is not None and not HEX40.fullmatch(transformer_commit):
-        raise CompatibilityTransformError("transformer commit must be a lowercase 40-hex SHA")
+    verified_transformer_commit = _verify_transformer_identity(transformer_commit)
     if git_blob_sha_bytes(raw) != expected_original_blob_sha:
         raise CompatibilityTransformError("raw bytes do not match expected original Git blob SHA")
-    try:
-        original = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise CompatibilityTransformError(f"source Snapshot is not valid UTF-8 JSON: {exc}") from exc
+    original = strict_json_loads(raw)
     if not isinstance(original, dict):
         raise CompatibilityTransformError("source Snapshot must be a JSON object")
 
@@ -241,7 +305,7 @@ def transform_snapshot_bytes(
             "store_repository": store_repository,
             "store_commit": store_commit,
             "transformer_repository": "yuatom/stock-market-data",
-            "transformer_commit": transformer_commit or "UNPINNED",
+            "transformer_commit": verified_transformer_commit,
         },
         "non_authoritative": True,
     }
@@ -260,24 +324,143 @@ def _set_pointer(document: Any, pointer: str, value: Any) -> None:
 
 
 def _git_bytes(repo: Path, revision: str, path: str) -> bytes:
-    return subprocess.run(
-        ["git", "-C", str(repo), "show", f"{revision}:{path}"],
-        check=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    ).stdout
+    return _git_checked(repo, "show", f"{revision}:{path}")
 
 
-def _write_create_only(path: Path, payload: bytes) -> bool:
-    path.parent.mkdir(parents=True, exist_ok=True)
+def _load_pinned_targets(
+    report_raw: bytes, inventory_raw: bytes, expected_inventory_sha256: str,
+    *, store_commit: str, current_schema_sha: str,
+    expected_rows: int = EXPECTED_REPORT_ROWS,
+    expected_targets: int = EXPECTED_REPAIR_TARGETS,
+) -> list[dict[str, Any]]:
+    """Validate one independently pinned 499-row result and its exact 42 FAIL targets."""
+    if (
+        not isinstance(expected_inventory_sha256, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", expected_inventory_sha256)
+        or hashlib.sha256(inventory_raw).hexdigest() != expected_inventory_sha256
+    ):
+        raise CompatibilityTransformError("expected inventory SHA256 is absent or mismatched")
+    inventory = strict_json_loads(inventory_raw)
+    if not isinstance(inventory, dict) or set(inventory) != {
+        "schema_version", "store_commit", "current_schema_sha",
+        "report_sha256", "report_rows", "target_count", "targets",
+    }:
+        raise CompatibilityTransformError("expected inventory fields are missing/unknown")
+    if inventory_raw != canonical_bytes(inventory):
+        raise CompatibilityTransformError("expected inventory must be canonical JSON bytes")
+    if (
+        type(inventory["schema_version"]) is not int or inventory["schema_version"] != 1
+        or inventory["store_commit"] != store_commit
+        or inventory["current_schema_sha"] != current_schema_sha
+        or inventory["report_sha256"] != hashlib.sha256(report_raw).hexdigest()
+        or type(inventory["report_rows"]) is not int
+        or inventory["report_rows"] != expected_rows
+        or type(inventory["target_count"]) is not int
+        or inventory["target_count"] != expected_targets
+    ):
+        raise CompatibilityTransformError("expected inventory contract/identity/count mismatch")
+    lines = report_raw.splitlines()
+    if len(lines) != expected_rows or any(not line.strip() for line in lines):
+        raise CompatibilityTransformError("report row closure incomplete or contains blank rows")
+    rows_by_path: dict[str, dict[str, Any]] = {}
+    fail_by_path: dict[str, str] = {}
+    for line in lines:
+        row = strict_json_loads(line)
+        if not isinstance(row, dict):
+            raise CompatibilityTransformError("object result must be a JSON object")
+        status = row.get("validation_status")
+        if status not in ("PASS", "FAIL"):
+            raise CompatibilityTransformError("object result has absent/unknown validation_status")
+        path = _safe_snapshot_path(row.get("store_path"))
+        blob = row.get("store_blob")
+        if not isinstance(blob, str) or not HEX40.fullmatch(blob):
+            raise CompatibilityTransformError(f"invalid object report blob at {path}")
+        if path in rows_by_path:
+            raise CompatibilityTransformError(f"duplicate report Store path: {path}")
+        rows_by_path[path] = row
+        if status == "FAIL":
+            fail_by_path[path] = blob
+    expected = inventory["targets"]
+    if not isinstance(expected, list) or len(expected) != expected_targets:
+        raise CompatibilityTransformError("expected target list is missing/incomplete")
+    target_map: dict[str, str] = {}
+    for item in expected:
+        if not isinstance(item, dict) or set(item) != {"store_path", "store_blob"}:
+            raise CompatibilityTransformError("invalid expected target identity")
+        path = _safe_snapshot_path(item["store_path"])
+        blob = item["store_blob"]
+        if not isinstance(blob, str) or not HEX40.fullmatch(blob) or path in target_map:
+            raise CompatibilityTransformError("duplicate/invalid expected target")
+        target_map[path] = blob
+    if (
+        len(fail_by_path) != expected_targets or fail_by_path != target_map
+        or list(target_map) != sorted(target_map)
+    ):
+        raise CompatibilityTransformError("current-Schema FAIL targets differ from pinned complete inventory")
+    return [rows_by_path[path] for path in sorted(target_map)]
+
+
+def _trusted_output_root(root: Path, store_repo: Path) -> Path:
+    if not root.is_dir() or root.is_symlink():
+        raise CompatibilityTransformError("private scratch output-root must exist and not be a symlink")
     try:
-        with path.open("xb") as stream:
+        output = root.resolve(strict=True)
+        store = store_repo.resolve(strict=True)
+        compute = Path(__file__).resolve(strict=True).parents[1]
+    except OSError as exc:
+        raise CompatibilityTransformError("cannot resolve output/source roots") from exc
+    if any(
+        output == repo or output.is_relative_to(repo) or repo.is_relative_to(output)
+        for repo in (store, compute)
+    ):
+        raise CompatibilityTransformError("private output-root overlaps the Compute or Store checkout")
+    return output
+
+
+def _write_create_only(root: Path, relative: Path, payload: bytes) -> bool:
+    """Write under private root with O_NOFOLLOW on each component and file."""
+    parts = relative.parts
+    if relative.is_absolute() or not parts or any(p in {"", ".", ".."} for p in parts):
+        raise CompatibilityTransformError("unsafe derived relative output path")
+    parent_fd = None
+    try:
+        parent_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        for component in parts[:-1]:
+            try:
+                os.mkdir(component, mode=0o700, dir_fd=parent_fd)
+            except FileExistsError:
+                pass
+            next_fd = os.open(
+                component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=parent_fd,
+            )
+            os.close(parent_fd)
+            parent_fd = next_fd
+        try:
+            output_fd = os.open(
+                parts[-1], os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW,
+                0o600, dir_fd=parent_fd,
+            )
+        except FileExistsError:
+            existing_fd = os.open(
+                parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd,
+            )
+            with os.fdopen(existing_fd, "rb") as stream:
+                if stream.read() != payload:
+                    raise CompatibilityTransformError(
+                        f"refusing to replace different derived artifact: {relative}"
+                    )
+            return False
+        with os.fdopen(output_fd, "wb") as stream:
             stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
         return True
-    except FileExistsError:
-        if path.read_bytes() != payload:
-            raise CompatibilityTransformError(f"refusing to replace different derived artifact: {path}")
-        return False
+    except OSError as exc:
+        raise CompatibilityTransformError(f"unsafe/inaccessible private scratch output: {relative}") from exc
+    finally:
+        if parent_fd is not None:
+            os.close(parent_fd)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -285,6 +468,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--store-repo", type=Path, required=True)
     parser.add_argument("--store-commit", required=True)
     parser.add_argument("--object-results", type=Path, required=True)
+    parser.add_argument("--expected-inventory", type=Path, required=True)
+    parser.add_argument("--expected-inventory-sha256", required=True)
     parser.add_argument("--original-schema", type=Path, required=True)
     parser.add_argument("--original-schema-sha", required=True)
     parser.add_argument("--current-schema", type=Path, required=True)
@@ -298,24 +483,35 @@ def main(argv: Sequence[str] | None = None) -> int:
         from jsonschema import Draft202012Validator, FormatChecker
     except ImportError as exc:
         parser.error(f"Draft 2020-12 jsonschema dependency is required: {exc}")
+    if not isinstance(args.store_commit, str) or not HEX40.fullmatch(args.store_commit):
+        raise CompatibilityTransformError("Store commit must be an exact 40-hex Git SHA")
+    _verify_transformer_identity(args.transformer_commit)
+    root = _trusted_output_root(args.output_root, args.store_repo)
+    if _git_checked(args.store_repo, "rev-parse", "HEAD").decode("ascii").strip() != args.store_commit:
+        raise CompatibilityTransformError("Store checkout HEAD must equal the pinned Store commit")
+    if _git_checked(args.store_repo, "cat-file", "-t", args.store_commit).decode("ascii").strip() != "commit":
+        raise CompatibilityTransformError("Store pin does not name a Git commit")
     original_schema_raw = args.original_schema.read_bytes()
     current_schema_raw = args.current_schema.read_bytes()
     if git_blob_sha_bytes(original_schema_raw) != args.original_schema_sha:
         raise CompatibilityTransformError("original schema file does not match expected Git blob SHA")
     if git_blob_sha_bytes(current_schema_raw) != args.current_schema_sha:
         raise CompatibilityTransformError("current schema file does not match expected Git blob SHA")
-    original_schema = json.loads(original_schema_raw.decode("utf-8"))
-    current_schema = json.loads(current_schema_raw.decode("utf-8"))
-    manifest_schema = json.loads(args.manifest_schema.read_text(encoding="utf-8"))
+    original_schema = strict_json_loads(original_schema_raw)
+    current_schema = strict_json_loads(current_schema_raw)
+    manifest_schema = strict_json_loads(args.manifest_schema.read_bytes())
     Draft202012Validator.check_schema(original_schema)
     Draft202012Validator.check_schema(current_schema)
     Draft202012Validator.check_schema(manifest_schema)
     original_validator = Draft202012Validator(original_schema, format_checker=FormatChecker())
     current_validator = Draft202012Validator(current_schema, format_checker=FormatChecker())
     manifest_validator = Draft202012Validator(manifest_schema, format_checker=FormatChecker())
-    rows = [json.loads(line) for line in args.object_results.read_text(encoding="utf-8").splitlines() if line]
-    targets = [row for row in rows if row.get("validation_status") == "FAIL"]
-    emitted = []
+    targets = _load_pinned_targets(
+        args.object_results.read_bytes(), args.expected_inventory.read_bytes(),
+        args.expected_inventory_sha256,
+        store_commit=args.store_commit, current_schema_sha=args.current_schema_sha,
+    )
+    pending = []
     for row in targets:
         original_path = row["store_path"]
         source = _git_bytes(args.store_repo, args.store_commit, original_path)
@@ -334,19 +530,30 @@ def main(argv: Sequence[str] | None = None) -> int:
             store_commit=args.store_commit,
             transformer_commit=args.transformer_commit,
         )
-        rel = PurePosixPath(original_path)
-        out = args.output_root / "derived" / TRANSFORM_VERSION / Path(*rel.parts)
-        manifest_path = out.with_suffix(out.suffix + ".manifest.json")
+        rel = Path("derived") / TRANSFORM_VERSION / Path(*PurePosixPath(original_path).parts)
+        manifest_rel = rel.with_suffix(rel.suffix + ".manifest.json")
         manifest_validator.validate(manifest)
         manifest_raw = canonical_bytes(manifest)
-        if out.exists() and out.read_bytes() != derived:
-            raise CompatibilityTransformError(f"refusing to replace different derived artifact: {out}")
-        if manifest_path.exists() and manifest_path.read_bytes() != manifest_raw:
-            raise CompatibilityTransformError(f"refusing to replace different derived artifact: {manifest_path}")
-        created = _write_create_only(out, derived)
-        manifest_created = _write_create_only(manifest_path, manifest_raw)
-        emitted.append({"original_path": original_path, "derived_path": str(out), "manifest_path": str(manifest_path), "derived_content_sha256": manifest["derived_content_sha256"], "created": created, "manifest_created": manifest_created, "status": manifest["current_compatibility_status_after"]})
-    print(json.dumps({"transform_version": TRANSFORM_VERSION, "target_count": len(targets), "emitted_count": len(emitted), "derived": emitted}, sort_keys=True))
+        pending.append((original_path, rel, manifest_rel, derived, manifest_raw, manifest["derived_content_sha256"]))
+    if len(pending) != EXPECTED_REPAIR_TARGETS:
+        raise CompatibilityTransformError("pre-write target closure is not exactly 42")
+    emitted = []
+    for original_path, rel, manifest_rel, derived, manifest_raw, content_sha in pending:
+        created = _write_create_only(root, rel, derived)
+        manifest_created = _write_create_only(root, manifest_rel, manifest_raw)
+        emitted.append({
+            "original_path": original_path, "derived_path": str(root / rel),
+            "manifest_path": str(root / manifest_rel),
+            "derived_content_sha256": content_sha,
+            "created": created, "manifest_created": manifest_created, "status": "PASS",
+        })
+    if len(emitted) != EXPECTED_REPAIR_TARGETS:
+        raise CompatibilityTransformError("derived output closure is not exactly 42")
+    print(json.dumps({
+        "transform_version": TRANSFORM_VERSION, "target_count": len(targets),
+        "emitted_count": len(emitted), "inventory_sha256": args.expected_inventory_sha256,
+        "derived": emitted,
+    }, sort_keys=True))
     return 0
 
 
