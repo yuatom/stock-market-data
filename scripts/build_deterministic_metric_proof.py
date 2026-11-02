@@ -431,13 +431,32 @@ def _target_observations(
             if close_stage or semantics:
                 candidate.update(price_field=price_field, price_semantics=semantics)
             prior = targets.get(symbol)
-            comparable_time = et if close_stage else event_time
+            comparable_time = et
             if prior is None or comparable_time > target_times[symbol]:
                 targets[symbol] = candidate
                 target_times[symbol] = comparable_time
                 continue
-            if comparable_time == target_times[symbol] and candidate != prior:
-                raise MetricProofError(f"ambiguous selected target observation: {symbol}/{event_time}")
+            if comparable_time == target_times[symbol]:
+                if close_stage:
+                    if candidate != prior:
+                        raise MetricProofError(f"ambiguous selected target observation: {symbol}/{event_time}")
+                    continue
+                prior_field = str(prior.get("price_field") or "")
+                candidate_field = str(candidate.get("price_field") or "")
+                if (
+                    candidate_field != prior_field
+                    or candidate.get("price_semantics") != prior.get("price_semantics")
+                    or candidate.get(candidate_field) != prior.get(prior_field)
+                ):
+                    raise MetricProofError(f"ambiguous selected target observation: {symbol}/{event_time}")
+                candidate_key = (
+                    candidate["capture_path"], candidate["capture_blob_sha"], candidate["event_time"],
+                )
+                prior_key = (
+                    prior["capture_path"], prior["capture_blob_sha"], prior["event_time"],
+                )
+                if candidate_key < prior_key:
+                    targets[symbol] = candidate
     return targets
 
 
