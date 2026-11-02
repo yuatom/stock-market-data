@@ -88,14 +88,19 @@ class FixedGuardedRecoveryTests(recovery.RecoveryIntegrationFixture, unittest.Te
         selected = ["AAA", "BBB"]
         unselected_before = self.series_subtree(self.base, "CCC")
 
+        request_calls = 0
+
         def reject_second(url, **kwargs):
-            if self.http_count == 1:
+            nonlocal request_calls
+            request_calls += 1
+            if request_calls == 2:
                 raise RuntimeError("synthetic second-target Provider failure")
             return self.payload(url, **kwargs)
 
         with self.assertRaises(Exception):
             self.fixed_recovery(self.fixed_selector(selected), http=reject_second)
-        self.assertEqual(self.http_count, 2)
+        self.assertEqual(request_calls, 2)
+        self.assertEqual(self.http_count, 1)
         self.assert_no_fixed_facts_published({"CCC": unselected_before})
 
     def test_late_invalid_selected_replacement_never_publishes_partial_history(self):
