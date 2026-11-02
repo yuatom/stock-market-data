@@ -13,7 +13,7 @@ import hashlib
 import json
 import math
 import re
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
@@ -36,12 +36,14 @@ INTRADAY_PRICE_SOURCES = {
     ("nasdaq_public_intraday", "nasdaq_public_chart_last_sale_volume_v1"): {
         "price_field": "last_sale",
         "price_semantics": "nasdaq_public_chart_last_sale",
+        "time_semantics": "point_timestamp",
         "session": "regular",
         "stages": frozenset(INTRADAY_STAGE_WINDOWS),
     },
     ("twelve_data_basic", "twelve_data_basic_regular_1min_v1"): {
         "price_field": "close",
         "price_semantics": "twelve_data_basic_regular_1min_close",
+        "time_semantics": "one_minute_bar_start",
         "session": "regular",
         "stages": frozenset(INTRADAY_STAGE_WINDOWS),
     },
@@ -282,7 +284,9 @@ def _target_observations(
     if stage_window is None:
         raise MetricProofError(f"unsupported metric-proof stage: {stage}")
     close_stage = stage == "close"
-    if not close_stage and snapshot.get("target_window") != stage_window:
+    if snapshot.get("target_window") != stage_window:
+        if close_stage:
+            raise MetricProofError("close snapshot target window does not match owner")
         raise MetricProofError(f"{stage} snapshot target window does not match owner")
     trade_date = str(snapshot.get("trade_date") or "")
     stage_start = time.fromisoformat(stage_window["start"])
@@ -364,6 +368,7 @@ def _target_observations(
                 if et.date().isoformat() != trade_date:
                     raise MetricProofError(f"snapshot capture event date mismatch: {rel}/{symbol}")
                 event_clock = et.time().replace(tzinfo=None)
+                bar_end_clock = (datetime.combine(et.date(), event_clock) + timedelta(minutes=1)).time()
                 capture_window = capture.get("window")
                 if not isinstance(capture_window, Mapping):
                     raise MetricProofError(f"snapshot capture window is missing: {rel}")
@@ -377,9 +382,28 @@ def _target_observations(
                     or not REGULAR_SESSION_START <= capture_start < capture_end <= REGULAR_SESSION_END
                 ):
                     raise MetricProofError(f"invalid regular-session capture window: {rel}")
-                if not capture_start <= event_clock <= capture_end:
+                time_semantics = source_spec["time_semantics"]
+                if time_semantics == "one_minute_bar_start":
+                    capture_window_match = (
+                        capture_start <= event_clock
+                        and event_clock.second == 0
+                        and event_clock.microsecond == 0
+                        and bar_end_clock <= capture_end
+                    )
+                    stage_window_match = (
+                        stage_start <= event_clock
+                        and event_clock.second == 0
+                        and event_clock.microsecond == 0
+                        and bar_end_clock <= stage_end
+                    )
+                elif time_semantics == "point_timestamp":
+                    capture_window_match = capture_start <= event_clock < capture_end
+                    stage_window_match = stage_start <= event_clock < stage_end
+                else:
+                    raise MetricProofError(f"unregistered intraday time semantics: {rel}/{symbol}")
+                if not capture_window_match:
                     raise MetricProofError(f"capture event outside declared capture window: {rel}/{symbol}")
-                if not stage_start <= event_clock <= stage_end:
+                if not stage_window_match:
                     raise MetricProofError(f"capture event outside {stage} target window: {rel}/{symbol}")
                 price_field = str(source_spec["price_field"])
                 semantics = str(source_spec["price_semantics"])
