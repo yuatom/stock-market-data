@@ -264,8 +264,8 @@ class DeterministicMetricProofTest(unittest.TestCase):
             ("source timestamp mismatch", {"source_timestamp": "2026-09-05T10:28:00-04:00"}),
             ("capture window mismatch", {"capture_window": {"start": "09:30", "end": "10:00"}}),
             ("stage target window mismatch", {"snapshot_window": {"start": "09:30", "end": "10:29"}}),
-            ("outside target window", {"event_time": "2026-09-05T10:30:00-04:00",
-                                       "capture_window": {"start": "10:00", "end": "10:31"}}),
+            ("outside target window", {"event_time": "2026-09-05T10:31:00-04:00",
+                                       "capture_window": {"start": "10:00", "end": "10:32"}}),
         )
         for name, overrides in cases:
             with self.subTest(case=name):
