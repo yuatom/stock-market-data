@@ -368,7 +368,7 @@ def _target_observations(
                 if et.date().isoformat() != trade_date:
                     raise MetricProofError(f"snapshot capture event date mismatch: {rel}/{symbol}")
                 event_clock = et.time().replace(tzinfo=None)
-                bar_end_clock = (datetime.combine(et.date(), event_clock) + timedelta(minutes=1)).time()
+                bar_end = et + timedelta(minutes=1)
                 capture_window = capture.get("window")
                 if not isinstance(capture_window, Mapping):
                     raise MetricProofError(f"snapshot capture window is missing: {rel}")
@@ -384,17 +384,21 @@ def _target_observations(
                     raise MetricProofError(f"invalid regular-session capture window: {rel}")
                 time_semantics = source_spec["time_semantics"]
                 if time_semantics == "one_minute_bar_start":
+                    capture_start_dt = datetime.combine(et.date(), capture_start, tzinfo=et.tzinfo)
+                    capture_end_dt = datetime.combine(et.date(), capture_end, tzinfo=et.tzinfo)
+                    stage_start_dt = datetime.combine(et.date(), stage_start, tzinfo=et.tzinfo)
+                    stage_end_dt = datetime.combine(et.date(), stage_end, tzinfo=et.tzinfo)
                     capture_window_match = (
-                        capture_start <= event_clock
+                        capture_start_dt <= et
                         and event_clock.second == 0
                         and event_clock.microsecond == 0
-                        and bar_end_clock <= capture_end
+                        and bar_end <= capture_end_dt
                     )
                     stage_window_match = (
-                        stage_start <= event_clock
+                        stage_start_dt <= et
                         and event_clock.second == 0
                         and event_clock.microsecond == 0
-                        and bar_end_clock <= stage_end
+                        and bar_end <= stage_end_dt
                     )
                 elif time_semantics == "point_timestamp":
                     capture_window_match = capture_start <= event_clock < capture_end
