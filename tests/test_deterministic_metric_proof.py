@@ -1021,6 +1021,101 @@ class DeterministicMetricProofTest(unittest.TestCase):
         self.assertIsNone(aaa["benchmark_metrics"]["SPY"])
         self.assertEqual(aaa["benchmark_metrics"]["QQQ"]["status"], "available")
 
+    def test_close_benchmark_alignment_accepts_equivalent_timestamp_representation(self):
+        sources = (
+            ("twelve_data_basic", "twelve_data_basic_regular_1min_v1", "close"),
+            ("nasdaq_public_intraday", "nasdaq_public_chart_last_sale_volume_v1", "last_sale"),
+        )
+        equivalent_utc = "2026-09-05T19:59:00+00:00"
+        for provider, source_contract, price_field in sources:
+            with self.subTest(provider=provider):
+                base_root, _ = _seed_intraday_stage(
+                    self.tmp_path / f"close-benchmark-et-{provider}",
+                    stage="close",
+                    provider=provider,
+                    source_contract=source_contract,
+                    price_field=price_field,
+                )
+                changed_root, _ = _seed_intraday_stage(
+                    self.tmp_path / f"close-benchmark-single-symbol-utc-{provider}",
+                    stage="close",
+                    provider=provider,
+                    source_contract=source_contract,
+                    price_field=price_field,
+                )
+                _replace_symbol_timestamp(
+                    changed_root,
+                    stage="close",
+                    symbol="SPY",
+                    event_time=equivalent_utc,
+                )
+                base_proof, _ = proofmod.build_proof(
+                    base_root,
+                    trade_date="2026-09-05",
+                    stage="close",
+                    data_plane_commit_sha="e" * 40,
+                )
+                changed_proof, _ = proofmod.build_proof(
+                    changed_root,
+                    trade_date="2026-09-05",
+                    stage="close",
+                    data_plane_commit_sha="e" * 40,
+                )
+                base_aaa = next(row for row in base_proof["subjects"] if row["symbol"] == "AAA")
+                changed_aaa = next(row for row in changed_proof["subjects"] if row["symbol"] == "AAA")
+                self.assertEqual(base_aaa["benchmark_metrics"]["SPY"]["status"], "available")
+                self.assertEqual(changed_aaa["benchmark_metrics"]["SPY"]["status"], "available")
+                self.assertEqual(_business_signature(base_proof), _business_signature(changed_proof))
+
+                spy = next(row for row in changed_proof["subjects"] if row["symbol"] == "SPY")
+                self.assertEqual(spy["target"]["event_time"], equivalent_utc)
+                source_capture = json.loads((changed_root / spy["target"]["capture_path"]).read_text())
+                source_fact = next(fact for fact in source_capture["qualified_facts"]
+                                   if fact["symbol"] == "SPY")
+                self.assertEqual(source_fact["event_time"], equivalent_utc)
+                self.assertEqual(source_fact["source_timestamp"], equivalent_utc)
+                proofmod.verify_proof_source_blobs(changed_root, changed_proof)
+
+    def test_close_benchmark_alignment_rejects_genuinely_unequal_instants(self):
+        sources = (
+            ("twelve_data_basic", "twelve_data_basic_regular_1min_v1", "close"),
+            ("nasdaq_public_intraday", "nasdaq_public_chart_last_sale_volume_v1", "last_sale"),
+        )
+        earlier_et = "2026-09-05T15:58:00-04:00"
+        for provider, source_contract, price_field in sources:
+            with self.subTest(provider=provider):
+                root, _ = _seed_intraday_stage(
+                    self.tmp_path / f"close-benchmark-unequal-instant-{provider}",
+                    stage="close",
+                    provider=provider,
+                    source_contract=source_contract,
+                    price_field=price_field,
+                )
+                _replace_symbol_timestamp(
+                    root,
+                    stage="close",
+                    symbol="SPY",
+                    event_time=earlier_et,
+                )
+                proof, _ = proofmod.build_proof(
+                    root,
+                    trade_date="2026-09-05",
+                    stage="close",
+                    data_plane_commit_sha="f" * 40,
+                )
+                aaa = next(row for row in proof["subjects"] if row["symbol"] == "AAA")
+                self.assertIsNone(aaa["benchmark_metrics"]["SPY"])
+                self.assertEqual(aaa["benchmark_metrics"]["QQQ"]["status"], "available")
+
+                spy = next(row for row in proof["subjects"] if row["symbol"] == "SPY")
+                self.assertEqual(spy["target"]["event_time"], earlier_et)
+                source_capture = json.loads((root / spy["target"]["capture_path"]).read_text())
+                source_fact = next(fact for fact in source_capture["qualified_facts"]
+                                   if fact["symbol"] == "SPY")
+                self.assertEqual(source_fact["event_time"], earlier_et)
+                self.assertEqual(source_fact["source_timestamp"], earlier_et)
+                proofmod.verify_proof_source_blobs(root, proof)
+
     def test_reference_verifier_rejects_sources_from_a_different_store_tree(self):
         source_root, _ = _seed(self.tmp_path / "source")
         proof, _ = proofmod.build_proof(
