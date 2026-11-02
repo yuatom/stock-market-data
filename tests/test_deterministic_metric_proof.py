@@ -302,6 +302,65 @@ class DeterministicMetricProofTest(unittest.TestCase):
                                     data_plane_commit_sha="c" * 40,
                                 )
 
+    def test_twelve_data_bars_must_fit_same_trade_date_capture_and_stage_datetimes(self):
+        invalid_events = (
+            "2026-09-05T23:59:00-04:00",  # rollover to next calendar day
+            "2026-09-05T03:59:00+00:00",  # previous ET session date via UTC offset
+            "2026-09-06T04:00:00+00:00",  # next ET session date via UTC offset
+            "2026-09-05T09:29:00-04:00",  # pre-session
+            "2026-09-05T16:00:00-04:00",  # post-session
+        )
+        for stage in ("open_30m", "open_60m"):
+            for event_time in invalid_events:
+                with self.subTest(stage=stage, event_time=event_time):
+                    root, _ = _seed_intraday_stage(
+                        self.tmp_path / f"{stage}-{event_time}",
+                        stage=stage,
+                        event_time=event_time,
+                    )
+                    with self.assertRaises(proofmod.MetricProofError):
+                        proofmod.build_proof(
+                            root,
+                            trade_date="2026-09-05",
+                            stage=stage,
+                            data_plane_commit_sha="b" * 40,
+                        )
+
+                    snapshot, snapshot_rel, snapshot_blob = proofmod._load_snapshot(
+                        root, "2026-09-05", stage
+                    )
+                    forged = {
+                        "trade_date": "2026-09-05",
+                        "stage": stage,
+                        "snapshot": {
+                            "path": snapshot_rel,
+                            "blob_sha": snapshot_blob,
+                            "snapshot_id": snapshot["snapshot_id"],
+                        },
+                        "subjects": [],
+                        "missing": [],
+                    }
+                    with self.assertRaises(proofmod.MetricProofError):
+                        proofmod.verify_proof_source_blobs(root, forged)
+
+    def test_twelve_data_minute_bar_with_equivalent_utc_offset_stays_valid(self):
+        for stage, capture_end in (("open_30m", "10:00"), ("open_60m", "10:30")):
+            with self.subTest(stage=stage):
+                root, _ = _seed_intraday_stage(
+                    self.tmp_path / f"{stage}-utc-offset-valid",
+                    stage=stage,
+                    event_time="2026-09-05T13:59:00+00:00",
+                    capture_window={"start": "09:30", "end": capture_end},
+                )
+                proof, _ = proofmod.build_proof(
+                    root,
+                    trade_date="2026-09-05",
+                    stage=stage,
+                    data_plane_commit_sha="b" * 40,
+                )
+                self.assertEqual({row["symbol"] for row in proof["subjects"]}, {"AAA", "SPY", "QQQ"})
+                proofmod.verify_proof_source_blobs(root, proof)
+
     def test_registered_provider_price_fields_produce_open_stage_metrics(self):
         cases = (
             ("open_30m", "twelve_data_basic", "twelve_data_basic_regular_1min_v1", "close",
