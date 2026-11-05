@@ -26,7 +26,8 @@ class OfflineAuditTest(unittest.TestCase):
         old={'trade_date':'2026-11-03','open':1,'high':2,'low':1,'close':2,'volume':5}
         new=dict(old,close=3)
         record=collectors._conflict_record(store_root=self.repo/'data/market-data',symbol='AMD',old=old,new=new,outputsize=10,effective_date=None,trade_date='2026-11-04',access={'twelve_data_basic':{'base_url':'https://example.invalid','time_series_path':'/time_series','interval_daily':'1day'}})
-        self.diagnostic={'schema_version':1,'diagnostic_authority':'non_authoritative_conflict_evidence','trade_date':'2026-11-04','invocation':{'mode':'previous_session_eod','invocation_id':inv},'compute_sha':'a'*40,'store_input_sha':self.old_sha,'failure_target_count':1,'conflict_record_count':1,'conflict_diagnostic_record_count':1,'conflict_diagnostics_truncated':False,'conflicts':[record]}
+        compute_sha=subprocess.check_output(['/usr/bin/git','-C',str(ROOT),'rev-parse','HEAD'],text=True).strip()
+        self.diagnostic={'schema_version':1,'diagnostic_authority':'non_authoritative_conflict_evidence','trade_date':'2026-11-04','invocation':{'mode':'previous_session_eod','invocation_id':inv},'compute_sha':compute_sha,'store_input_sha':self.old_sha,'failure_target_count':1,'conflict_record_count':1,'conflict_diagnostic_record_count':1,'conflict_diagnostics_truncated':False,'conflicts':[record]}
         path.write_text(json.dumps(self.diagnostic))
         self.commit()
     def commit(self):
@@ -49,7 +50,7 @@ class OfflineAuditTest(unittest.TestCase):
     def test_conflict_tampering_and_wrong_old_snapshot_rejected(self):
         import copy
         import offline_store_audit as audit
-        for change in ('digest','old_value','old_type','row_hash','new_row_hash','index_blob','shard_blob','row_number','missing_snapshot','wrong_snapshot'):
+        for change in ('digest','old_value','old_type','row_hash','new_row_hash','index_blob','shard_blob','row_number','missing_snapshot','wrong_snapshot','missing_compute'):
             data=copy.deepcopy(self.diagnostic); row=data['conflicts'][0]
             if change=='digest': row['fields'][0]['new_sha256']='0'*64
             if change=='old_value': row['fields'][0]['old_value']=999
@@ -61,6 +62,7 @@ class OfflineAuditTest(unittest.TestCase):
             if change=='row_number': row['store_source']['row_number']=7
             if change=='missing_snapshot': data['store_input_sha']='0'*40
             if change=='wrong_snapshot': data['store_input_sha']=self.empty_sha
+            if change=='missing_compute': data['compute_sha']='a'*40
             (self.repo/self.conflict).write_text(json.dumps(data)); self.commit()
             with self.subTest(change=change), self.assertRaises(audit.AuditError):
                 audit.audit(self.repo,self.sha,'2026-11-04','2026-11-03',['AMD'],self.conflict)
@@ -230,3 +232,22 @@ class OfflineAuditTest(unittest.TestCase):
             (self.repo/self.conflict).write_text(json.dumps(diagnostic)); self.commit()
             with self.subTest(field=field,value=value), self.assertRaises(audit.AuditError):
                 audit.audit(self.repo,self.sha,'2026-11-04','2026-11-03',['AMD'],self.conflict)
+
+    def test_old_etf_conflict_uses_compute_pinned_collection_identity(self):
+        import copy
+        import offline_store_audit as audit
+        row={'trade_date':'2026-11-03','open':1,'high':2,'low':1,'close':2,'volume':5}
+        store.append_daily_bars(self.repo/'data/market-data',provider='twelve_data_basic',symbol='GLD',asset_class='etf',series_semantics='daily_regular_ohlcv',bars=[row])
+        self.commit(); old_sha=self.sha
+        extra=collectors._conflict_record(store_root=self.repo/'data/market-data',symbol='GLD',old=row,new=dict(row,close=3),outputsize=10,effective_date=None,trade_date='2026-11-04',access={'twelve_data_basic':{'base_url':'https://example.invalid','time_series_path':'/time_series','interval_daily':'1day'}})
+        diagnostic=copy.deepcopy(self.diagnostic); diagnostic['store_input_sha']=old_sha
+        diagnostic['conflicts'].append(extra); diagnostic['conflict_record_count']=diagnostic['conflict_diagnostic_record_count']=2
+        (self.repo/self.conflict).write_text(json.dumps(diagnostic)); self.commit()
+        self.assertEqual(audit.audit(self.repo,self.sha,'2026-11-04','2026-11-03',['AMD'],self.conflict)['verified_conflict_entries'],2)
+        # Changing only the GLD asset class and rebinding the old index cannot become valid.
+        index_path=self.repo/'data/market-data/series/daily/twelve_data_basic/GLD/_index.json'
+        index=json.loads(index_path.read_text()); index['asset_class']='stocks'; index_path.write_text(json.dumps(index)); self.commit(); bad_old=self.sha
+        diagnostic['store_input_sha']=bad_old
+        diagnostic['conflicts'][1]['store_source']['index_blob_sha']=subprocess.check_output(['/usr/bin/git','-C',str(self.repo),'rev-parse',f'{bad_old}:data/market-data/series/daily/twelve_data_basic/GLD/_index.json'],text=True).strip()
+        (self.repo/self.conflict).write_text(json.dumps(diagnostic)); self.commit()
+        with self.assertRaises(audit.AuditError): audit.audit(self.repo,self.sha,'2026-11-04','2026-11-03',['AMD'],self.conflict)

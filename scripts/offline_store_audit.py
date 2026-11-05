@@ -29,21 +29,22 @@ def _audit(repo, commit, trade_date, target_date, symbols, conflict_path, expect
         if date.fromisoformat(trade_date).isoformat()!=trade_date or date.fromisoformat(target_date).isoformat()!=target_date:
             raise ValueError('date')
     except (ValueError, TypeError) as exc: raise AuditError('invalid date') from exc
-    def git(*args):
-        result=subprocess.run(['/usr/bin/git','-C',str(repo),*args],env=ENV,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=30)
+    source_repo=Path(__file__).resolve().parents[1]
+    def git(*args, location=repo):
+        result=subprocess.run(['/usr/bin/git','-C',str(location),*args],env=ENV,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=30)
         if result.returncode: raise AuditError('required local git object unavailable')
         return result.stdout
     if git('rev-parse','--verify',commit+'^{commit}').decode().strip()!=commit:
         raise AuditError('commit identity mismatch')
-    def read(path, expected=None, snapshot=None):
-        record=git('ls-tree','-z',snapshot or commit,'--',path)
+    def read(path, expected=None, snapshot=None, location=repo):
+        record=git('ls-tree','-z',snapshot or commit,'--',path,location=location)
         parts=record.rstrip(b'\0').split(b'\t',1)
         if len(parts)!=2 or parts[1].decode()!=path: raise AuditError('required exact path unavailable')
         info=parts[0].decode().split()
         if len(info)!=3 or info[0]!='100644' or info[1]!='blob': raise AuditError('path is not regular blob')
         blob=info[2]
         if expected is not None and blob!=expected: raise AuditError('expected blob mismatch')
-        raw=git('cat-file','blob',blob)
+        raw=git('cat-file','blob',blob,location=location)
         if hashlib.sha1(b'blob '+str(len(raw)).encode()+b'\0'+raw).hexdigest()!=blob: raise AuditError('blob bytes mismatch')
         def unique(pairs):
             result={}
@@ -82,8 +83,24 @@ def _audit(repo, commit, trade_date, target_date, symbols, conflict_path, expect
         if date.fromisoformat(day).isoformat()!=day: raise AuditError('invalid row date')
         if type(close) not in (int,float) or not math.isfinite(close): raise AuditError('invalid row close')
         return day
-    def check_index_identity(index,symbol):
-        expected={'provider':'twelve_data_basic','symbol':symbol,'asset_class':'stocks','session':'regular','interval':'1d','series_semantics':'daily_regular_ohlcv','adjustment_semantics':'provider_reported','series_id':f'twelve_data_basic:{symbol}:regular:1d'}
+    def collection_identity(snapshot):
+        if not isinstance(snapshot,str) or not HEX.fullmatch(snapshot) or git('rev-parse','--verify',snapshot+'^{commit}',location=source_repo).decode().strip()!=snapshot:
+            raise AuditError('collection contract unavailable')
+        universe,_=read('config/collection-universe.json',snapshot=snapshot,location=source_repo)
+        entries=universe.get('daily_series') if isinstance(universe,dict) else None
+        if not isinstance(entries,list) or not entries: raise AuditError('collection contract invalid')
+        mapping={}
+        for entry in entries:
+            if not isinstance(entry,dict) or not isinstance(entry.get('symbol'),str) or not SYMBOL.fullmatch(entry['symbol']) or entry['symbol'] in mapping or entry.get('asset_class') not in {'stocks','etf'}:
+                raise AuditError('collection contract invalid')
+            mapping[entry['symbol']]=(entry['asset_class'],entry.get('ticker_effective_at'))
+        return mapping
+    source_head=git('rev-parse','HEAD',location=source_repo).decode().strip()
+    current_identity=collection_identity(source_head)
+    def check_index_identity(index,symbol,identity):
+        if symbol not in identity: raise AuditError('series absent from collection contract')
+        asset,effective=identity[symbol]
+        expected={'provider':'twelve_data_basic','symbol':symbol,'asset_class':asset,'session':'regular','interval':'1d','series_semantics':'daily_regular_ohlcv','adjustment_semantics':'provider_reported','series_id':f'twelve_data_basic:{symbol}:regular:1d','identity_effective_from':effective}
         if not isinstance(index,dict) or type(index.get('schema_version')) is not int or index['schema_version']!=1 or any(index.get(k)!=v for k,v in expected.items()):
             raise AuditError('series identity invalid')
         if 'sort_order' in index and index['sort_order']!='trade_date_asc': raise AuditError('series sort order invalid')
@@ -96,7 +113,7 @@ def _audit(repo, commit, trade_date, target_date, symbols, conflict_path, expect
     for symbol in symbols:
         base=f'data/market-data/series/daily/twelve_data_basic/{symbol}'
         idx, blob=read(base+'/_index.json')
-        check_index_identity(idx,symbol)
+        check_index_identity(idx,symbol,current_identity)
         check_index_layout(idx)
         rows=[]
         for meta in idx['shards']:
@@ -123,6 +140,7 @@ def _audit(repo, commit, trade_date, target_date, symbols, conflict_path, expect
     old_snapshot=conflict['store_input_sha']
     if git('rev-parse','--verify',old_snapshot+'^{commit}').decode().strip()!=old_snapshot:
         raise AuditError('conflict old snapshot mismatch')
+    old_identity=collection_identity(conflict['compute_sha'])
     def digest(value):
         return hashlib.sha256(json.dumps(value,ensure_ascii=False,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()
     for item in records:
@@ -133,7 +151,7 @@ def _audit(repo, commit, trade_date, target_date, symbols, conflict_path, expect
             if ref['provider']!='twelve_data_basic' or ref['index_path']!='series/daily/twelve_data_basic/'+symbol+'/_index.json' or not isinstance(ref['index_blob_sha'],str) or not HEX.fullmatch(ref['index_blob_sha']): raise ValueError('index ref')
             if request['provider']!='twelve_data_basic' or request['symbol']!=symbol or request['trade_date_exclusive_upper_bound']!=trade_date: raise ValueError('request identity')
             index,_=read(base+'/_index.json',ref['index_blob_sha'],old_snapshot)
-            check_index_identity(index,symbol)
+            check_index_identity(index,symbol,old_identity)
             shard=ref['shard']; name=shard['path'].rsplit('/',1)[-1]
             if not re.fullmatch(r'[0-9]{6}\.json',name) or shard['path']!='series/daily/twelve_data_basic/'+symbol+'/'+name or not isinstance(shard['blob_sha'],str) or not HEX.fullmatch(shard['blob_sha']): raise ValueError('shard path')
             check_index_layout(index)

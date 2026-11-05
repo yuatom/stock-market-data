@@ -58,3 +58,14 @@ class LocalContractEntrypointTests(unittest.TestCase):
                 result=subprocess.run(['/bin/sh',str(ENTRY)],cwd=temporary,
                     env={'PATH':'/usr/bin:/bin','PYTHON':str(fake),'TEST_EXIT':str(code)},capture_output=True,text=True)
                 with self.subTest(code=code): self.assertEqual(result.returncode,code)
+
+    def test_correct_version_missing_dependencies_stops_before_pytest(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fake = Path(temporary) / 'python'
+            fake.write_text('#!/bin/sh\nif [ "$1" = "-c" ]; then exec ' + shlex.quote(sys.executable) +
+                ' -I -S -c "import sys; sys.version_info=(3,12,0); $2"; fi\nprintf "PYTEST_MUST_NOT_RUN\\n"\n')
+            fake.chmod(0o755)
+            result=subprocess.run(['/bin/sh',str(ENTRY)],cwd=temporary,
+                env={'PATH':'/usr/bin:/bin','PYTHON':str(fake)},capture_output=True,text=True)
+            self.assertEqual(result.returncode,2)
+            self.assertNotIn('PYTEST_MUST_NOT_RUN',result.stdout)
