@@ -82,12 +82,21 @@ def _audit(repo, commit, trade_date, target_date, symbols, conflict_path, expect
         if date.fromisoformat(day).isoformat()!=day: raise AuditError('invalid row date')
         if type(close) not in (int,float) or not math.isfinite(close): raise AuditError('invalid row close')
         return day
+    def check_index_identity(index,symbol):
+        expected={'provider':'twelve_data_basic','symbol':symbol,'asset_class':'stocks','session':'regular','interval':'1d','series_semantics':'daily_regular_ohlcv','adjustment_semantics':'provider_reported','series_id':f'twelve_data_basic:{symbol}:regular:1d'}
+        if not isinstance(index,dict) or type(index.get('schema_version')) is not int or index['schema_version']!=1 or any(index.get(k)!=v for k,v in expected.items()):
+            raise AuditError('series identity invalid')
+        if 'sort_order' in index and index['sort_order']!='trade_date_asc': raise AuditError('series sort order invalid')
+        if 'lineage_segments' in index and not isinstance(index['lineage_segments'],list): raise AuditError('series lineage invalid')
+        for field in ('identity_effective_from','first_trade_date','last_trade_date'):
+            value=index.get(field)
+            if value is not None and (not isinstance(value,str) or not re.fullmatch(r'\d{4}-\d{2}-\d{2}',value) or date.fromisoformat(value).isoformat()!=value):
+                raise AuditError('series date invalid')
     results=[]
     for symbol in symbols:
         base=f'data/market-data/series/daily/twelve_data_basic/{symbol}'
         idx, blob=read(base+'/_index.json')
-        expected={'provider':'twelve_data_basic','symbol':symbol,'asset_class':'stocks','session':'regular','interval':'1d','series_semantics':'daily_regular_ohlcv','adjustment_semantics':'provider_reported','series_id':f'twelve_data_basic:{symbol}:regular:1d'}
-        if not isinstance(idx,dict) or any(idx.get(k)!=v for k,v in expected.items()) or not isinstance(idx.get('shards'),list): raise AuditError('series identity invalid')
+        check_index_identity(idx,symbol)
         check_index_layout(idx)
         rows=[]
         for meta in idx['shards']:
@@ -108,7 +117,7 @@ def _audit(repo, commit, trade_date, target_date, symbols, conflict_path, expect
     conflict,conflict_blob=read(conflict_path,expected_conflict_blob)
     try:
         inv=conflict['invocation']; records=conflict['conflicts']; count=conflict['conflict_record_count']; displayed=conflict['conflict_diagnostic_record_count']; failures=conflict['failure_target_count']
-        valid=(conflict['schema_version']==1 and conflict['diagnostic_authority']=='non_authoritative_conflict_evidence' and conflict['trade_date']==trade_date and inv['mode']=='previous_session_eod' and isinstance(inv['invocation_id'],str) and bool(inv['invocation_id']) and all(HEX.fullmatch(conflict[k]) for k in ('compute_sha','store_input_sha')) and isinstance(records,list) and all(type(n) is int and n>=0 for n in (count,displayed,failures)) and displayed==len(records) and count>=displayed and conflict['conflict_diagnostics_truncated']==(count>displayed) and conflict_path.endswith(hashlib.sha256(inv['invocation_id'].encode()).hexdigest()[:16]+'-conflicts.json'))
+        valid=(type(conflict['schema_version']) is int and conflict['schema_version']==1 and conflict['diagnostic_authority']=='non_authoritative_conflict_evidence' and conflict['trade_date']==trade_date and inv['mode']=='previous_session_eod' and isinstance(inv['invocation_id'],str) and bool(inv['invocation_id']) and all(HEX.fullmatch(conflict[k]) for k in ('compute_sha','store_input_sha')) and isinstance(records,list) and all(type(n) is int and n>=0 for n in (count,displayed,failures)) and displayed==len(records) and count>=displayed and type(conflict['conflict_diagnostics_truncated']) is bool and conflict['conflict_diagnostics_truncated']==(count>displayed) and conflict_path.endswith(hashlib.sha256(inv['invocation_id'].encode()).hexdigest()[:16]+'-conflicts.json'))
     except (KeyError,TypeError): valid=False
     if not valid: raise AuditError('conflict diagnostic identity or counts invalid')
     old_snapshot=conflict['store_input_sha']
@@ -124,7 +133,7 @@ def _audit(repo, commit, trade_date, target_date, symbols, conflict_path, expect
             if ref['provider']!='twelve_data_basic' or ref['index_path']!='series/daily/twelve_data_basic/'+symbol+'/_index.json' or not isinstance(ref['index_blob_sha'],str) or not HEX.fullmatch(ref['index_blob_sha']): raise ValueError('index ref')
             if request['provider']!='twelve_data_basic' or request['symbol']!=symbol or request['trade_date_exclusive_upper_bound']!=trade_date: raise ValueError('request identity')
             index,_=read(base+'/_index.json',ref['index_blob_sha'],old_snapshot)
-            if index['series_id']!=f'twelve_data_basic:{symbol}:regular:1d' or index['symbol']!=symbol or index['provider']!='twelve_data_basic': raise ValueError('old series identity')
+            check_index_identity(index,symbol)
             shard=ref['shard']; name=shard['path'].rsplit('/',1)[-1]
             if not re.fullmatch(r'[0-9]{6}\.json',name) or shard['path']!='series/daily/twelve_data_basic/'+symbol+'/'+name or not isinstance(shard['blob_sha'],str) or not HEX.fullmatch(shard['blob_sha']): raise ValueError('shard path')
             check_index_layout(index)

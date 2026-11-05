@@ -176,6 +176,7 @@ class OfflineAuditTest(unittest.TestCase):
         index_path.write_bytes(original_index); first_path.write_bytes(original_shard); second_path.unlink()
         (self.repo/self.conflict).write_text(json.dumps(data)); self.commit()
         with self.assertRaises(audit.AuditError): audit.audit(self.repo,self.sha,'2026-11-04','2026-11-03',['AMD'],self.conflict)
+
         # A valid-looking index with an absent prior shard also cannot prove offset 1.
         first_meta=store._shard_meta('000000.json',0,first,True)
         target['start']=1; second_path.write_bytes(store.canonical_bytes(target)+b'\n')
@@ -189,3 +190,43 @@ class OfflineAuditTest(unittest.TestCase):
         index_path.write_bytes(original_index); first_path.write_bytes(original_shard); second_path.unlink()
         (self.repo/self.conflict).write_text(json.dumps(data)); self.commit()
         with self.assertRaises(audit.AuditError): audit.audit(self.repo,self.sha,'2026-11-04','2026-11-03',['AMD'],self.conflict)
+
+    def test_current_index_identity_and_optional_schema(self):
+        import copy
+        import offline_store_audit as audit
+        path=self.repo/'data/market-data/series/daily/twelve_data_basic/AMD/_index.json'
+        original=json.loads(path.read_text())
+        for field,value in [('schema_version',None),('schema_version',999),('schema_version',True),('interval','1min'),('asset_class','crypto'),('session','extended'),('series_semantics','wrong'),('adjustment_semantics','wrong'),('provider','wrong'),('symbol','OTHER'),('series_id','wrong'),('sort_order','descending'),('identity_effective_from','not-a-date'),('lineage_segments',{})]:
+            index=copy.deepcopy(original)
+            if field=='schema_version' and value is None: index.pop(field)
+            else: index[field]=value
+            path.write_text(json.dumps(index)); self.commit()
+            with self.subTest(field=field,value=value), self.assertRaises(audit.AuditError):
+                audit.audit(self.repo,self.sha,'2026-11-04','2026-11-03',['AMD'],self.conflict)
+
+    def test_prior_index_identity_even_when_snapshot_and_blob_rebound(self):
+        import copy
+        import offline_store_audit as audit
+        path=self.repo/'data/market-data/series/daily/twelve_data_basic/AMD/_index.json'
+        original=path.read_bytes(); index0=json.loads(original)
+        cases=[('schema_version',None),('schema_version',999),('schema_version',True),('interval','1min'),('asset_class','crypto'),('session','extended'),('series_semantics','wrong'),('adjustment_semantics','wrong'),('provider','wrong'),('symbol','OTHER'),('series_id','wrong'),('sort_order','descending'),('identity_effective_from','not-a-date'),('lineage_segments',{})]
+        for field,value in cases:
+            index=copy.deepcopy(index0)
+            if field=='schema_version' and value is None: index.pop(field)
+            else: index[field]=value
+            path.write_text(json.dumps(index)); self.commit(); old_sha=self.sha
+            index_blob=subprocess.check_output(['/usr/bin/git','-C',str(self.repo),'rev-parse',f'{old_sha}:data/market-data/series/daily/twelve_data_basic/AMD/_index.json'],text=True).strip()
+            diagnostic=copy.deepcopy(self.diagnostic); diagnostic['store_input_sha']=old_sha
+            diagnostic['conflicts'][0]['store_source']['index_blob_sha']=index_blob
+            path.write_bytes(original); (self.repo/self.conflict).write_text(json.dumps(diagnostic)); self.commit()
+            with self.subTest(field=field,value=value), self.assertRaises(audit.AuditError):
+                audit.audit(self.repo,self.sha,'2026-11-04','2026-11-03',['AMD'],self.conflict)
+
+    def test_conflict_envelope_strict_types(self):
+        import copy
+        import offline_store_audit as audit
+        for field,value in [('schema_version',True),('schema_version',1.0),('conflict_diagnostics_truncated',0),('conflict_diagnostics_truncated',1)]:
+            diagnostic=copy.deepcopy(self.diagnostic); diagnostic[field]=value
+            (self.repo/self.conflict).write_text(json.dumps(diagnostic)); self.commit()
+            with self.subTest(field=field,value=value), self.assertRaises(audit.AuditError):
+                audit.audit(self.repo,self.sha,'2026-11-04','2026-11-03',['AMD'],self.conflict)
