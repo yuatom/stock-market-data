@@ -19,6 +19,21 @@ except ModuleNotFoundError:
 
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 REF_PREFIX = "refs/tags/market-data-read/"
+SAFE_FAILURE_REASONS = frozenset({
+    "STORE_LOCAL_GIT_UNAVAILABLE", "STORE_LOCAL_GIT_FAILED",
+    "STORE_PUBLICATION_TRANSPORT_DEADLINE", "STORE_PUBLICATION_EXECUTOR_UNAVAILABLE",
+    "STORE_PUBLICATION_REMOTE_READ_REJECTED", "STORE_PUBLICATION_REMOTE_READ_EXHAUSTED",
+    "STORE_PUBLICATION_CANDIDATE_CHANGED", "STORE_PUBLICATION_REMOTE_MAIN_CHANGED",
+    "STORE_PUBLICATION_TAG_PUSH_REJECTED", "STORE_PUBLICATION_TAG_READBACK_UNCONFIRMED",
+    "STORE_PUBLICATION_FETCHED_COMMIT_MISMATCH", "STORE_PUBLICATION_VALIDATION_FAILED",
+})
+
+
+def safe_failure_reason(reason: object) -> str:
+    """Only fixed codes cross the verifier's process/log boundary."""
+    return reason if isinstance(reason, str) and reason in SAFE_FAILURE_REASONS else "STORE_PUBLICATION_VALIDATION_FAILED"
+
+
 # Implementation bounds; kept aligned with the publication transport owner by tests.
 REMOTE_ATTEMPTS = 3
 REMOTE_COMMAND_TIMEOUT_SECONDS = 30
@@ -305,7 +320,7 @@ def main() -> int:
             required_manifest=args.required_manifest,
         )
     except StorePublicationError as exc:
-        print(json.dumps({"status": "store_publication_failed", "reason": str(exc)}), file=sys.stderr)
+        print(json.dumps({"status": "store_publication_failed", "reason": safe_failure_reason(str(exc))}), file=sys.stderr)
         return 1
     print(json.dumps(receipt, sort_keys=True))
     return 0

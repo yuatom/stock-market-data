@@ -23,6 +23,7 @@ from fixed_baseline_targets import parse_fixed_selection, resolve_fixed_targets,
 from types import SimpleNamespace
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
+from verify_store_publication import safe_failure_reason
 
 MODE = 'daily_baseline_admission'
 ET = ZoneInfo('America/New_York')
@@ -37,10 +38,12 @@ CODES = frozenset({
 
 
 class AdmissionError(RuntimeError):
-    def __init__(self, code: str, *, debited: bool = False, evidence: dict | None = None):
+    def __init__(self, code: str, *, debited: bool = False, evidence: dict | None = None,
+                 verifier_reason: str | None = None):
         self.code = code if code in CODES else 'internal_error'
         self.debited = debited
         self.evidence = evidence or {}
+        self.verifier_reason = verifier_reason
         super().__init__(self.code)
 
 
@@ -57,6 +60,15 @@ def _run(argv: list[str], *, code: str = 'publication_failed') -> str:
         raise AdmissionError(code) from None
     if p.returncode:
         # Never copy remote URLs, private payloads or arbitrary stderr into public evidence.
+        if code == 'durability_failed':
+            reason = None
+            try:
+                value = json.loads(p.stderr) if len(p.stderr) <= 4096 else None
+                if isinstance(value, dict) and value.get('status') == 'store_publication_failed':
+                    reason = value.get('reason')
+            except (TypeError, ValueError):
+                pass
+            raise AdmissionError(code, verifier_reason=safe_failure_reason(reason))
         raise AdmissionError(code)
     return p.stdout.strip()
 
@@ -98,6 +110,10 @@ def verify_durability(repo: Path, sha: str, *, required_manifest: str | None = N
         elif expected_report is not None:
             raise ValueError
         return receipt
+    except AdmissionError as exc:
+        if exc.code == 'durability_failed':
+            raise
+        raise AdmissionError('durability_failed') from None
     except Exception:
         # Raw helper output, private diagnostics and arbitrary Git errors stay private.
         raise AdmissionError('durability_failed') from None
@@ -198,17 +214,30 @@ class StorePublisher:
                 'user.email=stock-market-data-bot@users.noreply.github.com',
                 'commit', '--quiet', '--no-gpg-sign', '-m', 'data: record daily admission budget or diagnostic')
             candidate = git(self.repo, 'rev-parse', 'HEAD')
-            # No pull/rebase/force retry: a concurrent writer invalidates this operation.
-            git(self.repo, 'push', 'origin', f'{candidate}:refs/heads/main')
         else:
             candidate = self.head
-        if self.remote_head() != candidate:
-            raise AdmissionError('object_drift')
-        if expected_report is None:
-            self.verify(self.repo, candidate)
-        else:
-            self.verify(self.repo, candidate, required_manifest=self.budget_relative,
-                        expected_report=expected_report)
+        publication = {'candidate_commit_sha': candidate, 'last_verified_commit_sha': self.head,
+                       'publication_kind': 'budget_predebit' if paths == [self.budget_relative] else 'diagnostic',
+                       'publication_phase': 'main_push', 'main_publication_outcome': 'UNCONFIRMED',
+                       'durability_outcome': 'UNCONFIRMED'}
+        try:
+            if candidate != self.head:
+                # No pull/rebase/force retry: a concurrent writer invalidates this operation.
+                git(self.repo, 'push', 'origin', f'{candidate}:refs/heads/main')
+            publication['publication_phase'] = 'main_readback'
+            if self.remote_head() != candidate:
+                raise AdmissionError('object_drift')
+            publication['main_publication_outcome'] = 'CONFIRMED'
+            publication['publication_phase'] = 'durability_verification'
+            if expected_report is None:
+                self.verify(self.repo, candidate)
+            else:
+                self.verify(self.repo, candidate, required_manifest=self.budget_relative,
+                            expected_report=expected_report)
+        except Exception as exc:
+            # Evidence only: never advance the verified head or attempt another write.
+            exc.publication = publication
+            raise
         self.head = candidate
         return candidate
 
@@ -442,7 +471,14 @@ def debit_before_request(h, writer, root: Path, day: str, budget: dict,
             if state['credits'] != before['credits'] + 1 or len(changes) != 1 or next(iter(changes.values())) != 1:
                 raise AdmissionError('budget_state_invalid')
             minute = next(iter(changes))
-        sha = writer.publish([writer.budget_relative])
+        try:
+            sha = writer.publish([writer.budget_relative])
+        except Exception as exc:
+            # Local ledger mutation is not a durable receipt, nor proof of provider I/O.
+            exc.predebit = {'state': 'UNCONFIRMED'}
+            if path is not None:
+                exc.predebit.update(credits_before=before['credits'], credits_after=state['credits'])
+            raise
         try:
             blob = git(writer.repo, 'rev-parse', f'{sha}:{writer.budget_relative}') if path is not None else None
             after = clock().astimezone(timezone.utc)
