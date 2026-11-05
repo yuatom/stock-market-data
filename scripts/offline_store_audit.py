@@ -36,7 +36,7 @@ def _audit(repo, commit, trade_date, target_date, symbols, conflict_path, expect
         return result.stdout
     if git('rev-parse','--verify',commit+'^{commit}').decode().strip()!=commit:
         raise AuditError('commit identity mismatch')
-    def read(path, expected=None, snapshot=None, location=repo):
+    def read(path, expected=None, snapshot=None, location=repo, raw_only=False):
         record=git('ls-tree','-z',snapshot or commit,'--',path,location=location)
         parts=record.rstrip(b'\0').split(b'\t',1)
         if len(parts)!=2 or parts[1].decode()!=path: raise AuditError('required exact path unavailable')
@@ -46,6 +46,7 @@ def _audit(repo, commit, trade_date, target_date, symbols, conflict_path, expect
         if expected is not None and blob!=expected: raise AuditError('expected blob mismatch')
         raw=git('cat-file','blob',blob,location=location)
         if hashlib.sha1(b'blob '+str(len(raw)).encode()+b'\0'+raw).hexdigest()!=blob: raise AuditError('blob bytes mismatch')
+        if raw_only: return raw,blob
         def unique(pairs):
             result={}
             for key,value in pairs:
@@ -76,12 +77,15 @@ def _audit(repo, commit, trade_date, target_date, symbols, conflict_path, expect
             names.add(name); cursor+=count
         if type(index.get('record_count')) is not int or index['record_count']!=cursor:
             raise AuditError('invalid shard index')
-    def check_row(row):
+    def check_row(row,effective=None):
         if not isinstance(row,dict): raise AuditError('invalid series row')
         day=row.get('trade_date'); close=row.get('close')
         if not isinstance(day,str) or not re.fullmatch(r'\d{4}-\d{2}-\d{2}',day): raise AuditError('invalid row date')
         if date.fromisoformat(day).isoformat()!=day: raise AuditError('invalid row date')
         if type(close) not in (int,float) or not math.isfinite(close): raise AuditError('invalid row close')
+        volume=row.get('volume')
+        if volume is not None and (not isinstance(volume,(int,float)) or not math.isfinite(volume) or volume<0): raise AuditError('invalid row volume')
+        if effective is not None and day<effective: raise AuditError('row precedes identity effective date')
         return day
     def collection_identity(snapshot):
         if not isinstance(snapshot,str) or not HEX.fullmatch(snapshot) or git('rev-parse','--verify',snapshot+'^{commit}',location=source_repo).decode().strip()!=snapshot:
@@ -126,7 +130,7 @@ def _audit(repo, commit, trade_date, target_date, symbols, conflict_path, expect
             fields={'start':start,'end':start+len(records)-1,'count':len(records),'byte_length':len(canonical),'json_sha256':hashlib.sha256(canonical).hexdigest()}
             if doc.get('start')!=start or any(meta.get(k)!=v for k,v in fields.items()): raise AuditError('shard metadata mismatch')
             rows.extend(records)
-        dates=[check_row(row) for row in rows]
+        dates=[check_row(row,idx.get('identity_effective_from')) for row in rows]
         if dates!=sorted(set(dates)) or len(rows)!=idx.get('record_count') or (dates and (idx.get('first_trade_date')!=dates[0] or idx.get('last_trade_date')!=dates[-1])): raise AuditError('series dates or count mismatch')
         results.append({'symbol':symbol,'index_blob':blob,'record_count':len(rows),'last_trade_date':dates[-1] if dates else None,'target_date_present':target_date in dates})
     pattern=rf'data/market-data/collector-state/{trade_date[:7]}/{trade_date}-previous_session_eod-[0-9a-f]{{16}}-conflicts\.json'
@@ -141,15 +145,30 @@ def _audit(repo, commit, trade_date, target_date, symbols, conflict_path, expect
     if git('rev-parse','--verify',old_snapshot+'^{commit}').decode().strip()!=old_snapshot:
         raise AuditError('conflict old snapshot mismatch')
     old_identity=collection_identity(conflict['compute_sha'])
+    access,_=read('config/market-data-collector-access.yaml',snapshot=conflict['compute_sha'],location=source_repo,raw_only=True)
+    # Restrict to the pinned, unambiguous producer setting rather than relying
+    # on the Store's different interval spelling (1d). Ambiguous YAML fails closed.
+    lines=access.decode('utf-8').splitlines()
+    roots=[i for i,line in enumerate(lines) if re.fullmatch(r'twelve_data_basic:\s*(?:#.*)?',line)]
+    if len(roots)!=1: raise AuditError('daily interval contract unavailable')
+    block=[]
+    for line in lines[roots[0]+1:]:
+        if line and not line[0].isspace() and not line.startswith('#'): break
+        block.append(line)
+    settings=[line for line in block if re.match(r'\s+interval_daily\s*:',line)]
+    if len(settings)!=1 or not re.fullmatch(r'  interval_daily:\s*(?:1day|"1day"|\x271day\x27)\s*(?:#.*)?',settings[0]):
+        raise AuditError('daily interval contract unavailable')
+    conflict_symbols=set()
     def digest(value):
         return hashlib.sha256(json.dumps(value,ensure_ascii=False,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()
     for item in records:
         try:
             symbol=item['symbol']; day=item['trade_date']; ref=item['store_source']; request=item['request_parameters']
             if not isinstance(symbol,str) or not SYMBOL.fullmatch(symbol) or date.fromisoformat(day).isoformat()!=day or day>=trade_date: raise ValueError('identity')
+            conflict_symbols.add(symbol)
             base=f'data/market-data/series/daily/twelve_data_basic/{symbol}'
             if ref['provider']!='twelve_data_basic' or ref['index_path']!='series/daily/twelve_data_basic/'+symbol+'/_index.json' or not isinstance(ref['index_blob_sha'],str) or not HEX.fullmatch(ref['index_blob_sha']): raise ValueError('index ref')
-            if request['provider']!='twelve_data_basic' or request['symbol']!=symbol or request['trade_date_exclusive_upper_bound']!=trade_date: raise ValueError('request identity')
+            if request['provider']!='twelve_data_basic' or request['symbol']!=symbol or request['interval']!='1day' or request['trade_date_exclusive_upper_bound']!=trade_date: raise ValueError('request identity')
             index,_=read(base+'/_index.json',ref['index_blob_sha'],old_snapshot)
             check_index_identity(index,symbol,old_identity)
             shard=ref['shard']; name=shard['path'].rsplit('/',1)[-1]
@@ -157,15 +176,19 @@ def _audit(repo, commit, trade_date, target_date, symbols, conflict_path, expect
             check_index_layout(index)
             metas=[m for m in index['shards'] if m.get('path')==name]
             if len(metas)!=1 or metas[0]['blob_sha']!=shard['blob_sha']: raise ValueError('shard membership')
-            cursor=0; rows=None; start=None
+            cursor=0; rows=None; start=None; previous_day=None
             for meta in index['shards']:
                 doc,_=read(base+'/'+meta['path'],meta['blob_sha'],old_snapshot)
                 if not isinstance(doc,dict) or not isinstance(doc.get('records'),list): raise ValueError('shard structure')
                 candidate=doc['records']; canonical=json.dumps(doc,ensure_ascii=False,sort_keys=True,separators=(',',':'),allow_nan=False).encode()
                 if type(doc.get('schema_version')) is not int or doc['schema_version']!=1 or type(doc.get('start')) is not int or doc['series_id']!=index['series_id'] or doc['start']!=cursor or meta['start']!=cursor or meta['end']!=cursor+len(candidate)-1 or meta['count']!=len(candidate) or meta['byte_length']!=len(canonical) or meta['json_sha256']!=hashlib.sha256(canonical).hexdigest(): raise ValueError('shard metadata')
-                for entry in candidate: check_row(entry)
+                for entry in candidate:
+                    current_day=check_row(entry,index.get('identity_effective_from'))
+                    if previous_day is not None and current_day<=previous_day: raise ValueError('old series dates not unique ascending')
+                    previous_day=current_day
                 if meta['path']==name:
-                    start=cursor; rows=candidate; break
+                    start=cursor; rows=candidate
+                    break
                 cursor+=len(candidate)
             row_number=ref['row_number']
             if rows is None or type(row_number) is not int or not start<=row_number<start+len(rows): raise ValueError('shard position')
@@ -188,6 +211,7 @@ def _audit(repo, commit, trade_date, target_date, symbols, conflict_path, expect
             if item['new_row_sha256'] not in {digest(variant) for variant in variants}: raise ValueError('new row digest')
         except (KeyError,TypeError,ValueError,IndexError) as exc:
             raise AuditError('conflict entry or old snapshot binding invalid') from exc
+    if failures<len(conflict_symbols): raise AuditError('conflict failure target count invalid')
     return {'scope':'local_store_evidence_only','store_commit':commit,'target_date':target_date,'series':results,'conflict_blob':conflict_blob,'conflict_old_snapshot':old_snapshot,'conflict_count':count,'verified_conflict_entries':len(records),'limitations':['provider new values not independently verified','no admission or production decision']}
 
 def audit(repo, commit, trade_date, target_date, symbols, conflict_path, expected_conflict_blob=None):
