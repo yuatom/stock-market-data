@@ -58,7 +58,7 @@ Neither sessions nor snapshots nor older recovery archives may change.
 ## Failure and reconciliation
 
 Failure during qualification/staging publishes no partial market-fact history;
-the original remote histories remain intact and consumed budgets remain charged.
+the original remote histories remain intact and pre-debited ledger entries are retained.
 An interruption can leave an IN_PROGRESS operational diagnostic; it is not PASS.
 Cleanup removes only the disposable local worktree, never production refs.
 
@@ -73,9 +73,53 @@ commit. No retry, second metadata push, automatic refund or automatic rollback
 is performed. Read actual Store main, candidate, retention ref and required
 manifest first. If the complete candidate landed, reconcile that exact commit;
 do not overwrite later writers or repeat provider requests blindly. If it did
-not land, preserve the already charged ledger and obtain a new explicit target
+not land, preserve the already pre-debited ledger and obtain a new explicit target
 before another attempt. Any later reversal is a separately authorized forward
 recovery based on the immutable old archives, never a force-reset of Store main.
+
+### Safe terminal failure evidence
+
+The CLI's nonzero `BLOCKED` JSON is the terminal execution diagnostic. A retained
+Store report may still be an older `IN_PROGRESS` snapshot with zero counters.
+That snapshot does not establish zero requests or zero predebits for the run.
+
+For failed budget, diagnostic, or fact publication, the CLI preserves:
+
+- `publication_kind`: `budget_predebit`, `diagnostic`, or `market_facts`.
+- `publication_phase`: `main_push`, `main_readback`, or `durability_verification`.
+- The candidate commit, expected retention ref, and last fully verified commit.
+  The verified writer head is never advanced solely to permit another report.
+- `main_publication_outcome=CONFIRMED` only after an exact matching main readback.
+  This is a past observation, not a claim that main cannot subsequently move.
+  `UNCONFIRMED` does not mean rejected or absent. A successful push acknowledgement
+  alone is not an exact readback. Failed verification leaves durability unconfirmed.
+- The original fixed publication/durability failure code and, when emitted by
+  the verifier, its allowlisted `verifier_reason`. Unknown/malformed verifier
+  messages become `STORE_PUBLICATION_VALIDATION_FAILED`; URLs, arbitrary stderr,
+  provider payloads and exception text are never copied into the public summary.
+
+Counters are run-local evidence, not provider billing or receipt evidence:
+
+- `budget_debits_confirmed` (also `budget_debits`) counts predebits for which
+  publication and durability verification completed, including a debit whose
+  later blob/time gate failed. `budget_debits_unconfirmed` records a locally
+  validated debit whose publication did not return a durable receipt.
+- `budget_debits_attempted` is those two counts combined, not the number of
+  calls to the debit helper or a replacement for the persisted day ledger.
+  `predebit_credits_before/after`, when present, are the validated local ledger
+  values around the failing debit. Reconcile the exact candidate on Store to
+  establish whether that debit landed; never refund an uncertain debit.
+- `requests_attempted` counts successful local pre-HTTP guards. It does not
+  prove a network request was transmitted, received, completed or billed.
+
+After an uncertain metadata or fact publication, `terminal_report_outcome` is
+`NOT_ATTEMPTED`: no follow-on diagnostic publication or automatic retry is made.
+If publication was already confirmed and a later provider/guard/blob operation
+fails, the existing guarded `BLOCKED` report path remains. Its outcome is
+`CONFIRMED` or `UNCONFIRMED`; a failed report retains separate safe failure
+evidence without replacing the original failure. No additional Store writes,
+provider requests, retention-tag repair, refunds or weaker integrity checks are
+introduced to obtain these diagnostics.
 
 These protections apply to the supported primary native route. The low-level
 `rebase_market_data_baseline.py` remains a helper with non-transactional local

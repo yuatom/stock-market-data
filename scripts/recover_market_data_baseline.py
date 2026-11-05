@@ -30,13 +30,19 @@ SAFE_CODES = frozenset({'incomplete_targets', 'unsafe_path', 'archive_exists',
     'original_invalid', 'replacement_rejected', 'candidate_invalid', 'unexpected_change',
     'object_drift', 'publication_unconfirmed', 'closure_invalid', 'credential_missing',
     'wrong_execution_surface', 'invalid_target', 'input_not_mature', 'budget_exhausted',
-    'budget_slot_expired', 'budget_state_invalid', 'deadline_exceeded', 'internal_error'})
+    'budget_slot_expired', 'budget_state_invalid', 'deadline_exceeded', 'internal_error',
+    'publication_failed', 'durability_failed'})
 
 
 class RecoveryError(RuntimeError):
-    def __init__(self, code: str, *, candidate_sha: str | None = None):
-        self.code = code if code in SAFE_CODES else 'internal_error'
+    def __init__(self, code: str, *, candidate_sha: str | None = None,
+                 publication: dict | None = None, verifier_reason: str | None = None,
+                 publication_failure_code: str | None = None):
+        self.code = code if isinstance(code, str) and code in SAFE_CODES else 'internal_error'
         self.candidate_sha = candidate_sha
+        self.publication = publication
+        self.verifier_reason = verifier_reason
+        self.publication_failure_code = publication_failure_code
         super().__init__(self.code)
 
 
@@ -99,7 +105,7 @@ def verify_outputs(repo: Path, sha: str, manifest: str, outputs: list[dict],
         receipt = json.loads(a._run([sys.executable,
             str(Path(__file__).with_name('verify_store_publication.py')),
             '--store-root', str(repo), '--expected-commit', sha,
-            '--writer-status', 'store_persisted', '--required-manifest', manifest]))
+            '--writer-status', 'store_persisted', '--required-manifest', manifest], code='durability_failed'))
         if (receipt.get('status') != 'durability_verified' or
             receipt.get('store_commit_sha') != sha or receipt.get('remote_main_sha') != sha or
             receipt.get('durability_ref') != f'refs/tags/market-data-read/{sha}' or
@@ -108,6 +114,10 @@ def verify_outputs(repo: Path, sha: str, manifest: str, outputs: list[dict],
         value = json.loads(a.git(repo, 'show', f'{sha}:{manifest}'))
         validate_manifest(value, outputs, request_id, day)
         return receipt
+    except a.AdmissionError as exc:
+        if exc.code == 'durability_failed':
+            raise
+        raise RecoveryError('closure_invalid') from None
     except Exception:
         raise RecoveryError('closure_invalid') from None
 
@@ -326,12 +336,19 @@ def stage_and_publish(h, writer, entries: list[dict], report: dict, *, compute: 
             a.validate_target(day, maturity, clock())
             if time.monotonic() > deadline:
                 raise RecoveryError('deadline_exceeded')
+            publication = {'candidate_commit_sha': candidate, 'last_verified_commit_sha': writer.head,
+                           'publication_kind': 'market_facts',
+                           'publication_phase': 'main_push', 'main_publication_outcome': 'UNCONFIRMED',
+                           'durability_outcome': 'UNCONFIRMED'}
             try:
                 a.git(stage, 'push', 'origin', f'{candidate}:refs/heads/main')
+                publication['publication_phase'] = 'durability_verification'
                 receipt = verify_outputs(stage, candidate, writer.budget_relative, required,
                                          writer.request_id, day)
-            except Exception:
-                raise RecoveryError('publication_unconfirmed', candidate_sha=candidate) from None
+            except Exception as exc:
+                raise RecoveryError('publication_unconfirmed', candidate_sha=candidate,
+                    publication=publication, verifier_reason=getattr(exc, 'verifier_reason', None),
+                    publication_failure_code=getattr(exc, 'code', 'internal_error')) from None
             return {'mode': MODE, 'status': 'PASS', 'compute_sha': compute_sha,
                     'store_start_sha': writer.base, 'store_commit_sha': candidate,
                     'request_id': writer.request_id, 'recovered_count': len(entries),
@@ -386,12 +403,12 @@ def recover(h, *, compute: Path, compute_sha: str, repo: Path, store_sha: str, d
         report['source_result_commit_sha'] = selected[0]['source_result_commit_sha']
     if fixed_selector is not None:
         report['fixed_selection'] = fixed_selector
-    writer.report(report)
-    deadline = time.monotonic() + 600
-    budget = config['collector']['budgets']['twelve_data_basic']
-    limits = {k: int(config['series']['baseline_initialization']['explicit_rebase'][k]) for k in
-              ('maximum_revised_overlap_records', 'revised_overlap_must_be_within_last_existing_sessions')}
     try:
+        writer.report(report)
+        deadline = time.monotonic() + 600
+        budget = config['collector']['budgets']['twelve_data_basic']
+        limits = {k: int(config['series']['baseline_initialization']['explicit_rebase'][k]) for k in
+                  ('maximum_revised_overlap_records', 'revised_overlap_must_be_within_last_existing_sessions')}
         for item in entries:
             source_guard(compute, compute_sha)
             a.validate_target(day, maturity, clock())
@@ -419,21 +436,75 @@ def recover(h, *, compute: Path, compute_sha: str, repo: Path, store_sha: str, d
     except Exception as exc:
         if getattr(exc, 'debited', False):
             report['budget_debits'] += 1
-        # Never make another write when a fact push may already have happened.
-        if not getattr(exc, 'candidate_sha', None):
+        unconfirmed = int(getattr(exc, 'predebit', {}).get('state') == 'UNCONFIRMED')
+        progress = {'requests_attempted': report['requests_attempted'],
+                    'budget_debits': report['budget_debits'],
+                    'budget_debits_confirmed': report['budget_debits'],
+                    'budget_debits_unconfirmed': unconfirmed,
+                    'budget_debits_attempted': report['budget_debits'] + unconfirmed,
+                    'terminal_report_outcome': 'NOT_ATTEMPTED'}
+        # Neither a fact push nor a metadata push with uncertain durability
+        # permits a new diagnostic write. Keep the verified head unchanged.
+        if not getattr(exc, 'candidate_sha', None) and not getattr(exc, 'publication', None):
             try:
                 writer.report(dict(report, status='BLOCKED', failure_code=failure_summary(exc)['failure_code']))
-            except Exception:
-                pass  # A dirty/drifting budget checkout or failed publication cannot be hidden.
+                progress['terminal_report_outcome'] = 'CONFIRMED'
+            except Exception as diagnostic_exc:
+                progress['terminal_report_outcome'] = 'UNCONFIRMED'
+                exc.terminal_report_failure = failure_summary(diagnostic_exc)
+        exc.recovery_progress = progress
         raise
 
 
 def failure_summary(exc: Exception) -> dict:
     code = getattr(exc, 'code', 'internal_error')
-    out = {'mode': MODE, 'status': 'BLOCKED', 'failure_code': code if code in SAFE_CODES else 'internal_error'}
-    candidate = getattr(exc, 'candidate_sha', None)
+    out = {'mode': MODE, 'status': 'BLOCKED',
+           'failure_code': code if isinstance(code, str) and code in SAFE_CODES else 'internal_error'}
+    publication = getattr(exc, 'publication', None)
+    publication = publication if isinstance(publication, dict) else {}
+    candidate = publication.get('candidate_commit_sha', getattr(exc, 'candidate_sha', None))
     if isinstance(candidate, str) and re.fullmatch(r'[0-9a-f]{40}', candidate):
-        out.update(candidate_commit_sha=candidate, publication_outcome='UNCONFIRMED', retry_allowed=False)
+        out.update(candidate_commit_sha=candidate, publication_outcome='UNCONFIRMED', retry_allowed=False,
+                   expected_durability_ref=f'refs/tags/market-data-read/{candidate}')
+        previous = publication.get('last_verified_commit_sha')
+        if isinstance(previous, str) and re.fullmatch(r'[0-9a-f]{40}', previous):
+            out['last_verified_commit_sha'] = previous
+        if publication.get('publication_phase') in ('main_push', 'main_readback', 'durability_verification'):
+            out['publication_phase'] = publication['publication_phase']
+        if publication.get('publication_kind') in ('budget_predebit', 'diagnostic', 'market_facts'):
+            out['publication_kind'] = publication['publication_kind']
+        for key in ('main_publication_outcome', 'durability_outcome'):
+            if publication.get(key) in ('CONFIRMED', 'UNCONFIRMED'):
+                out[key] = publication[key]
+    reason = getattr(exc, 'verifier_reason', None)
+    if reason is not None:
+        out['verifier_reason'] = admission().safe_failure_reason(reason)
+    cause = getattr(exc, 'publication_failure_code', None)
+    if cause is not None:
+        out['publication_failure_code'] = cause if isinstance(cause, str) and cause in SAFE_CODES else 'internal_error'
+    predebit = getattr(exc, 'predebit', None)
+    if isinstance(predebit, dict):
+        before, after = predebit.get('credits_before'), predebit.get('credits_after')
+        if type(before) is int and type(after) is int and 0 <= before and after == before + 1:
+            out.update(predebit_credits_before=before, predebit_credits_after=after)
+    progress = getattr(exc, 'recovery_progress', None)
+    if isinstance(progress, dict):
+        for key in ('requests_attempted', 'budget_debits', 'budget_debits_attempted',
+                    'budget_debits_confirmed', 'budget_debits_unconfirmed'):
+            value = progress.get(key)
+            if type(value) is int and value >= 0:
+                out[key] = value
+        if progress.get('terminal_report_outcome') in ('CONFIRMED', 'UNCONFIRMED', 'NOT_ATTEMPTED'):
+            out['terminal_report_outcome'] = progress['terminal_report_outcome']
+    diagnostic = getattr(exc, 'terminal_report_failure', None)
+    if isinstance(diagnostic, dict):
+        # This value was already projected through the same fixed-field allowlist.
+        # Copy only bounded protocol fields, never arbitrary exception dictionaries.
+        safe = RecoveryError(diagnostic.get('failure_code'), publication={
+            key: diagnostic.get(key) for key in ('candidate_commit_sha', 'last_verified_commit_sha',
+                'publication_phase', 'publication_kind', 'main_publication_outcome', 'durability_outcome')},
+            verifier_reason=diagnostic.get('verifier_reason'))
+        out['terminal_report_failure'] = failure_summary(safe)
     return out
 
 
