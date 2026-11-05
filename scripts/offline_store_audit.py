@@ -130,10 +130,18 @@ def _audit(repo, commit, trade_date, target_date, symbols, conflict_path, expect
             check_index_layout(index)
             metas=[m for m in index['shards'] if m.get('path')==name]
             if len(metas)!=1 or metas[0]['blob_sha']!=shard['blob_sha']: raise ValueError('shard membership')
-            doc,_=read(base+'/'+name,shard['blob_sha'],old_snapshot); meta=metas[0]; rows=doc['records']
-            canonical=json.dumps(doc,ensure_ascii=False,sort_keys=True,separators=(',',':'),allow_nan=False).encode()
-            start=meta['start']; row_number=ref['row_number']
-            if type(start) is not int or type(row_number) is not int or type(doc.get('schema_version')) is not int or doc['schema_version']!=1 or type(doc.get('start')) is not int or not isinstance(rows,list) or doc['series_id']!=index['series_id'] or doc['start']!=start or meta['end']!=start+len(rows)-1 or meta['count']!=len(rows) or meta['byte_length']!=len(canonical) or meta['json_sha256']!=hashlib.sha256(canonical).hexdigest() or not start<=row_number<start+len(rows): raise ValueError('shard metadata')
+            cursor=0; rows=None; start=None
+            for meta in index['shards']:
+                doc,_=read(base+'/'+meta['path'],meta['blob_sha'],old_snapshot)
+                if not isinstance(doc,dict) or not isinstance(doc.get('records'),list): raise ValueError('shard structure')
+                candidate=doc['records']; canonical=json.dumps(doc,ensure_ascii=False,sort_keys=True,separators=(',',':'),allow_nan=False).encode()
+                if type(doc.get('schema_version')) is not int or doc['schema_version']!=1 or type(doc.get('start')) is not int or doc['series_id']!=index['series_id'] or doc['start']!=cursor or meta['start']!=cursor or meta['end']!=cursor+len(candidate)-1 or meta['count']!=len(candidate) or meta['byte_length']!=len(canonical) or meta['json_sha256']!=hashlib.sha256(canonical).hexdigest(): raise ValueError('shard metadata')
+                for entry in candidate: check_row(entry)
+                if meta['path']==name:
+                    start=cursor; rows=candidate; break
+                cursor+=len(candidate)
+            row_number=ref['row_number']
+            if rows is None or type(row_number) is not int or not start<=row_number<start+len(rows): raise ValueError('shard position')
             old=rows[row_number-start]
             check_row(old)
             if old['trade_date']!=day or digest(old)!=item['old_row_sha256']: raise ValueError('old row mismatch')

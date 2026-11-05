@@ -98,7 +98,7 @@ class OfflineAuditTest(unittest.TestCase):
             elif kind=='wrong_count_type': index['shards'][0]['count']=True
             else:
                 if kind=='missing_close': doc['records'][0].pop('close')
-                if kind=='bad_date': doc['records'][0]['trade_date']='20261103'; index['first_trade_date']=index['last_trade_date']='20261103'
+                if kind=='bad_date': doc['records'][0]['trade_date']='20261103'
                 if kind=='nonnumeric_close': doc['records'][0]['close']='bad'
                 if kind=='nan_close': doc['records'][0]['close']=float('nan')
                 raw=json.dumps(doc,ensure_ascii=False,sort_keys=True,separators=(',',':'),allow_nan=True).encode()
@@ -140,3 +140,52 @@ class OfflineAuditTest(unittest.TestCase):
         self.assertNotIn('private-secret',result.stderr)
         self.assertEqual(result.stdout,'')
         self.assertEqual(result.stderr,'local evidence audit failed: invalid or unavailable input\n')
+
+    def test_old_index_prior_shard_actual_count_must_prove_global_offset(self):
+        import copy
+        import offline_store_audit as audit
+        base=self.repo/'data/market-data/series/daily/twelve_data_basic/AMD'
+        index_path=base/'_index.json'; first_path=base/'000000.json'; second_path=base/'000100.json'
+        original_index=index_path.read_bytes(); original_shard=first_path.read_bytes()
+        index=json.loads(original_index); target=json.loads(original_shard)
+        first=copy.deepcopy(target); first['records'][0]['trade_date']='2026-11-02'
+        first_path.write_bytes(store.canonical_bytes(first)+b'\n')
+        first_meta=store._shard_meta('000000.json',0,first,True)
+        target['start']=1; second_path.write_bytes(store.canonical_bytes(target)+b'\n')
+        target_meta=store._shard_meta('000100.json',1,target,False)
+        index['shards']=[first_meta,target_meta]; index['record_count']=2; index['first_trade_date']='2026-11-02'
+        index_path.write_bytes(store.canonical_bytes(index)+b'\n'); self.commit(); valid_sha=self.sha
+        data=copy.deepcopy(self.diagnostic); row=data['conflicts'][0]
+        data['store_input_sha']=valid_sha; row['store_source']['row_number']=1
+        row['store_source']['index_blob_sha']=subprocess.check_output(['/usr/bin/git','-C',str(self.repo),'rev-parse',f'{valid_sha}:data/market-data/series/daily/twelve_data_basic/AMD/_index.json'],text=True).strip()
+        row['store_source']['shard'].update(path='series/daily/twelve_data_basic/AMD/000100.json',blob_sha=target_meta['blob_sha'])
+        index_path.write_bytes(original_index); first_path.write_bytes(original_shard); second_path.unlink()
+        (self.repo/self.conflict).write_text(json.dumps(data)); self.commit()
+        self.assertEqual(audit.audit(self.repo,self.sha,'2026-11-04','2026-11-03',['AMD'],self.conflict)['verified_conflict_entries'],1)
+        first_path.write_bytes(store.canonical_bytes(first)+b'\n')
+        first_meta=store._shard_meta('000000.json',0,first,True)
+        first_meta.update(count=100,end=99)
+        target['start']=100; second_path.write_bytes(store.canonical_bytes(target)+b'\n')
+        target_meta=store._shard_meta('000100.json',100,target,False)
+        index['shards']=[first_meta,target_meta]; index['record_count']=101; index['first_trade_date']='2026-11-02'
+        index_path.write_bytes(store.canonical_bytes(index)+b'\n'); self.commit(); forged=self.sha
+        data=copy.deepcopy(self.diagnostic); row=data['conflicts'][0]
+        data['store_input_sha']=forged; row['store_source']['row_number']=100
+        row['store_source']['index_blob_sha']=subprocess.check_output(['/usr/bin/git','-C',str(self.repo),'rev-parse',f'{forged}:data/market-data/series/daily/twelve_data_basic/AMD/_index.json'],text=True).strip()
+        row['store_source']['shard'].update(path='series/daily/twelve_data_basic/AMD/000100.json',blob_sha=target_meta['blob_sha'])
+        index_path.write_bytes(original_index); first_path.write_bytes(original_shard); second_path.unlink()
+        (self.repo/self.conflict).write_text(json.dumps(data)); self.commit()
+        with self.assertRaises(audit.AuditError): audit.audit(self.repo,self.sha,'2026-11-04','2026-11-03',['AMD'],self.conflict)
+        # A valid-looking index with an absent prior shard also cannot prove offset 1.
+        first_meta=store._shard_meta('000000.json',0,first,True)
+        target['start']=1; second_path.write_bytes(store.canonical_bytes(target)+b'\n')
+        target_meta=store._shard_meta('000100.json',1,target,False)
+        index['shards']=[first_meta,target_meta]; index['record_count']=2
+        index_path.write_bytes(store.canonical_bytes(index)+b'\n'); first_path.unlink()
+        self.commit(); missing=self.sha
+        data['store_input_sha']=missing; row['store_source']['row_number']=1
+        row['store_source']['index_blob_sha']=subprocess.check_output(['/usr/bin/git','-C',str(self.repo),'rev-parse',f'{missing}:data/market-data/series/daily/twelve_data_basic/AMD/_index.json'],text=True).strip()
+        row['store_source']['shard']['blob_sha']=target_meta['blob_sha']
+        index_path.write_bytes(original_index); first_path.write_bytes(original_shard); second_path.unlink()
+        (self.repo/self.conflict).write_text(json.dumps(data)); self.commit()
+        with self.assertRaises(audit.AuditError): audit.audit(self.repo,self.sha,'2026-11-04','2026-11-03',['AMD'],self.conflict)
