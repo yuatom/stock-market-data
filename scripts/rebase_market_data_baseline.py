@@ -30,6 +30,14 @@ class ExplicitRebaseError(RuntimeError):
     pass
 
 
+class ReplacementValidationError(ExplicitRebaseError):
+    """Stable rule emitted only at the gate that actually rejected the rows."""
+    def __init__(self, message, rule, **facts):
+        from replacement_diagnostics import project_rejection
+        self.rejection_evidence = project_rejection(dict(facts, rejection_rule=rule))
+        super().__init__(message)
+
+
 def _read_json(path: Path) -> dict[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
@@ -57,22 +65,24 @@ def validate_replacement(
     revised_overlap_must_be_within_last_existing_sessions: int,
 ) -> list[dict[str, Any]]:
     if not existing:
-        raise ExplicitRebaseError("explicit rebase requires an existing series")
+        raise ReplacementValidationError("explicit rebase requires an existing series", "existing_series_empty")
     if not replacement:
-        raise ExplicitRebaseError("replacement baseline is empty")
+        raise ReplacementValidationError("replacement baseline is empty", "replacement_empty")
 
     existing_rows = [dict(x) for x in existing]
     replacement_rows = [dict(x) for x in replacement]
     existing_rows.sort(key=lambda x: x["trade_date"])
     replacement_rows.sort(key=lambda x: x["trade_date"])
     if len({x["trade_date"] for x in replacement_rows}) != len(replacement_rows):
-        raise ExplicitRebaseError("replacement baseline contains duplicate trade_date")
+        raise ReplacementValidationError("replacement baseline contains duplicate trade_date", "duplicate_replacement_dates")
 
     replacement_by_date = {row["trade_date"]: row for row in replacement_rows}
     missing_existing = [row["trade_date"] for row in existing_rows if row["trade_date"] not in replacement_by_date]
     if missing_existing:
-        raise ExplicitRebaseError(
-            "replacement baseline does not cover existing dates: " + ",".join(missing_existing[:8])
+        raise ReplacementValidationError(
+            "replacement baseline does not cover existing dates: " + ",".join(missing_existing[:8]),
+            "missing_existing_dates", missing_existing_count=len(missing_existing),
+            missing_existing_dates=missing_existing[:8]
         )
 
     tail_count = max(1, int(revised_overlap_must_be_within_last_existing_sessions))
@@ -83,8 +93,9 @@ def validate_replacement(
         if store.canonical_bytes(old) == store.canonical_bytes(new):
             continue
         if old["trade_date"] not in allowed_revision_dates:
-            raise ExplicitRebaseError(
-                f"provider revision {old['trade_date']} is outside the authorized settlement tail"
+            raise ReplacementValidationError(
+                f"provider revision {old['trade_date']} is outside the authorized settlement tail",
+                "revision_outside_tail", revision_date=old['trade_date']
             )
         revisions.append(
             {
@@ -96,9 +107,10 @@ def validate_replacement(
         )
 
     if len(revisions) > int(maximum_revised_overlap_records):
-        raise ExplicitRebaseError(
+        raise ReplacementValidationError(
             f"revised overlap count {len(revisions)} exceeds explicit-rebase limit "
-            f"{maximum_revised_overlap_records}"
+            f"{maximum_revised_overlap_records}",
+            "revised_overlap_limit", revised_overlap_records=len(revisions)
         )
     return revisions
 
@@ -263,11 +275,16 @@ def _replacement_history_outputsize(
 
 def _validated_replacement_bar(row: Mapping[str, Any]) -> dict[str, Any]:
     """Apply normal Store validation before the maintenance-only shard writer."""
-    bar = store._normalize_bar(row)
+    try:
+        bar = store._normalize_bar(row)
+    except store.MarketDataError:
+        # This is the normalizer's explicit data-validation exception, not an
+        # arbitrary helper failure. Unknown exceptions retain their identity.
+        raise ReplacementValidationError("replacement bar failed validation", "invalid_replacement_bar") from None
     for field in ("open", "high", "low", "close", "volume"):
         value = bar.get(field)
         if not isinstance(value, (int, float)) or isinstance(value, bool):
-            raise ExplicitRebaseError(f"replacement {field} must be numeric")
+            raise ReplacementValidationError(f"replacement {field} must be numeric", "invalid_replacement_bar")
     store.canonical_bytes(bar)  # Reject non-finite values in every numeric field.
     return bar
 

@@ -24,6 +24,7 @@ from types import SimpleNamespace
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 from verify_store_publication import safe_failure_reason
+from replacement_diagnostics import project_rejection
 
 MODE = 'daily_baseline_admission'
 ET = ZoneInfo('America/New_York')
@@ -307,20 +308,26 @@ def prepare_series(h, root: Path, universe: dict, config: dict, day: str, *, tar
 def compare_replacement(h, candidate: dict, fetched: list[dict], day: str, limits: dict) -> dict:
     """Same admission rules as rebase, with no archive or replacement call."""
     existing, effective, target = candidate['existing'], candidate['effective'], candidate['target_records']
-    evidence: dict[str, Any] = {}
+    evidence: dict[str, Any] = {'target_records': target}
     try:
+        if type(existing) in (list, tuple):
+            evidence['existing_records'] = len(existing)
         rows = [h.rebaser._validated_replacement_bar(x) for x in fetched]
         rows = sorted((x for x in rows if x['trade_date'] < day and
                        (effective is None or x['trade_date'] >= effective)), key=lambda x: x['trade_date'])
         if not rows or (len(rows) < target and not effective):
+            evidence.update(rejection_rule='insufficient_replacement_records', replacement_records=len(rows))
             raise ValueError
         first_required = min(existing[0]['trade_date'], rows[-target:][0]['trade_date'])
         rows = [x for x in rows if x['trade_date'] >= first_required]
+        # Preserve the original comparison calls and their fail-closed behavior.
+        # Discard their raw values; failure diagnostics are projected separately.
         by_date = {x['trade_date']: x for x in rows}
-        evidence['missing_existing_dates'] = [x['trade_date'] for x in existing if x['trade_date'] not in by_date]
-        evidence['overlap_differences'] = [
+        _missing = [x['trade_date'] for x in existing if x['trade_date'] not in by_date]
+        _differences = [
             {'trade_date': x['trade_date'], 'changed_fields': h.rebaser._field_diff(x, by_date[x['trade_date']])}
             for x in existing if x['trade_date'] in by_date and x != by_date[x['trade_date']]]
+        evidence['replacement_records'] = len(rows)
         revisions = h.rebaser.validate_replacement(existing, rows, **limits)
         old_dates = {x['trade_date'] for x in existing}
         return {'symbol': candidate['symbol'], 'status': 'PASS', 'revisions': revisions,
@@ -329,8 +336,10 @@ def compare_replacement(h, candidate: dict, fetched: list[dict], day: str, limit
                 'last_trade_date': rows[-1]['trade_date'],
                 'latest_date_advanced': rows[-1]['trade_date'] > existing[-1]['trade_date'],
                 'replacement_sha256': h.store.json_sha256(rows), 'history_outputsize': candidate['outputsize']}
-    except Exception:
-        raise AdmissionError('replacement_rejected', evidence=evidence) from None
+    except Exception as exc:
+        if isinstance(exc, getattr(h.rebaser, 'ReplacementValidationError', ())):
+            evidence.update(project_rejection(exc.rejection_evidence))
+        raise AdmissionError('replacement_rejected', evidence=project_rejection(evidence)) from None
 
 
 
