@@ -22,6 +22,7 @@ from pathlib import Path
 from dynamic_baseline_targets import parse_dynamic_selection
 from fixed_baseline_targets import parse_fixed_selection, resolve_fixed_targets, validate_selection_mix
 from typing import Any
+from replacement_diagnostics import ReplacementDiagnostic
 
 MODE = 'daily_baseline_rebase'
 PREFIX = 'data/market-data/'
@@ -221,7 +222,9 @@ def qualify(h, item: dict, fetched: list[dict], day: str, limits: dict) -> None:
     start = min(item['existing'][0]['trade_date'], rows[-item['target_records']:][0]['trade_date'])
     rows = [x for x in rows if x['trade_date'] >= start]
     if h.store.json_sha256(rows) != summary['replacement_sha256']:
-        raise RecoveryError('replacement_rejected')
+        exc = RecoveryError('replacement_rejected')
+        exc.evidence = {'rejection_rule': 'replacement_hash_mismatch'}
+        raise exc
     item.update(rows=rows, summary=summary)
 
 
@@ -429,7 +432,14 @@ def recover(h, *, compute: Path, compute_sha: str, repo: Path, store_sha: str, d
                 outputsize=item['outputsize'], trade_date=day, effective=item['effective'], before_request=before_request)
             if not attempted:
                 raise RecoveryError('candidate_invalid')
-            qualify(h, item, fetched, day, limits)
+            try:
+                qualify(h, item, fetched, day, limits)
+            except Exception as exc:
+                evidence = (getattr(exc, 'evidence', None)
+                    if isinstance(exc, (a.AdmissionError, RecoveryError)) and exc.code == 'replacement_rejected'
+                    else None)
+                exc.replacement_diagnostic = ReplacementDiagnostic(item['symbol'], tuple(targets), evidence)
+                raise
         require_complete(targets, entries)
         return stage_and_publish(h, writer, entries, report, compute=compute,
             compute_sha=compute_sha, day=day, maturity=maturity, deadline=deadline, clock=clock)
@@ -447,7 +457,7 @@ def recover(h, *, compute: Path, compute_sha: str, repo: Path, store_sha: str, d
         # permits a new diagnostic write. Keep the verified head unchanged.
         if not getattr(exc, 'candidate_sha', None) and not getattr(exc, 'publication', None):
             try:
-                writer.report(dict(report, status='BLOCKED', failure_code=failure_summary(exc)['failure_code']))
+                writer.report(dict(report, **failure_summary(exc)))
                 progress['terminal_report_outcome'] = 'CONFIRMED'
             except Exception as diagnostic_exc:
                 progress['terminal_report_outcome'] = 'UNCONFIRMED'
@@ -460,6 +470,9 @@ def failure_summary(exc: Exception) -> dict:
     code = getattr(exc, 'code', 'internal_error')
     out = {'mode': MODE, 'status': 'BLOCKED',
            'failure_code': code if isinstance(code, str) and code in SAFE_CODES else 'internal_error'}
+    diagnostic = getattr(exc, 'replacement_diagnostic', None)
+    if type(diagnostic) is ReplacementDiagnostic:
+        out.update(diagnostic.as_dict())
     publication = getattr(exc, 'publication', None)
     publication = publication if isinstance(publication, dict) else {}
     candidate = publication.get('candidate_commit_sha', getattr(exc, 'candidate_sha', None))
