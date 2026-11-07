@@ -41,6 +41,14 @@ before spending credits. All replacement rows are acquired before rebuilding.
 
 Only the current-day budget and unique recovery diagnostic can be written during
 acquisition. The budget-writing checkout never receives rebuilt market facts.
+Before the first request predebit, recovery validates the current-day ledger and
+requires enough remaining daily credits for every resolved target (one credit
+per target). An unfundable batch stops with `budget_exhausted`, without spending
+credits or calling the provider. Initial and terminal diagnostics may still be
+published, preserving credit/minute counters. This is a preflight, not a credit
+reservation: existing per-request time, minute-budget, source/Store identity and
+durability guards remain mandatory. It applies to default, fixed and dynamic
+recovery selections; it does not change admission or ordinary collectors.
 An isolated disposable Git worktree starts from its last durable budget commit.
 In that worktree the existing rebase helpers archive the entire old logical
 history and index, rebuild shards, then re-read every target history, verify

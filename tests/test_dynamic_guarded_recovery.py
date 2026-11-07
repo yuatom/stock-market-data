@@ -70,6 +70,22 @@ class DynamicGuardedRecoveryTests(recovery.RecoveryIntegrationFixture, unittest.
         with self.assertRaises(Exception):self.dynamic_recovery(selector=selector)
         self.assertEqual(self.http_count,0);self.assertEqual(git(self.store_remote,'rev-parse','refs/heads/main'),self.base)
 
+    def test_only_two_resolved_dynamic_targets_need_two_remaining_credits(self):
+        self.seed_budget(198)
+        result = self.dynamic_recovery()
+        self.assertEqual((result['status'], result['recovered_count']), ('PASS', 2))
+        self.assertEqual(self.http_count, 2)
+        self.assertEqual(self.current_budget()['credits'], 200)
+
+    def test_two_dynamic_targets_with_one_credit_block_without_spending(self):
+        self.seed_budget(199)
+        with self.assertRaises(Exception) as caught:
+            self.dynamic_recovery()
+        self.assertEqual(caught.exception.code, 'budget_exhausted')
+        self.assertEqual(self.http_count, 0)
+        self.assertEqual(self.current_budget()['credits'], 199)
+        self.assert_no_remote_facts()
+
     def test_failed_second_dynamic_target_never_publishes_partial_history(self):
         def fail_second(url, **kwargs):
             if self.http_count:raise RuntimeError('synthetic provider failure')

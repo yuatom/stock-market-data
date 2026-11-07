@@ -78,6 +78,22 @@ class FixedGuardedRecoveryTests(recovery.RecoveryIntegrationFixture, unittest.Te
         )
         self.assertEqual(diagnostic["fixed_selection"], self.fixed_selector(selected))
 
+    def test_one_selected_of_three_uses_one_remaining_credit(self):
+        self.seed_budget(199)
+        result = self.fixed_recovery(self.fixed_selector(['AAA']))
+        self.assertEqual((result['status'], result['recovered_count']), ('PASS', 1))
+        self.assertEqual(self.http_count, 1)
+        self.assertEqual(self.current_budget()['credits'], 200)
+
+    def test_two_selected_with_one_credit_block_without_spending(self):
+        self.seed_budget(199)
+        with self.assertRaises(Exception) as caught:
+            self.fixed_recovery(self.fixed_selector(['AAA', 'BBB']))
+        self.assertEqual(caught.exception.code, 'budget_exhausted')
+        self.assertEqual(self.http_count, 0)
+        self.assertEqual(self.current_budget()['credits'], 199)
+        self.assert_no_remote_facts()
+
     def assert_no_fixed_facts_published(self, unselected_before):
         self.assert_no_remote_facts()
         head = recovery.git(self.store_remote, "rev-parse", "refs/heads/main")
