@@ -157,6 +157,21 @@ class RecoveryIntegrationFixture:
         return {'values': [dict(datetime=r['trade_date'], **{k: str(v) for k, v in r.items()
                            if k != 'trade_date'}) for r in reversed(self.new)]}
 
+    def seed_budget(self, credits, minutes=None):
+        path = self.repo / f'data/market-data/collector-state/{DAY[:7]}/{DAY}-twelve-data-budget.json'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({'schema_version': 1, 'trade_date': DAY,
+                                    'credits': credits, 'minutes': {} if minutes is None else minutes}))
+        git(self.repo, 'add', '.')
+        git(self.repo, 'commit', '-m', 'synthetic budget')
+        git(self.repo, 'push', 'origin', 'main')
+        self.base = git(self.repo, 'rev-parse', 'HEAD')
+
+    def current_budget(self):
+        head = git(self.store_remote, 'rev-parse', 'refs/heads/main')
+        path = f'data/market-data/collector-state/{DAY[:7]}/{DAY}-twelve-data-budget.json'
+        return json.loads(git(self.repo, 'show', f'{head}:{path}'))
+
     def run_recovery(self, http=None):
         class Clock(datetime):
             @classmethod

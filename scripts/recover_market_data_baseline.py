@@ -412,9 +412,18 @@ def recover(h, *, compute: Path, compute_sha: str, repo: Path, store_sha: str, d
         budget = config['collector']['budgets']['twelve_data_basic']
         limits = {k: int(config['series']['baseline_initialization']['explicit_rebase'][k]) for k in
                   ('maximum_revised_overlap_records', 'revised_overlap_must_be_within_last_existing_sessions')}
-        for item in entries:
+        for target_index, item in enumerate(entries):
             source_guard(compute, compute_sha)
             a.validate_target(day, maturity, clock())
+            if target_index == 0:
+                # Not a reservation: every per-request guard still runs.
+                budget_path = writer.safe_path(writer.budget_relative)
+                per_day = int(budget['hard_credits_per_day'])
+                a.validate_budget_file(budget_path, day, per_day=per_day,
+                                       per_minute=int(budget['hard_credits_per_minute']))
+                state = a.read_budget_state(budget_path, day)
+                if len(entries) > per_day - state['credits']:
+                    raise RecoveryError('budget_exhausted')
             debit = a.debit_before_request(h, writer, writer.repo / PREFIX, day, budget, clock=clock,
                 deadline=deadline, maturity=maturity, compute=compute, compute_sha=compute_sha,
                 timing=report['timing_diagnostics'])
