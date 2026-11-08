@@ -93,9 +93,18 @@ def validate_replacement(
         if store.canonical_bytes(old) == store.canonical_bytes(new):
             continue
         if old["trade_date"] not in allowed_revision_dates:
+            difference = None
+            try:
+                from replacement_diagnostics import summarize_revision_difference
+                difference = summarize_revision_difference(old, new, store.canonical_bytes)
+            except Exception:
+                # The decision is already made. Diagnostic failure cannot
+                # change the acceptance rule or obscure this rejection.
+                pass
             raise ReplacementValidationError(
                 f"provider revision {old['trade_date']} is outside the authorized settlement tail",
-                "revision_outside_tail", revision_date=old['trade_date']
+                "revision_outside_tail", revision_date=old['trade_date'],
+                revision_difference=difference
             )
         revisions.append(
             {
