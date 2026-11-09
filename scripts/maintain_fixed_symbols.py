@@ -95,6 +95,103 @@ def _qualifying_rejection(exc, symbol):
                 ('budget_debits_attempted', 1), ('budget_debits_unconfirmed', 0))))
 
 
+def _immutable_blob(repo, sha, path):
+    entry = a.git(repo, 'ls-tree', sha, '--', path).split('\t')
+    if len(entry) != 2 or entry[1] != path:
+        _fail()
+    mode, kind, blob = entry[0].split()
+    if mode != '100644' or kind != 'blob' or not re.fullmatch(r'[0-9a-f]{40}', blob):
+        _fail()
+    return blob
+
+
+def _immutable_series(repo, sha, symbol, store):
+    """Read an immutable series closure, never the mutable checkout or manifest."""
+    prefix = f'{r.PREFIX}series/daily/twelve_data_basic/{symbol}/'
+    index_path = prefix + '_index.json'
+    _immutable_blob(repo, sha, index_path)
+    index = json.loads(a.git(repo, 'show', f'{sha}:{index_path}'))
+    if (type(index) is not dict or index.get('schema_version') != 1 or
+        index.get('provider') != 'twelve_data_basic' or index.get('symbol') != symbol or
+        type(index.get('shards')) is not list or not index['shards']):
+        _fail()
+    paths = {index_path}; rows = []; cursor = 0
+    for meta in index['shards']:
+        name = meta.get('path')
+        if type(name) is not str or not re.fullmatch(r'[0-9]{6}\.json', name) or prefix + name in paths:
+            _fail()
+        path = prefix + name; paths.add(path)
+        blob = _immutable_blob(repo, sha, path)
+        doc = json.loads(a.git(repo, 'show', f'{sha}:{path}'))
+        if (type(doc) is not dict or doc.get('series_id') != index.get('series_id') or
+            type(doc.get('records')) is not list or not doc['records'] or
+            type(meta.get('start')) is not int or meta['start'] != cursor or
+            type(doc.get('start')) is not int or doc['start'] != cursor):
+            _fail()
+        actual = store._shard_meta(name, cursor, doc, bool(meta.get('sealed')))
+        for key in ('start', 'end', 'count', 'byte_length', 'json_sha256', 'blob_sha'):
+            if store.canonical_bytes(actual[key]) != store.canonical_bytes(meta.get(key)):
+                _fail()
+        if meta['blob_sha'] != blob:
+            _fail()
+        rows.extend(doc['records']); cursor += len(doc['records'])
+    actual_paths = set(filter(None, a.git(repo, 'ls-tree', '-r', '--name-only', '-z', sha, '--', prefix).split('\0')))
+    dates = [row['trade_date'] for row in rows]
+    if (actual_paths != paths or dates != sorted(set(dates)) or
+        type(index.get('record_count')) is not int or index['record_count'] != len(rows) or
+        index.get('first_trade_date') != dates[0] or index.get('last_trade_date') != dates[-1]):
+        _fail()
+    return index, rows, paths
+
+
+def _success_outputs(repo, *, start, sha, symbol, day, path, report):
+    """Independently derive required outputs and bind old/new facts to receipts.
+
+    This checks retained immutable evidence, not provider truth or a new
+    historical qualification. It never authorizes another request or write.
+    """
+    try:
+        store = a.load_helpers().store
+        old_index, old_rows, _ = _immutable_series(repo, start, symbol, store)
+        index, rows, paths = _immutable_series(repo, sha, symbol, store)
+        summaries = report.get('results')
+        if type(summaries) is not list or len(summaries) != 1:
+            _fail()
+        summary = summaries[0]
+        old_dates = {row['trade_date'] for row in old_rows}
+        expected = dict(symbol=symbol, status='PASS', existing_records=len(old_rows),
+            replacement_records=len(rows), new_records=sum(row['trade_date'] not in old_dates for row in rows),
+            last_trade_date=rows[-1]['trade_date'], latest_date_advanced=rows[-1]['trade_date'] > old_rows[-1]['trade_date'],
+            replacement_sha256=store.json_sha256(rows))
+        if any(store.canonical_bytes(summary.get(k)) != store.canonical_bytes(v) for k, v in expected.items()):
+            _fail()
+        for key in ('schema_version', 'provider', 'symbol', 'asset_class', 'series_id', 'session',
+                    'interval', 'series_semantics', 'adjustment_semantics', 'identity_effective_from',
+                    'sort_order', 'shard_record_limit', 'shard_byte_limit'):
+            if store.canonical_bytes(index.get(key)) != store.canonical_bytes(old_index.get(key)):
+                _fail()
+        archive_path = f'{r.PREFIX}recovery/{day}/twelve_data_basic/daily-baseline-rebase/{symbol}.json'
+        _immutable_blob(repo, sha, archive_path)
+        archive = json.loads(a.git(repo, 'show', f'{sha}:{archive_path}'))
+        revisions = summary.get('revisions')
+        if type(revisions) is not list:
+            _fail()
+        archived = dict(schema_version=1, market_fact_recovery_archive=True, provider='twelve_data_basic',
+            symbol=symbol, trade_date=day, old_index=old_index, old_records=old_rows,
+            revisions=revisions, replacement_record_count=len(rows))
+        if any(store.canonical_bytes(archive.get(k)) != store.canonical_bytes(v) for k, v in archived.items()):
+            _fail()
+        baseline = index.get('baseline_initialization', {})
+        if (baseline.get('recovery_archive_path') != archive_path[len(r.PREFIX):] or
+            type(baseline.get('revised_overlap_records')) is not int or
+            baseline['revised_overlap_records'] != len(revisions)):
+            _fail()
+        paths.update({path, r.INVENTORY, archive_path})
+        return [{'path': p, 'blob_sha': _immutable_blob(repo, sha, p)} for p in sorted(paths)]
+    except Exception:
+        _fail()
+
+
 def _verify_terminal(repo, *, start, sha, path, day, request_id, symbol, selector,
                      before, remaining, passed, compute_sha, result=None, rejection=None):
     """Check immutable closure, budget delta and write boundary before continuing."""
@@ -115,8 +212,8 @@ def _verify_terminal(repo, *, start, sha, path, day, request_id, symbol, selecto
     if (any(report.get(k) != v for k, v in expected.items()) or
         any(type(report.get(k)) is not int for k in ('target_count', 'requests_attempted', 'budget_debits'))):
         _fail()
-    required = [{'path': r.PREFIX + item['path'], 'blob_sha': item['blob_sha']}
-                for item in budget.get('required_outputs', [])]
+    required = (_success_outputs(repo, start=start, sha=sha, symbol=symbol, day=day, path=path, report=report)
+                if result is not None else [{'path': path, 'blob_sha': _immutable_blob(repo, sha, path)}])
     r.validate_manifest(budget, required, request_id, day)
     for item in required:
         r.safe_path(repo, item['path'])
@@ -321,6 +418,10 @@ def read_progress(repo: Path, *, day: str, request_id: str, manifest_commit_sha:
                     _verify_terminal(repo,**args,rejection={'replacement_rejection':evidence})
                 verified_rows=rows
                 verified_rows[-1]=dict(row,checkpoint_commit_sha=sha,checkpoint_path=checkpoint)
+                # A later corrupt checkpoint must not hide a verified prefix.
+                # Overall status remains UNKNOWN until the whole scan succeeds.
+                result['published_symbols']=[x['symbol'] for x in verified_rows if x['status']=='PASS']
+                result['quarantined_symbols']=[x['symbol'] for x in verified_rows if x['status']=='QUARANTINED']
                 previous=sha
             else:
                 gap=True
