@@ -54,6 +54,22 @@ series:
     target_record_count_source: maximum_of_series_analysis_windows_may_read_last_sessions
     normal_mode: verified_prefix_extension_then_append_only
     normal_mode_provider_revision_behavior: fail_closed_and_require_explicit_rebase
+    historical_tail_backfill:
+      mode: daily_history_tail_backfill
+      trigger: explicit_workflow_dispatch_only
+      fixed_selector_required: true
+      dynamic_or_default_universe_selection_forbidden: true
+      execution_date_must_match_current_et_date: true
+      budget_and_diagnostic_date: execution_date
+      historical_cutoff_is_inclusive_provider_session: true
+      maturity_boundary: historical_cutoff_next_calendar_day_at_settlement_minimum_next_day_et
+      all_retained_dates_must_be_refetched_and_canonically_equal: true
+      historical_revisions_allowed: 0
+      prefix_extension_and_internal_insert_forbidden: true
+      old_logical_rows_and_sealed_shards_must_be_preserved: true
+      current_active_shard_may_append_new_rows: true
+      publication: one_complete_guarded_fact_commit_with_exact_output_closure
+      independent_exchange_calendar_completeness_claim_forbidden: true
     explicit_rebase:
       mode: daily_baseline_rebase
       purpose: resolve_provider_settlement_revision_only_after_explicit_audited_rebase

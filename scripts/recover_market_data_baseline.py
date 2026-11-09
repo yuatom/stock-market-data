@@ -84,7 +84,7 @@ def write_json(path: Path, value: dict) -> None:
     path.write_text(payload, encoding='utf-8')
 
 
-def validate_manifest(value: dict, outputs: list[dict], request_id: str, day: str) -> None:
+def validate_manifest(value: dict, outputs: list[dict], request_id: str, day: str, *, mode: str = MODE) -> None:
     if not outputs or len({x['path'] for x in outputs}) != len(outputs):
         raise RecoveryError('closure_invalid')
     required = []
@@ -94,13 +94,13 @@ def validate_manifest(value: dict, outputs: list[dict], request_id: str, day: st
             raise RecoveryError('closure_invalid')
         required.append({'path': path[len(PREFIX):], 'blob_sha': blob})
     if (value.get('schema_version') != 1 or value.get('request_id') != request_id or
-        value.get('trade_date') != day or value.get('stage') != MODE or
+        value.get('trade_date') != day or value.get('stage') != mode or
         value.get('required_outputs') != required):
         raise RecoveryError('closure_invalid')
 
 
 def verify_outputs(repo: Path, sha: str, manifest: str, outputs: list[dict],
-                   request_id: str, day: str) -> dict:
+                   request_id: str, day: str, *, mode: str = MODE) -> dict:
     a = admission()
     try:
         receipt = json.loads(a._run([sys.executable,
@@ -113,7 +113,10 @@ def verify_outputs(repo: Path, sha: str, manifest: str, outputs: list[dict],
             receipt.get('verified_required_outputs') != outputs):
             raise RecoveryError('closure_invalid')
         value = json.loads(a.git(repo, 'show', f'{sha}:{manifest}'))
-        validate_manifest(value, outputs, request_id, day)
+        if mode == MODE:
+            validate_manifest(value, outputs, request_id, day)
+        else:
+            validate_manifest(value, outputs, request_id, day, mode=mode)
         return receipt
     except a.AdmissionError as exc:
         if exc.code == 'durability_failed':
@@ -123,27 +126,31 @@ def verify_outputs(repo: Path, sha: str, manifest: str, outputs: list[dict],
         raise RecoveryError('closure_invalid') from None
 
 
-def make_writer(repo: Path, expected: str, day: str, request_id: str):
+def make_writer(repo: Path, expected: str, day: str, request_id: str, *, mode: str = MODE):
+    if mode not in (MODE, 'daily_history_tail_backfill'):
+        raise RecoveryError('invalid_target')
     a = admission()
 
     def verify_metadata(root, sha, *, required_manifest=None, expected_report=None):
         if required_manifest is None:
             return a.verify_durability(root, sha)
         outputs = [{'path': expected_report['path'], 'blob_sha': expected_report['blob_sha']}]
-        return verify_outputs(root, sha, required_manifest, outputs, request_id, day)
+        if mode == MODE:
+            return verify_outputs(root, sha, required_manifest, outputs, request_id, day)
+        return verify_outputs(root, sha, required_manifest, outputs, request_id, day, mode=mode)
 
     class RecoveryPublisher(a.StorePublisher):
         def report(self, value):
             self.assert_current()
             if (value.get('request_id') != request_id or value.get('trade_date') != day or
-                value.get('mode') != MODE):
+                value.get('mode') != mode):
                 raise RecoveryError('closure_invalid')
             budget_path = self.safe_path(self.budget_relative)
             budget = a.read_budget_state(budget_path, day)
             path = self.safe_path(self.report_relative)
             write_json(path, value)
             blob = a.git(self.repo, 'hash-object', '--', str(path))
-            budget.update(schema_version=1, request_id=request_id, stage=MODE,
+            budget.update(schema_version=1, request_id=request_id, stage=mode,
                           required_outputs=[{'path': self.report_relative[len(PREFIX):], 'blob_sha': blob}])
             write_json(budget_path, budget)
             return self.publish([self.budget_relative, self.report_relative], expected_report={
@@ -151,6 +158,8 @@ def make_writer(repo: Path, expected: str, day: str, request_id: str):
 
     writer = RecoveryPublisher(repo, expected, day, request_id, verify=verify_metadata)
     writer.report_relative = f'{PREFIX}collector-state/{day[:7]}/{day}-daily-baseline-recovery-{request_id}.json'
+    if mode != MODE:
+        writer.report_relative = f'{PREFIX}collector-state/{day[:7]}/{day}-daily-history-tail-backfill-{request_id}.json'
     writer.allowed = {writer.budget_relative, writer.report_relative}
     if writer.safe_path(writer.report_relative).exists():
         raise RecoveryError('archive_exists')
