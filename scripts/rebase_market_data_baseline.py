@@ -88,6 +88,7 @@ def validate_replacement(
     tail_count = max(1, int(revised_overlap_must_be_within_last_existing_sessions))
     allowed_revision_dates = {row["trade_date"] for row in existing_rows[-tail_count:]}
     revisions: list[dict[str, Any]] = []
+    first_revision = None
     for old in existing_rows:
         new = replacement_by_date[old["trade_date"]]
         if store.canonical_bytes(old) == store.canonical_bytes(new):
@@ -106,6 +107,8 @@ def validate_replacement(
                 "revision_outside_tail", revision_date=old['trade_date'],
                 revision_difference=difference
             )
+        if first_revision is None:
+            first_revision = (old, new)
         revisions.append(
             {
                 "trade_date": old["trade_date"],
@@ -116,10 +119,24 @@ def validate_replacement(
         )
 
     if len(revisions) > int(maximum_revised_overlap_records):
+        # Keep the complete scan and its outside-tail rejection priority. Only
+        # after the count gate rejects, describe its earliest revised row.
+        difference = None
+        revision_date = None
+        if first_revision is not None:
+            old, new = first_revision
+            revision_date = old['trade_date']
+            try:
+                from replacement_diagnostics import summarize_revision_difference
+                difference = summarize_revision_difference(old, new, store.canonical_bytes)
+            except Exception:
+                # Best-effort observability cannot replace the original gate.
+                pass
         raise ReplacementValidationError(
             f"revised overlap count {len(revisions)} exceeds explicit-rebase limit "
             f"{maximum_revised_overlap_records}",
-            "revised_overlap_limit", revised_overlap_records=len(revisions)
+            "revised_overlap_limit", revised_overlap_records=len(revisions),
+            revision_date=revision_date, revision_difference=difference
         )
     return revisions
 

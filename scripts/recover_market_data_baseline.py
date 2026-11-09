@@ -17,6 +17,7 @@ import sys
 import tempfile
 import time
 from datetime import datetime, timezone
+from dataclasses import dataclass
 from pathlib import Path
 
 from dynamic_baseline_targets import parse_dynamic_selection
@@ -45,6 +46,14 @@ class RecoveryError(RuntimeError):
         self.verifier_reason = verifier_reason
         self.publication_failure_code = publication_failure_code
         super().__init__(self.code)
+
+
+@dataclass(frozen=True)
+class ConfirmedTerminalReceipt:
+    """Internal continuation evidence, created only after diagnostic durability."""
+    store_commit_sha: str
+    result_state_path: str
+    budget_manifest_path: str
 
 
 def admission():
@@ -126,8 +135,12 @@ def verify_outputs(repo: Path, sha: str, manifest: str, outputs: list[dict],
         raise RecoveryError('closure_invalid') from None
 
 
-def make_writer(repo: Path, expected: str, day: str, request_id: str, *, mode: str = MODE):
-    if mode not in (MODE, 'daily_history_tail_backfill'):
+def make_writer(repo: Path, expected: str, day: str, request_id: str, *, mode: str = MODE,
+                symbol: str | None = None):
+    if symbol is not None and (mode not in (MODE, 'daily_symbol_maintenance') or not isinstance(symbol, str) or
+                               not re.fullmatch(r'[A-Z][A-Z0-9.-]{0,9}', symbol)):
+        raise RecoveryError('invalid_target')
+    if mode not in (MODE, 'daily_history_tail_backfill', 'daily_symbol_maintenance'):
         raise RecoveryError('invalid_target')
     a = admission()
 
@@ -158,8 +171,12 @@ def make_writer(repo: Path, expected: str, day: str, request_id: str, *, mode: s
 
     writer = RecoveryPublisher(repo, expected, day, request_id, verify=verify_metadata)
     writer.report_relative = f'{PREFIX}collector-state/{day[:7]}/{day}-daily-baseline-recovery-{request_id}.json'
-    if mode != MODE:
+    if mode == 'daily_history_tail_backfill':
         writer.report_relative = f'{PREFIX}collector-state/{day[:7]}/{day}-daily-history-tail-backfill-{request_id}.json'
+    elif mode == 'daily_symbol_maintenance':
+        writer.report_relative = f'{PREFIX}collector-state/{day[:7]}/{day}-daily-symbol-maintenance-{request_id}.json'
+    if symbol is not None:
+        writer.report_relative = writer.report_relative[:-5] + f'-{symbol}.json'
     writer.allowed = {writer.budget_relative, writer.report_relative}
     if writer.safe_path(writer.report_relative).exists():
         raise RecoveryError('archive_exists')
@@ -379,7 +396,8 @@ def stage_and_publish(h, writer, entries: list[dict], report: dict, *, compute: 
 def recover(h, *, compute: Path, compute_sha: str, repo: Path, store_sha: str, day: str,
             request_id: str, config: dict, universe: dict, access: dict, key: str,
             clock=now_utc, dynamic_selector: dict | None = None, discovery_repo: Path | None = None,
-            fixed_selector: dict | None = None) -> dict:
+            fixed_selector: dict | None = None, symbol_transaction: str | None = None,
+            overall_deadline: float | None = None) -> dict:
     validate_selection_mix(fixed_selector=fixed_selector, dynamic_selector=dynamic_selector)
     a = admission()
     maturity = config['collector']['twelve_data_daily']['settlement_maturity']['minimum_next_day_et']
@@ -387,7 +405,14 @@ def recover(h, *, compute: Path, compute_sha: str, repo: Path, store_sha: str, d
     source_guard(compute, compute_sha)
     if not key:
         raise RecoveryError('credential_missing')
-    writer = make_writer(repo, store_sha, day, request_id)
+    if symbol_transaction is not None:
+        if (dynamic_selector is not None or not isinstance(fixed_selector, dict) or
+            len(fixed_selector.get('targets', [])) != 1 or
+            fixed_selector['targets'][0].get('symbol') != symbol_transaction):
+            raise RecoveryError('invalid_target')
+        writer = make_writer(repo, store_sha, day, request_id, symbol=symbol_transaction)
+    else:
+        writer = make_writer(repo, store_sha, day, request_id)
     if dynamic_selector is None and fixed_selector is None:
         entries = original_entries(h, writer.repo, universe, config, day)
         targets = [symbol for symbol, _ in h.collection.daily_universe(universe)]
@@ -415,9 +440,13 @@ def recover(h, *, compute: Path, compute_sha: str, repo: Path, store_sha: str, d
         report['source_result_commit_sha'] = selected[0]['source_result_commit_sha']
     if fixed_selector is not None:
         report['fixed_selection'] = fixed_selector
+    if symbol_transaction is not None:
+        report['transaction_symbol'] = symbol_transaction
     try:
         writer.report(report)
         deadline = time.monotonic() + 600
+        if overall_deadline is not None:
+            deadline = min(deadline, overall_deadline)
         budget = config['collector']['budgets']['twelve_data_basic']
         limits = {k: int(config['series']['baseline_initialization']['explicit_rebase'][k]) for k in
                   ('maximum_revised_overlap_records', 'revised_overlap_must_be_within_last_existing_sessions')}
@@ -475,8 +504,11 @@ def recover(h, *, compute: Path, compute_sha: str, repo: Path, store_sha: str, d
         # permits a new diagnostic write. Keep the verified head unchanged.
         if not getattr(exc, 'candidate_sha', None) and not getattr(exc, 'publication', None):
             try:
-                writer.report(dict(report, **failure_summary(exc)))
+                terminal_sha = writer.report(dict(report, **failure_summary(exc)))
                 progress['terminal_report_outcome'] = 'CONFIRMED'
+                if symbol_transaction is not None:
+                    exc.confirmed_terminal = ConfirmedTerminalReceipt(
+                        terminal_sha, writer.report_relative, writer.budget_relative)
             except Exception as diagnostic_exc:
                 progress['terminal_report_outcome'] = 'UNCONFIRMED'
                 exc.terminal_report_failure = failure_summary(diagnostic_exc)
@@ -527,6 +559,9 @@ def failure_summary(exc: Exception) -> dict:
                 out[key] = value
         if progress.get('terminal_report_outcome') in ('CONFIRMED', 'UNCONFIRMED', 'NOT_ATTEMPTED'):
             out['terminal_report_outcome'] = progress['terminal_report_outcome']
+    terminal = getattr(exc, 'confirmed_terminal', None)
+    if type(terminal) is ConfirmedTerminalReceipt and re.fullmatch(r'[0-9a-f]{40}', terminal.store_commit_sha):
+        out['terminal_report_commit_sha'] = terminal.store_commit_sha
     diagnostic = getattr(exc, 'terminal_report_failure', None)
     if isinstance(diagnostic, dict):
         # This value was already projected through the same fixed-field allowlist.

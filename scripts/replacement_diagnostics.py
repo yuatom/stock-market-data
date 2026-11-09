@@ -99,7 +99,7 @@ def project_rejection(value):
     day = safe_date(value.get('revision_date'))
     if day is not None:
         out['revision_date'] = day
-    if out['rejection_rule'] == 'revision_outside_tail':
+    if out['rejection_rule'] in {'revision_outside_tail', 'revised_overlap_limit'}:
         # Observability must never replace the already-established gate/rule.
         try:
             difference = project_revision_difference(value.get('revision_difference'))

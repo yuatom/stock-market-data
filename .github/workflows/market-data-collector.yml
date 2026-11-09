@@ -13,6 +13,7 @@ on:
           - previous_session_eod
           - daily_baseline_init
           - daily_baseline_rebase
+          - daily_symbol_maintenance
           - daily_history_tail_backfill
           - daily_baseline_admission
           - nasdaq_extended_probe
@@ -89,16 +90,19 @@ jobs:
           mode = os.environ.get('MODE', '')
           if dynamic and fixed:
               raise SystemExit('fixed and dynamic selections cannot be combined')
-          if mode == 'daily_history_tail_backfill':
+          if mode == 'daily_symbol_maintenance':
+              if dynamic or not fixed or os.environ.get('EXECUTION_DATE') or os.environ.get('HISTORICAL_CUTOFF'):
+                  raise SystemExit('fixed symbol maintenance requires explicit fixed targets')
+          elif mode == 'daily_history_tail_backfill':
               if dynamic or not fixed or os.environ.get('TRADE_DATE') or not os.environ.get('EXECUTION_DATE') or not os.environ.get('HISTORICAL_CUTOFF'):
                   raise SystemExit('historical tail requires explicit fixed targets and separate dates only')
           elif os.environ.get('EXECUTION_DATE') or os.environ.get('HISTORICAL_CUTOFF'):
               raise SystemExit('historical dates cannot be ignored by another mode')
-          if (dynamic or fixed) and mode not in ('daily_baseline_admission', 'daily_baseline_rebase', 'daily_history_tail_backfill'):
+          if (dynamic or fixed) and mode not in ('daily_baseline_admission', 'daily_baseline_rebase', 'daily_history_tail_backfill', 'daily_symbol_maintenance'):
               raise SystemExit('explicit target selection requires a guarded daily baseline mode')
 
   run:
-    if: inputs.mode != 'daily_history_tail_backfill' && inputs.execution_date == '' && inputs.historical_cutoff == '' && inputs.mode != 'daily_baseline_admission' && inputs.mode != 'daily_baseline_rebase' && (github.event_name != 'workflow_dispatch' || (inputs.dynamic_selection == '' && inputs.fixed_selection == ''))
+    if: inputs.mode != 'daily_symbol_maintenance' && inputs.mode != 'daily_history_tail_backfill' && inputs.execution_date == '' && inputs.historical_cutoff == '' && inputs.mode != 'daily_baseline_admission' && inputs.mode != 'daily_baseline_rebase' && (github.event_name != 'workflow_dispatch' || (inputs.dynamic_selection == '' && inputs.fixed_selection == ''))
     uses: ./.github/workflows/market-data-collector-runtime.yml
     with:
       trigger_kind: ${{ github.event_name }}
@@ -281,6 +285,82 @@ jobs:
             --store-repo ../store \
             --request-id "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
             "${selection_args[@]}"
+
+  symbol_maintenance:
+    needs: selector_guard
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'daily_symbol_maintenance' && inputs.execution_date == '' && inputs.historical_cutoff == ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    concurrency:
+      group: market-data-collector
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - name: Validate manual recovery identities before checkout
+        env:
+          TRADE_DATE: ${{ inputs.trade_date }}
+          EXPECTED_COMPUTE_SHA: ${{ inputs.expected_compute_sha }}
+          EXPECTED_STORE_SHA: ${{ inputs.expected_store_sha }}
+        shell: python
+        run: |
+          import datetime
+          import os
+          import re
+          if os.environ['GITHUB_REF'] != 'refs/heads/main':
+              raise SystemExit('recovery requires main')
+          for key in ('EXPECTED_COMPUTE_SHA', 'EXPECTED_STORE_SHA'):
+              if not re.fullmatch(r'[0-9a-f]{40}', os.environ.get(key, '')):
+                  raise SystemExit('recovery requires exact expected commits')
+          if os.environ['EXPECTED_COMPUTE_SHA'] != os.environ['GITHUB_SHA']:
+              raise SystemExit('recovery compute event identity mismatch')
+          try:
+              if datetime.date.fromisoformat(os.environ.get('TRADE_DATE', '')).isoformat() != os.environ['TRADE_DATE']:
+                  raise ValueError
+          except ValueError:
+              raise SystemExit('recovery requires an exact YYYY-MM-DD trade date')
+
+      - name: Checkout exact public recovery contract
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.expected_compute_sha }}
+          fetch-depth: 1
+          path: compute
+
+      - name: Checkout exact private Store
+        uses: actions/checkout@v4
+        with:
+          repository: yuatom/stock-market-data-store
+          token: ${{ secrets.MARKET_DATA_STORE_TOKEN }}
+          ref: ${{ inputs.expected_store_sha }}
+          fetch-depth: 0
+          path: store
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install bounded recovery dependency
+        run: python -m pip install --disable-pip-version-check PyYAML
+
+      - name: Maintain isolated fixed symbols with guarded publisher
+        working-directory: compute
+        env:
+          TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
+          EXPECTED_COMPUTE_SHA: ${{ inputs.expected_compute_sha }}
+          EXPECTED_STORE_SHA: ${{ inputs.expected_store_sha }}
+          TRADE_DATE: ${{ inputs.trade_date }}
+          FIXED_SELECTION: ${{ inputs.fixed_selection }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/maintain_fixed_symbols.py \
+            --trade-date "$TRADE_DATE" \
+            --compute-sha "$EXPECTED_COMPUTE_SHA" \
+            --store-sha "$EXPECTED_STORE_SHA" \
+            --store-repo ../store \
+            --request-id "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+            --fixed-selection "$FIXED_SELECTION"
 
   historical_tail:
     needs: selector_guard

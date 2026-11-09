@@ -1,0 +1,11 @@
+# Isolated fixed-symbol maintenance
+
+`daily_symbol_maintenance` is an explicit manual mode, never a scheduled fallback. It requires a nonempty ordered fixed selector with every initial index blob, exact Compute/Store commits, current ET accounting date and the existing07:00 maturity gate. Dynamic/default selection and historical cutoff inputs are rejected. Publishing this feature does not authorize any production recovery request.
+
+Each selected symbol gets at most one provider request and one independently atomic guarded rebase. The existing3-row maximum/last3-existing-session revision window, full old-date coverage, complete old-series archive and field-level diagnostics remain unchanged. An old-date anomaly is quarantined only after its typed quality refusal and diagnostic publication are positively confirmed. Unclassified errors, hash mismatches, transport failures, drift, budget/date/source failures or any uncertain publication stop the entire remaining sequence. No retries, rollback, overlap-ignore or automatic resume.
+
+A value-free immutable batch plan retains initial pins, exact order and limits before any request. Confirmed child receipts advance the Store only through an exact clean fast-forward; independent durable metadata checkpoints bind the verified prefix. All transactions share200/day and8/minute credits and one600-second deadline. Metadata writes neither spend nor refund credits. Existing successes remain visible as PARTIAL if a later step fails. Full old values remain only in the existing private recovery archive.
+
+PASS means every selected singleton qualified and published, not that an expected calendar cutoff was reached. Each successful item retains validated `last_trade_date`, `new_records`, `latest_date_advanced`; `completeness_proven` remains false. There is no guessed exchange calendar or implicit historical-cutoff authority.
+
+`read_progress` is a read-only inspector of already available objects and refs. It verifies the initial plan, linear child/checkpoint ancestry, immutable paths, report/Compute/selector identities, exact output closure, retained tags and ledger deltas. Missing or inconsistent evidence returns UNKNOWN. An uncheckpointed child remains unreconciled. The inspector never fetches, writes, retries or grants continuation permission.
