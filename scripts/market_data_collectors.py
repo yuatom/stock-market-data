@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import json
 import os
+import re
 import time
 import urllib.parse
 import urllib.request
@@ -71,6 +73,107 @@ def load_json(path: str | Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"expected object: {path}")
     return value
+
+
+class _NoCaptureRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, message, headers, newurl):
+        return None
+
+
+def _read_capture_chunked(response: Any, maximum_bytes: int) -> bytes:
+    """Validate framing before returning entity bytes; stdlib decoding is lenient."""
+    token = rb"[!#$%&'*+\-.^_`|~0-9A-Za-z]+"
+    quoted = rb'"(?:[\t\x20\x21\x23-\x5b\x5d-\x7e\x80-\xff]|\\[\t\x20-\x7e\x80-\xff])*"'
+    size_line = re.compile(rb"([0-9A-Fa-f]+)(?:[ \t]*;[ \t]*" + token +
+                           rb"(?:[ \t]*=[ \t]*(?:" + token + rb"|" + quoted + rb"))?)*\r\n")
+    trailer_line = re.compile(rb"(" + token + rb"):[\t\x20-\x7e\x80-\xff]*\r\n")
+    stream = response.fp
+    if response.chunked is not True or stream is None:
+        raise RuntimeError("raw transport chunk decoder unavailable")
+    framing_bytes = 0
+
+    def incomplete():
+        raise http.client.IncompleteRead(b"")
+
+    def read_line():
+        nonlocal framing_bytes
+        line = stream.readline(8193)
+        framing_bytes += len(line)
+        if len(line) > 8192 or not line.endswith(b"\r\n") or framing_bytes > 65536:
+            incomplete()
+        return line
+
+    def read_exact(size):
+        chunks = []
+        while size:
+            part = stream.read(size)
+            if not part:
+                incomplete()
+            chunks.append(part)
+            size -= len(part)
+        return b"".join(chunks)
+
+    body = bytearray()
+    while True:
+        match = size_line.fullmatch(read_line())
+        if match is None:
+            incomplete()
+        size = int(match[1], 16)
+        if size == 0:
+            while True:
+                line = read_line()
+                if line == b"\r\n":
+                    return bytes(body)
+                trailer = trailer_line.fullmatch(line)
+                if trailer is None or trailer[1].lower() in (b"content-length", b"transfer-encoding"):
+                    incomplete()
+        if size > maximum_bytes - len(body):
+            raise RuntimeError("raw response byte bound rejected")
+        body.extend(read_exact(size))
+        framing_bytes += 2
+        if framing_bytes > 65536 or read_exact(2) != b"\r\n":
+            incomplete()
+
+
+def _http_raw(url: str, *, timeout: int, user_agent: str, maximum_bytes: int) -> bytes:
+    """Bounded capture transport; never follow a redirect carrying credentials.
+
+    Existing JSON transport is unchanged. Caller owns authorization, budget,
+    global serialization, evidence destination and all market qualification.
+    """
+    if (type(maximum_bytes) is not int or not 0 < maximum_bytes <= 4 * 1024 * 1024 or
+        type(timeout) is not int or not 0 < timeout <= 120 or
+        not isinstance(user_agent, str) or not user_agent or len(user_agent) > 256 or
+        any(ord(char) < 32 or ord(char) > 126 for char in user_agent)):
+        raise RuntimeError("invalid raw transport bounds")
+    request = urllib.request.Request(url, headers={"User-Agent": user_agent, "Accept": "application/json"})
+    opener = urllib.request.build_opener(_NoCaptureRedirect())
+    with opener.open(request, timeout=timeout) as response:
+        if response.status != 200:
+            raise RuntimeError("raw transport HTTP status rejected")
+        media_types = response.headers.get_all("content-type", [])
+        media_type = media_types[0].split(";", 1)[0].strip().lower() if len(media_types) == 1 else ""
+        if not re.fullmatch(r"application/(?:json|[!#$%&'*+\-.^_`|~0-9a-z]+\+json)", media_type):
+            raise RuntimeError("raw transport content type rejected")
+        lengths = response.headers.get_all("content-length", [])
+        encodings = response.headers.get_all("transfer-encoding", [])
+        if (len(lengths) > 1 or len(encodings) > 1 or (lengths and encodings) or
+            (encodings and encodings[0].lower() != "chunked")):
+            raise RuntimeError("raw transport framing rejected")
+        expected_length = None
+        if lengths:
+            value = lengths[0].strip()
+            if not value.isascii() or not value.isdecimal() or len(value) > 10:
+                raise RuntimeError("raw transport framing rejected")
+            expected_length = int(value)
+            if not 0 < expected_length <= maximum_bytes:
+                raise RuntimeError("raw response byte bound rejected")
+        raw = _read_capture_chunked(response, maximum_bytes) if encodings else response.read(maximum_bytes + 1)
+        if expected_length is not None and len(raw) != expected_length:
+            raise RuntimeError("raw transport incomplete body")
+    if not raw or len(raw) > maximum_bytes:
+        raise RuntimeError("raw response byte bound rejected")
+    return raw
 
 
 def _http_json(url: str, *, timeout: int, user_agent: str) -> dict[str, Any]:
