@@ -21,8 +21,9 @@ def _load(name, rel):
     return module
 
 
-store = _load("metric_proof_store", "scripts/market_data_store.py")
-sys.modules["market_data_store"] = store
+# Keep the canonical Store identity across capture/rebase/proof collection orders.
+sys.path.insert(0, str(ROOT / "scripts"))
+import market_data_store as store
 proofmod = _load("metric_proof_builder", "scripts/build_deterministic_metric_proof.py")
 
 

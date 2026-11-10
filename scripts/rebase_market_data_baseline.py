@@ -315,6 +315,86 @@ def _validated_replacement_bar(row: Mapping[str, Any]) -> dict[str, Any]:
     return bar
 
 
+class CaptureOnlyError(RuntimeError):
+    """Value-free stop state. Unknown request/retention outcomes never retry."""
+    def __init__(self, code, phase, requests_attempted, raw_sha256=None):
+        self.code = code
+        self.phase = phase
+        self.requests_attempted = requests_attempted
+        self.raw_sha256 = raw_sha256
+        super().__init__(code + ":" + phase)
+
+
+def _capture_step(action, code, phase, requests_attempted, raw_sha256=None):
+    # Raise outside the handler: "from None" only hides __context__, which may
+    # still carry credential-bearing URLs into structured exception logging.
+    try:
+        return action()
+    except Exception:
+        pass
+    raise CaptureOnlyError(code, phase, requests_attempted, raw_sha256)
+
+
+def capture_daily_response(*, request: dict, api_key: str, access: Mapping[str, Any],
+                           before_request, retain_raw, retain_envelope,
+                           clock=None) -> dict[str, Any]:
+    """Capture one response as private, unqualified evidence, never recovery.
+
+    No CLI/workflow invokes this opt-in API. The external official runner must
+    supply its authorized one-use budget/source/concurrency guard and exact
+    private retention callbacks. A matching callback digest acknowledges content
+    identity only, not authenticated durability. Local callbacks cannot grant
+    authorization or qualify data. No market history parser/writer is called.
+    """
+    import hashlib
+    from raw_response_evidence import build_envelope, validate_request, MAX_RAW_BYTES
+    def prepare():
+        frozen = validate_request(request)
+        if not all(callable(callback) for callback in (before_request, retain_raw, retain_envelope)):
+            raise ValueError("mandatory external boundaries missing")
+        if (not isinstance(api_key, str) or not api_key or len(api_key) > 4096 or
+            any(ord(char) < 33 or ord(char) > 126 for char in api_key)):
+            raise ValueError("credential invalid")
+        spec = access['twelve_data_basic']
+        if (spec['base_url'] != 'https://api.twelvedata.com' or
+            spec['time_series_path'] != '/time_series' or spec['interval_daily'] != '1day'):
+            raise ValueError("capture destination mismatch")
+        timeout, user_agent = access['http']['timeout_seconds'], access['http']['user_agent']
+        if (type(timeout) is not int or not 0 < timeout <= 120 or
+            type(user_agent) is not str or not user_agent or len(user_agent) > 256 or
+            any(ord(char) < 32 or ord(char) > 126 for char in user_agent)):
+            raise ValueError("transport bounds invalid")
+        params = {key: frozen[key] for key in ('symbol','interval','exchange','mic_code',
+            'type','adjust','dp','start_date','end_date','outputsize','order')}
+        params.update(format='JSON', apikey=api_key)
+        url = 'https://api.twelvedata.com/time_series?' + urllib.parse.urlencode(params)
+        return frozen, timeout, user_agent, url
+    frozen_request, timeout, user_agent, url = _capture_step(
+        prepare, 'capture_preflight_failed', 'preflight', 0)
+    _capture_step(before_request, 'capture_preflight_failed', 'request_guard', 0)
+    raw = _capture_step(lambda: collectors._http_raw(url, timeout=timeout,
+        user_agent=user_agent, maximum_bytes=MAX_RAW_BYTES),
+        'capture_transport_failed', 'transport', 1)
+    raw_sha = hashlib.sha256(raw).hexdigest()
+    def retain(callback, payload, expected):
+        if callback(payload) != expected:
+            raise ValueError("retention acknowledgement mismatch")
+    _capture_step(lambda: retain(retain_raw, raw, raw_sha),
+        'capture_retention_unconfirmed', 'raw_retention', 1, raw_sha)
+    def build():
+        observed = (clock() if clock is not None else datetime.now(timezone.utc)).isoformat()
+        return build_envelope(raw, frozen_request, observed)
+    envelope = _capture_step(build, 'capture_evidence_invalid', 'evidence', 1, raw_sha)
+    envelope_sha = hashlib.sha256(envelope).hexdigest()
+    _capture_step(lambda: retain(retain_envelope, envelope, envelope_sha),
+        'capture_retention_unconfirmed', 'envelope_retention', 1, raw_sha)
+    return dict(status='CAPTURE_RETAINED_UNQUALIFIED', requests_attempted=1,
+        raw_response_sha256=raw_sha, envelope_sha256=envelope_sha,
+        retention_acknowledged=True, retention_durability_authenticated=False,
+        source_authenticated=False, market_fact_authority=False,
+        production_recovery_accepted=False)
+
+
 def _fetch_replacement_daily(
     symbol: str,
     api_key: str,

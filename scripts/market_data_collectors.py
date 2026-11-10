@@ -73,6 +73,35 @@ def load_json(path: str | Path) -> dict[str, Any]:
     return value
 
 
+class _NoCaptureRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, message, headers, newurl):
+        return None
+
+
+def _http_raw(url: str, *, timeout: int, user_agent: str, maximum_bytes: int) -> bytes:
+    """Bounded capture transport; never follow a redirect carrying credentials.
+
+    Existing JSON transport is unchanged. Caller owns authorization, budget,
+    global serialization, evidence destination and all market qualification.
+    """
+    if (type(maximum_bytes) is not int or not 0 < maximum_bytes <= 4 * 1024 * 1024 or
+        type(timeout) is not int or not 0 < timeout <= 120 or
+        not isinstance(user_agent, str) or not user_agent or len(user_agent) > 256 or
+        any(ord(char) < 32 or ord(char) > 126 for char in user_agent)):
+        raise RuntimeError("invalid raw transport bounds")
+    request = urllib.request.Request(url, headers={"User-Agent": user_agent, "Accept": "application/json"})
+    opener = urllib.request.build_opener(_NoCaptureRedirect())
+    with opener.open(request, timeout=timeout) as response:
+        if response.status != 200:
+            raise RuntimeError("raw transport HTTP status rejected")
+        if "json" not in response.headers.get("content-type", "").lower():
+            raise RuntimeError("raw transport content type rejected")
+        raw = response.read(maximum_bytes + 1)
+    if not raw or len(raw) > maximum_bytes:
+        raise RuntimeError("raw response byte bound rejected")
+    return raw
+
+
 def _http_json(url: str, *, timeout: int, user_agent: str) -> dict[str, Any]:
     request = urllib.request.Request(url, headers={"User-Agent": user_agent})
     with urllib.request.urlopen(request, timeout=timeout) as response:
