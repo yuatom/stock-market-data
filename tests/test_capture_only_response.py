@@ -123,13 +123,88 @@ class RawTransportTests(unittest.TestCase):
         stream=io.BytesIO(payload);response.read.side_effect=stream.read;response.__enter__.return_value=response
         return response
 
-    def framed_response(self,payload,headers):
-        wire=b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n'+headers+b'\r\n'+payload
+    def framed_response(self,payload,headers,content_type=b'application/json'):
+        wire=b'HTTP/1.1 200 OK\r\nContent-Type: '+content_type+b'\r\n'+headers+b'\r\n'+payload
         class SocketFixture:
             def makefile(self,*args,**kwargs):return io.BytesIO(wire)
         response=http.client.HTTPResponse(SocketFixture())
         response.begin()
         return response
+
+    def capture_framed(self,body,headers=b'Transfer-Encoding: chunked\r\n',content_type=b'application/json'):
+        response=self.framed_response(body,headers,content_type)
+        opener=mock.Mock();opener.open.return_value=response
+        retained=[]
+        def retain(payload):retained.append(payload);return hashlib.sha256(payload).hexdigest()
+        with mock.patch('urllib.request.build_opener',return_value=opener):
+            try:
+                result=r.capture_daily_response(request=request(),api_key='synthetic-key',access=access(),
+                    before_request=lambda:None,retain_raw=retain,retain_envelope=retain,clock=clock)
+            except r.CaptureOnlyError as exc:
+                result=exc
+        self.assertEqual(opener.open.call_count,1)
+        return result,retained
+
+    def test_invalid_chunk_framing_never_acknowledges_raw_or_envelope(self):
+        payload=raw();chunk=f'{len(payload):x}\r\n'.encode()+payload
+        cases=[chunk+b'\r\n0\r\n',chunk+b'\r\n0\r\nX-Synthetic: partial',
+               chunk+b'XX0\r\n\r\n',chunk+b'\r\n-0\r\n\r\n',
+               chunk+b'\r\n+0\r\n\r\n',chunk+b'\r\n0x0\r\n\r\n',
+               chunk+b'\r\n0\n\n',chunk+b'\r\n0\r\nX: ok\n\r\n',
+               chunk+b'\r\n0\r\nInvalid-Trailer\r\n\r\n',
+               chunk+b'\r\n0\r\nContent-Length: 1\r\n\r\n',
+               f'+{len(payload):x}\r\n'.encode()+payload+b'\r\n0\r\n\r\n',
+               f'{len(payload):x}\n'.encode()+payload+b'\r\n0\r\n\r\n']
+        for body in cases:
+            with self.subTest(body=body):
+                result,retained=self.capture_framed(body)
+                self.assertIsInstance(result,r.CaptureOnlyError)
+                self.assertEqual(result.code,'capture_transport_failed')
+                self.assertIsNone(result.__context__)
+                self.assertEqual(retained,[])
+
+    def test_complete_chunk_extensions_trailers_and_split_data_are_preserved(self):
+        payload=raw();first,second=payload[:19],payload[19:]
+        bodies=[f'{len(payload):x}\r\n'.encode()+payload+b'\r\n0\r\n\r\n',
+                f'{len(payload):017x}\r\n'.encode()+payload+b'\r\n0\r\n\r\n',
+                f'{len(payload):x}\r\n'.encode()+payload+b'\r\n'+b'0'*17+b'\r\n\r\n',
+                f'{len(first):x};name=token;quoted="a\\\"b"\r\n'.encode()+first+b'\r\n'+
+                f'{len(second):x}\r\n'.encode()+second+b'\r\n00;end=yes\r\nX-Synthetic: complete\r\n\r\n']
+        for body in bodies:
+            with self.subTest(body=body):
+                result,retained=self.capture_framed(body)
+                self.assertIsInstance(result,dict)
+                self.assertEqual(result['status'],'CAPTURE_RETAINED_UNQUALIFIED')
+                self.assertEqual(len(retained),2)
+                self.assertEqual(retained[0],payload)
+
+    def test_chunk_framing_overhead_is_bounded_before_retention(self):
+        payload=raw();chunk=f'{len(payload):x}\r\n'.encode()+payload+b'\r\n0\r\n'
+        cases=[chunk+b'X: '+b'a'*8192+b'\r\n\r\n',
+               chunk+(b'X: '+b'a'*1000+b'\r\n')*66+b'\r\n']
+        for body in cases:
+            with self.subTest(size=len(body)):
+                result,retained=self.capture_framed(body)
+                self.assertIsInstance(result,r.CaptureOnlyError)
+                self.assertEqual(result.code,'capture_transport_failed')
+                self.assertEqual(retained,[])
+
+    def test_json_media_type_is_exact_not_a_parameter_substring(self):
+        payload=raw();headers=f'Content-Length: {len(payload)}\r\n'.encode()
+        for media in [b'text/html; x=json',b'application/jsonp',b'application/notjson',
+                      b'text/json',b'application/json, text/html']:
+            with self.subTest(media=media):
+                result,retained=self.capture_framed(payload,headers,media)
+                self.assertIsInstance(result,r.CaptureOnlyError)
+                self.assertEqual(retained,[])
+        for media in [b'application/json; charset=utf-8',b'Application/JSON',b'application/problem+json']:
+            with self.subTest(media=media):
+                result,retained=self.capture_framed(payload,headers,media)
+                self.assertEqual(result['status'],'CAPTURE_RETAINED_UNQUALIFIED')
+                self.assertEqual(retained[0],payload)
+        result,retained=self.capture_framed(payload,headers+b'Content-Type: text/html\r\n')
+        self.assertIsInstance(result,r.CaptureOnlyError)
+        self.assertEqual(retained,[])
 
     def test_advertised_body_truncation_never_becomes_retained_capture(self):
         response=self.framed_response(raw(),f'Content-Length: {len(raw())+100}\r\n'.encode())

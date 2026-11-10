@@ -50,8 +50,16 @@ so an API-key query cannot be forwarded to another destination. The shared
 transport owner reads at most 4 MiB plus one overflow-detection byte, with no
 retry and the configured bounded timeout. Oversize/non-JSON/HTTP error responses
 stop. A declared Content-Length must be a single valid bounded value and match
-the actual byte count. Ambiguous length/transfer headers and incomplete chunked
-transfers are rejected, never acknowledged as complete. Close-delimited responses
+the actual byte count. Ambiguous length/transfer headers are rejected. Chunked
+bodies use a capture-only strict reader: hexadecimal chunk sizes and extensions,
+every data CRLF, the zero-size terminal chunk, trailer syntax and final empty CRLF
+line must all validate before retention. Framing lines are limited to 8 KiB each
+and framing overhead to 64 KiB in total, separately from the entity-body limit.
+Framing and trailers are validated but are not part of the retained entity bytes.
+Missing terminators, malformed delimiters and incomplete transfers are never
+acknowledged as complete. Exactly one JSON Content-Type is required: application/json
+or an application subtype ending in +json; a json substring in another media type
+or a parameter is insufficient. Close-delimited responses
 have no advertised length to compare, so EOF marks their transport boundary; it
 cannot prove that the provider intended no further content. Rejected HTTP/header
 bodies and oversized prefixes are not retained by this API.
