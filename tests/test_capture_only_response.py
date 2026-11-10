@@ -1,9 +1,11 @@
 import hashlib
+import http.client
 import io
 import json
 import sys
 import unittest
 from datetime import datetime,timezone
+from email.message import Message
 from pathlib import Path
 from unittest import mock
 from urllib.parse import parse_qs,urlsplit
@@ -116,9 +118,70 @@ class CaptureOnlyTests(unittest.TestCase):
 
 class RawTransportTests(unittest.TestCase):
     def response(self,payload,content_type='application/json',status=200):
-        response=mock.MagicMock();response.status=status;response.headers={'content-type':content_type}
+        response=mock.MagicMock();response.status=status;response.headers=Message()
+        response.headers['content-type']=content_type
         stream=io.BytesIO(payload);response.read.side_effect=stream.read;response.__enter__.return_value=response
         return response
+
+    def framed_response(self,payload,headers):
+        wire=b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n'+headers+b'\r\n'+payload
+        class SocketFixture:
+            def makefile(self,*args,**kwargs):return io.BytesIO(wire)
+        response=http.client.HTTPResponse(SocketFixture())
+        response.begin()
+        return response
+
+    def test_advertised_body_truncation_never_becomes_retained_capture(self):
+        response=self.framed_response(raw(),f'Content-Length: {len(raw())+100}\r\n'.encode())
+        opener=mock.Mock();opener.open.return_value=response
+        retained=[]
+        def retain(payload):retained.append(payload);return hashlib.sha256(payload).hexdigest()
+        with mock.patch('urllib.request.build_opener',return_value=opener):
+            with self.assertRaises(r.CaptureOnlyError) as raised:
+                r.capture_daily_response(request=request(),api_key='synthetic-key',access=access(),
+                    before_request=lambda:None,retain_raw=retain,retain_envelope=retain,clock=clock)
+        self.assertEqual(raised.exception.code,'capture_transport_failed')
+        self.assertIsNone(raised.exception.__context__)
+        self.assertIsNone(raised.exception.__cause__)
+        self.assertEqual(retained,[])
+        self.assertEqual(opener.open.call_count,1)
+
+    def test_ambiguous_or_invalid_framing_headers_are_rejected(self):
+        cases=[b'Content-Length: -1\r\n',b'Content-Length: +415\r\n',
+               b'Content-Length: invalid\r\n',b'Content-Length: 415, 415\r\n',
+               b'Content-Length: 415\r\nContent-Length: 515\r\n',
+               b'Content-Length: 415\r\nContent-Length: 415\r\n',
+               b'Content-Length: 415\r\nTransfer-Encoding: chunked\r\n',
+               b'Transfer-Encoding: unsupported\r\n',b'Transfer-Encoding: chunked \r\n',
+               b'Transfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n']
+        for headers in cases:
+            with self.subTest(headers=headers):
+                response=self.framed_response(raw(),headers)
+                opener=mock.Mock();opener.open.return_value=response
+                with mock.patch('urllib.request.build_opener',return_value=opener),self.assertRaises(RuntimeError):
+                    c._http_raw('https://api.twelvedata.com/time_series',timeout=20,user_agent='test',maximum_bytes=4194304)
+
+    def test_complete_supported_framing_preserves_exact_body(self):
+        payload=raw()
+        chunked=f'{len(payload):x}\r\n'.encode()+payload+b'\r\n0\r\n\r\n'
+        for headers,body in [(f'Content-Length: {len(payload)}\r\n'.encode(),payload),
+                             (b'',payload),(b'Transfer-Encoding: chunked\r\n',chunked)]:
+            with self.subTest(headers=headers):
+                response=self.framed_response(body,headers)
+                opener=mock.Mock();opener.open.return_value=response
+                with mock.patch('urllib.request.build_opener',return_value=opener):
+                    result=c._http_raw('https://api.twelvedata.com/time_series',timeout=20,user_agent='test',maximum_bytes=len(payload))
+                self.assertEqual(result,payload)
+
+    def test_truncated_chunked_body_is_rejected(self):
+        payload=raw()
+        for body in [f'{len(payload)+100:x}\r\n'.encode()+payload,
+                     f'{len(payload):x}\r\n'.encode()+payload+b'\r\n']:
+            with self.subTest(body=body):
+                response=self.framed_response(body,b'Transfer-Encoding: chunked\r\n')
+                opener=mock.Mock();opener.open.return_value=response
+                with mock.patch('urllib.request.build_opener',return_value=opener),self.assertRaises(http.client.IncompleteRead):
+                    c._http_raw('https://api.twelvedata.com/time_series',timeout=20,user_agent='test',maximum_bytes=4194304)
 
     def test_bounded_raw_http_preserves_bytes_and_disables_redirects(self):
         response=self.response(raw())

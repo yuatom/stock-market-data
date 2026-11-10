@@ -49,8 +49,12 @@ Only `https://api.twelvedata.com/time_series` is allowed; redirects are refused
 so an API-key query cannot be forwarded to another destination. The shared
 transport owner reads at most 4 MiB plus one overflow-detection byte, with no
 retry and the configured bounded timeout. Oversize/non-JSON/HTTP error responses
-stop; no truncated response is treated as complete. Rejected HTTP/header bodies
-and oversized prefixes are not retained by this API.
+stop. A declared Content-Length must be a single valid bounded value and match
+the actual byte count. Ambiguous length/transfer headers and incomplete chunked
+transfers are rejected, never acknowledged as complete. Close-delimited responses
+have no advertised length to compare, so EOF marks their transport boundary; it
+cannot prove that the provider intended no further content. Rejected HTTP/header
+bodies and oversized prefixes are not retained by this API.
 
 After one successful HTTP JSON response read:
 

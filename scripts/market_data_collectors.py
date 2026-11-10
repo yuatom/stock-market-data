@@ -96,7 +96,22 @@ def _http_raw(url: str, *, timeout: int, user_agent: str, maximum_bytes: int) ->
             raise RuntimeError("raw transport HTTP status rejected")
         if "json" not in response.headers.get("content-type", "").lower():
             raise RuntimeError("raw transport content type rejected")
+        lengths = response.headers.get_all("content-length", [])
+        encodings = response.headers.get_all("transfer-encoding", [])
+        if (len(lengths) > 1 or len(encodings) > 1 or (lengths and encodings) or
+            (encodings and encodings[0].lower() != "chunked")):
+            raise RuntimeError("raw transport framing rejected")
+        expected_length = None
+        if lengths:
+            value = lengths[0].strip()
+            if not value.isascii() or not value.isdecimal() or len(value) > 10:
+                raise RuntimeError("raw transport framing rejected")
+            expected_length = int(value)
+            if not 0 < expected_length <= maximum_bytes:
+                raise RuntimeError("raw response byte bound rejected")
         raw = response.read(maximum_bytes + 1)
+        if expected_length is not None and len(raw) != expected_length:
+            raise RuntimeError("raw transport incomplete body")
     if not raw or len(raw) > maximum_bytes:
         raise RuntimeError("raw response byte bound rejected")
     return raw
