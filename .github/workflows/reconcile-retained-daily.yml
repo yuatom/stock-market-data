@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       request_json:
-        description: Explicit value-free retained GLD append request with exact Store/source pins
+        description: Explicit value-free retained GLD append request with reviewed Store anchor and exact source pins
         required: true
         type: string
 
@@ -79,7 +79,7 @@ jobs:
                   output.write(f'{key}={sha}\n')
           PY
 
-      - name: Checkout exact current private Store
+      - name: Checkout exact reviewed private Store anchor
         uses: actions/checkout@v4
         with:
           repository: yuatom/stock-market-data-store
@@ -104,6 +104,7 @@ jobs:
           # Ignore runner-wide executable defaults; repo-local routing/filter guards remain mandatory.
           GIT_CONFIG_NOSYSTEM: '1'
           GIT_CONFIG_GLOBAL: /dev/null
+          GIT_NO_REPLACE_OBJECTS: '1'
           EXPECTED_COMPUTE_SHA: ${{ inputs.expected_compute_sha }}
           REQUEST_JSON: ${{ inputs.request_json }}
         shell: bash

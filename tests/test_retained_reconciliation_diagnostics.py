@@ -58,7 +58,7 @@ def test_execution_reports_exact_failed_stage_without_continuing(failed, expecte
     monkeypatch.setattr(r, 'require_execution_surface', lambda *a: step('compute'))
     monkeypatch.setattr(r, '_require_origin', lambda root, repository: step(
         'store_origin' if root.name == 'store' else 'source_origin'))
-    monkeypatch.setattr(r, '_remote_main', lambda *a: step('store_main', r.APPROVED_REQUEST['expected_store_sha']))
+    monkeypatch.setattr(r, 'resolve_store_base', lambda *a: step('store_main', r.PinnedInputs.from_request(r.APPROVED_REQUEST)))
     monkeypatch.setattr(r, 'prepare_candidate', lambda *a, **kw: step('prepare', object()))
     monkeypatch.setattr(r, 'commit_candidate', lambda *a, **kw: step('commit', 'c' * 40))
     monkeypatch.setattr(r, 'publish_candidate', lambda *a, **kw: step('publish'))

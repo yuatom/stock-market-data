@@ -61,6 +61,16 @@ series:
       request_authority: schemas/retained-daily-reconciliation.schema.json
       scope: exact_schema_pinned_GLD_six_retained_dates_only
       source: exact_preexisting_private_candidate_commit_and_blob
+      base_advance_policy: nov10_close_artifacts_only_v1
+      reviewed_store_anchor: exact_request_expected_store_sha
+      actual_store_base: resolve_once_under_shared_writer_lock
+      allowed_advance_date: '2026-11-10'
+      allowed_advance_scope: new_close_or_close_retry_receipts_and_close_proofs_with_missing_latest_inventory_updates_only
+      all_intervening_commits_independently_validated: true
+      max_intervening_commits: 64
+      max_changed_paths_per_commit: 256
+      merge_delete_mode_change_and_immutable_artifact_rewrite_forbidden: true
+      unknown_drift_requires_separate_review: true
       provider_requests_allowed: false
       all_budget_files_byte_immutable: true
       old_logical_records_and_prior_lineage_immutable: true
