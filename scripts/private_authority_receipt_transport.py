@@ -64,7 +64,7 @@ This function neither authenticates approval nor checks durable replay gates.
         _hex(compute_sha, 40)
         _hex(expected_commitment, 64)
         base = 'https://api.github.com/repos/' + STORE_REPOSITORY
-        ref = f'refs/capture-receipts/{route}/{compute_sha}'
+        ref = f'refs/heads/capture-receipts/{route}/{compute_sha}'
         url = base + '/contents/' + RECEIPT_PATH + '?ref=' + urllib.parse.quote(ref, safe='')
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
 

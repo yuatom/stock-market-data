@@ -84,12 +84,13 @@ separate actions. No live provider capture or production publication is claimed.
 
 
 ## Deployment gate
-The checked-in workflow accepts only a public Compute SHA and requires a manual,
+The checked-in workflow accepts a public Compute SHA and opaque salted receipt
+commitment, and requires a manual,
 owner, main, first-attempt invocation. It then exits with
 PRIVATE_AUTHORITY_CHANNEL_NOT_CONFIGURED before any checkout, credential access
 or provider operation. It accepts no private dispatch inputs and emits no private
-outputs. An approved private authority-input integration is unknown and must be
-reviewed separately; no secret provisioning is performed or implied.
+outputs. The quiet private authority readers are implemented but unbound. Executing integration
+must be reviewed separately; no secret provisioning is performed or implied.
 
 The runtime API is fully implemented for a future authorized private caller. Its
 CLI emits only a coarse status and terminal-confirmation flag, never Store hashes,

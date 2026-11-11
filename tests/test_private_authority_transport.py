@@ -8,7 +8,7 @@ from scripts import private_authority_input as selection
 COMPUTE = 'c' * 40
 PIN = 'd' * 40
 ROUTE = 'soxx_capture_only'
-REF = f'refs/capture-authority/{ROUTE}/{COMPUTE}'
+REF = f'refs/heads/capture-authority/{ROUTE}/{COMPUTE}'
 BASE = 'https://api.github.com/repos/' + selection.STORE_REPOSITORY
 
 

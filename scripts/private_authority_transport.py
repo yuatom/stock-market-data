@@ -66,7 +66,7 @@ apply load_authority, recheck remote heads and run all existing runtime gates.
         for value in (compute_sha, approved_descriptor_commit):
             _need(type(value) is str and re.fullmatch(r'[0-9a-f]{40}', value))
         base = 'https://api.github.com/repos/' + STORE_REPOSITORY
-        ref = f'refs/capture-authority/{route}/{compute_sha}'
+        ref = f'refs/heads/capture-authority/{route}/{compute_sha}'
         # No ambient proxy can receive the bearer credential. Normal TLS
         # certificate checks remain enabled; redirects are never followed.
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())

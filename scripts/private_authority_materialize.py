@@ -43,7 +43,7 @@ lock verification, private workspace disposal and final execution authorization.
         _need(parent.is_dir())
         target = parent / target.name
         _need(not os.path.lexists(target) and target.name not in ('', '.', '..'))
-        ref = f'refs/capture-authority/{route}/{compute_sha}'
+        ref = f'refs/heads/capture-authority/{route}/{compute_sha}'
         resolve_private_reference(token, route, compute_sha, descriptor_commit)
         target.mkdir(mode=0o700)
         env = {k: v for k, v in os.environ.items() if k in {'PATH', 'HOME', 'TMPDIR', 'SYSTEMROOT'}}

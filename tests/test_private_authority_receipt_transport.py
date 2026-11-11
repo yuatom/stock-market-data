@@ -12,7 +12,7 @@ ROUTE = 'soxx_capture_only'
 COMPUTE = 'c' * 40
 BASE = 'https://api.github.com/repos/yuatom/stock-market-data-store'
 PATH = 'capture-authority/receipt.json'
-URL = BASE + '/contents/' + PATH + '?ref=refs%2Fcapture-receipts%2F' + ROUTE + '%2F' + COMPUTE
+URL = BASE + '/contents/' + PATH + '?ref=refs%2Fheads%2Fcapture-receipts%2F' + ROUTE + '%2F' + COMPUTE
 RAW = canonical_receipt(dict(schema_version=1, kind='capture_authority_receipt', route=ROUTE,
     compute_sha=COMPUTE, authority_store_sha='a' * 40, descriptor_commit='b' * 40, nonce='d' * 64))
 DIGEST = receipt_commitment(RAW)

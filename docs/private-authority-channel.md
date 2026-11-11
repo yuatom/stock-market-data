@@ -6,7 +6,7 @@ This local integration design does not activate either workflow. Both public wor
 
 The existing collector schema already names the private Store repository and `MARKET_DATA_STORE_TOKEN`. A future reviewed binding can reuse that credential to read a private Git reference. A token's existence and repository write access are not user consent to capture or append data.
 
-Public dispatch supplies the exact reviewed Compute SHA and an opaque salted private-receipt commitment. The route comes from the specific workflow, not user-controlled private JSON. The deterministic private reference is `refs/capture-authority/<route>/<compute-sha>`. Route names are closed constants. No private commit, contract hash, approval JSON, or Store pin belongs in public inputs, outputs, summaries, artifacts, command echoes, or error messages.
+Public dispatch supplies the exact reviewed Compute SHA and an opaque salted private-receipt commitment. The route comes from the specific workflow, not user-controlled private JSON. The deterministic private reference is `refs/heads/capture-authority/<route>/<compute-sha>`. Route names are closed constants. No private commit, contract hash, approval JSON, or Store pin belongs in public inputs, outputs, summaries, artifacts, command echoes, or error messages.
 
 ## Immutable descriptor
 

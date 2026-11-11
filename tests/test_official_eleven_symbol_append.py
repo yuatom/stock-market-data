@@ -28,7 +28,9 @@ def test_official_workflow_manual_main_shared_lock_and_no_artifacts():
     assert 'upload-artifact' not in text
     assert set(triggers['workflow_dispatch']['inputs']) == {'expected_compute_sha', 'expected_receipt_commitment'}
     assert 'PRIVATE_AUTHORITY_CHANNEL_NOT_CONFIGURED' in text
-    assert 'secrets.' not in text and 'actions/checkout' not in text
+    gate=job['steps'][0]
+    assert 'secrets.' not in str(gate) and 'actions/checkout' not in str(gate)
+    assert 'raise SystemExit(2)' in gate['run']
     assert 'approval_json' not in text and 'GITHUB_OUTPUT' not in text
 
 
@@ -398,3 +400,62 @@ def test_custom_replace_namespace_is_rejected(real_fixture, monkeypatch):
     store,remote,base,kwargs,state,responses=real_fixture
     monkeypatch.setenv('GIT_REPLACE_REF_BASE','refs/custom-replacements/')
     with pytest.raises(r.OfficialStop):r.load_private_contract(store,json.loads(kwargs['approval_raw']))
+
+
+def test_verifier_real_child_preserves_scoped_auth_and_transport_safety(tmp_path,monkeypatch):
+    """A real child reads inherited config; never return or print the header."""
+    scripts=tmp_path/'scripts';scripts.mkdir()
+    child=scripts/'verify_store_publication.py'
+    child.write_text('''import json, os
+n=int(os.environ['GIT_CONFIG_COUNT'])
+s={os.environ['GIT_CONFIG_KEY_'+str(i)]:os.environ['GIT_CONFIG_VALUE_'+str(i)] for i in range(n)}
+print(json.dumps({'auth_retained':s.get('http.https://github.com/yuatom/stock-market-data-store.git.extraheader')=='SYNTHETIC_HEADER',
+'no_redirect':s.get('http.followRedirects')=='false',
+'hooks_disabled':s.get('core.hooksPath')=='/dev/null',
+'fsmonitor_disabled':s.get('core.fsmonitor')=='false',
+'no_plain_secrets':not any(k in os.environ for k in ['TWELVE_DATA_API_KEY','MARKET_DATA_STORE_TOKEN'])}))
+''')
+    monkeypatch.setattr(r,'ROOT',tmp_path)
+    monkeypatch.setenv('GIT_CONFIG_COUNT','3')
+    for i,(key,value) in enumerate([
+        ('http.https://github.com/yuatom/stock-market-data-store.git.extraheader','SYNTHETIC_HEADER'),
+        ('http.followRedirects','false'),('core.hooksPath','/must/be/overridden')]):
+        monkeypatch.setenv('GIT_CONFIG_KEY_'+str(i),key);monkeypatch.setenv('GIT_CONFIG_VALUE_'+str(i),value)
+    monkeypatch.setenv('TWELVE_DATA_API_KEY','SYNTHETIC_KEY')
+    monkeypatch.setenv('MARKET_DATA_STORE_TOKEN','SYNTHETIC_TOKEN')
+    result=r.verify_literal_publication(tmp_path,'a'*40)
+    assert result and all(result.values())
+
+
+def test_actual_coordinator_verifier_chain_preserves_ephemeral_auth(real_fixture,monkeypatch):
+    """All real Git operations target local bare repositories, never a provider."""
+    store,remote,base,kwargs,state,responses=real_fixture
+    settings=[('http.https://github.com/yuatom/stock-market-data-store.git.extraheader','SYNTHETIC_HEADER'),
+              ('http.followRedirects','false'),('protocol.allow','never'),('protocol.file.allow','always')]
+    monkeypatch.setenv('GIT_CONFIG_COUNT',str(len(settings)))
+    for i,(key,value) in enumerate(settings):
+        monkeypatch.setenv('GIT_CONFIG_KEY_'+str(i),key);monkeypatch.setenv('GIT_CONFIG_VALUE_'+str(i),value)
+    original=r.subprocess.run; observed=[]
+    def run(command,*args,**options):
+        if any(str(part).endswith('verify_store_publication.py') for part in command):
+            env=options.get('env',{})
+            values={env['GIT_CONFIG_KEY_'+str(i)]:env['GIT_CONFIG_VALUE_'+str(i)]
+                    for i in range(int(env.get('GIT_CONFIG_COUNT','0')))}
+            assert all(values.get(key)==value for key,value in settings)
+            observed.append(True)
+        return original(command,*args,**options)
+    monkeypatch.setattr(r.subprocess,'run',run)
+    result=r.run_official(**kwargs)
+    assert result['status']=='COMPLETE' and result['requests']==11
+    assert len(observed)==22 and len(state['requests'])==11  # Debit plus fact verifier per symbol.
+    assert git(remote,'rev-parse','main')==result['store_commit']
+
+
+@pytest.mark.parametrize('count',['-1','bad','65','1'])
+def test_verifier_rejects_malformed_ephemeral_config_before_child(tmp_path,monkeypatch,count):
+    monkeypatch.setenv('GIT_CONFIG_COUNT',count)
+    monkeypatch.delenv('GIT_CONFIG_KEY_0',raising=False)
+    monkeypatch.delenv('GIT_CONFIG_VALUE_0',raising=False)
+    def forbidden(*args,**kwargs): raise AssertionError('must not launch child')
+    monkeypatch.setattr(r.subprocess,'run',forbidden)
+    with pytest.raises(r.OfficialStop):r.verify_literal_publication(tmp_path,'a'*40)

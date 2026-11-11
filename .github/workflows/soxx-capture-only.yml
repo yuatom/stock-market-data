@@ -24,7 +24,9 @@ jobs:
   private_authority_preflight:
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    timeout-minutes: 20
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
     steps:
       - name: Validate exact manual source identity
         env:
@@ -53,3 +55,28 @@ jobs:
           # No approved private delivery channel has been bound to this workflow.
           echo 'PRIVATE_AUTHORITY_CHANNEL_NOT_CONFIGURED'
           exit 2
+
+      # Deliberately unreachable until the gate above is separately authorized for removal.
+      - name: Checkout exact reviewed Compute source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: compute
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install runtime dependency
+        run: python -m pip install --disable-pip-version-check PyYAML==6.0.3
+      - name: Run private authority route
+        working-directory: compute
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+          EXPECTED_COMPUTE_SHA: ${{ inputs.expected_compute_sha }}
+          EXPECTED_RECEIPT_COMMITMENT: ${{ inputs.expected_receipt_commitment }}
+          MARKET_DATA_STORE_TOKEN: ${{ secrets.MARKET_DATA_STORE_TOKEN }}
+          TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
+        run: |
+          python -B -m scripts.run_private_authority_route --route soxx_capture_only --compute-sha "$EXPECTED_COMPUTE_SHA" --receipt-commitment "$EXPECTED_RECEIPT_COMMITMENT"

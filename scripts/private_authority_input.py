@@ -213,7 +213,7 @@ class _LocalGit:
         _need(delta == expected)
 
     def bind_refs(self, route, compute, head, descriptor):
-        ref = f'refs/capture-authority/{route}/{compute}'
+        ref = f'refs/heads/capture-authority/{route}/{compute}'
         _need(self.read('for-each-ref', '--format=%(refname) %(objectname) %(objecttype) %(symref)', ref)
               == (ref + ' ' + descriptor + ' commit \n').encode('ascii'))
         _need(self.text('rev-parse', '--verify', 'HEAD') == head)

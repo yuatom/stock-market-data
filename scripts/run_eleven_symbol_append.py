@@ -162,12 +162,19 @@ def execution_guard(compute, repo, compute_sha, request_id, env=None):
 
 
 def verify_literal_publication(root, sha, *, required_manifest=None):
-    """Use unchanged verifier in a child with hooks/fsmonitor disabled, no secrets."""
+    """Keep trusted ephemeral Git auth/safety, but omit raw secret-named inputs."""
     env=dict(os.environ)
     env.pop('TWELVE_DATA_API_KEY',None)
     env.pop('MARKET_DATA_STORE_TOKEN',None)
-    env.update(GIT_CONFIG_COUNT='2',GIT_CONFIG_KEY_0='core.hooksPath',GIT_CONFIG_VALUE_0='/dev/null',
-               GIT_CONFIG_KEY_1='core.fsmonitor',GIT_CONFIG_VALUE_1='false')
+    # The hosted wrapper's URL-scoped auth and transport restrictions must reach
+    # the actual verifier child. Replacing COUNT silently drops them after push.
+    raw_count=env.get('GIT_CONFIG_COUNT','0')
+    need(re.fullmatch(r'0|[1-9][0-9]*',raw_count) is not None)
+    count=int(raw_count);need(count<=64)
+    need(all('GIT_CONFIG_KEY_'+str(i) in env and 'GIT_CONFIG_VALUE_'+str(i) in env for i in range(count)))
+    for i,(key,value) in enumerate((('core.hooksPath','/dev/null'),('core.fsmonitor','false')),start=count):
+        env['GIT_CONFIG_KEY_'+str(i)]=key;env['GIT_CONFIG_VALUE_'+str(i)]=value
+    env['GIT_CONFIG_COUNT']=str(count+2)
     command=[sys.executable,str(ROOT/'scripts/verify_store_publication.py'),
              '--store-root',str(root),'--expected-commit',sha,'--writer-status','store_persisted']
     if required_manifest is not None: command+=['--required-manifest',required_manifest]

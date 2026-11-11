@@ -105,7 +105,7 @@ def fixture(tmp_path, request):
         digest = hashlib.sha256(approval_raw).hexdigest()
         nested = approval
     result = dict(repo=repo, route=route, head=head, baseline=baseline, authority_path=authority_path,
-                  approval_raw=approval_raw, digest=digest, ref=f'refs/capture-authority/{route}/{COMPUTE}',
+                  approval_raw=approval_raw, digest=digest, ref=f'refs/heads/capture-authority/{route}/{COMPUTE}',
                   descriptor=dict(schema_version=1, kind='capture_authority_selection', route=route,
                                   compute_sha=COMPUTE, authority_store_sha=head, approval_sha256=digest, approval=nested))
     install_descriptor(result)

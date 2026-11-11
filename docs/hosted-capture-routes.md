@@ -12,7 +12,7 @@ Deployments must independently verify the approved repository remains private, t
 
 ## SOXX evidence-only capture
 
-The dedicated `soxx-capture-only.yml` deployment guard accepts only a public reviewed Compute SHA. It permits owner manual dispatch on main and the first attempt only, then stops before private input, checkout or credential access because no approved private authority channel is configured. Private approval commits and digests must never be supplied as public workflow inputs. The complete runtime is tested locally; activating a private input binding requires a separate reviewed change.
+The dedicated `soxx-capture-only.yml` deployment guard accepts a public reviewed Compute SHA and opaque salted receipt commitment. It permits owner manual dispatch on main and the first attempt only, then stops before private input, checkout or credential access because executing integration is not activated. Private approval commits and digests must never be supplied as public workflow inputs. The complete runtime is tested locally; activating a private input binding requires a separate reviewed change.
 
 The canonical approval object is supplied privately under `capture-approvals/<digest>.json`. Its commit must add only that normal file and have exactly the approved baseline parent. Its scope supplies exact request parameters, accounting day, UTC validity window, repository identity and one-request/one-credit limits. Run identity is excluded from the stable approval digest and added to the create-only execution claim. File presence does not establish user consent; creating the approval and dispatching its digest require explicit authorization.
 
