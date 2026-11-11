@@ -28,6 +28,7 @@ import admit_market_data_baseline as admission
 import reconcile_retained_daily as retained
 import verify_store_publication as verifier
 from build_market_data_inventory import build_inventory
+from inclusive_daily_wire import daily_wire_parameters,daily_wire_request_plan
 from capture_store_retention import retain_capture_object, _git as safe_git, _EvidenceWriter
 
 REGISTRY = ROOT / 'config/eleven-symbol-qualification.json'
@@ -247,15 +248,15 @@ def market_tree(repo, commit):
 
 
 def capture_transport(request, key, access, before_request):
-    """One unchanged bounded raw HTTP owner; no Nasdaq-only validator widening."""
+    """One bounded raw HTTP call with same-day inclusive cutoff wire semantics."""
     need(type(key) is str and 8 <= len(key) <= 4096 and all(33 <= ord(c) <= 126 for c in key))
     spec = access['twelve_data_basic']
     need(spec['base_url']=='https://api.twelvedata.com' and spec['time_series_path']=='/time_series' and spec['interval_daily']=='1day')
     timeout = access['http']['timeout_seconds']; agent = access['http']['user_agent']
     need(type(timeout) is int and 0 < timeout <= 120 and type(agent) is str and 0 < len(agent) <= 256 and
          all(32 <= ord(c) <= 126 for c in agent))
-    params = {k:request[k] for k in ('symbol','interval','exchange','mic_code','type','adjust','dp','start_date','end_date','outputsize','order')}
-    params.update(apikey=key,format='JSON')
+    params = daily_wire_parameters(request)
+    params.update(apikey=key)
     url = 'https://api.twelvedata.com/time_series?'+urllib.parse.urlencode(params)
     before_request()
     return admission.load_helpers().collectors._http_raw(url,timeout=timeout,user_agent=agent,maximum_bytes=core.MAX_RAW_BYTES)
@@ -329,7 +330,8 @@ CLI supplies only actual default boundaries; it has no test bypass switches.
             # Stable approval namespace prevents rerunning this permission with a new run ID.
             retention(symbol,'claim.json',core.encode(dict(approval=approval,approval_sha256=approval_digest,request_id=request_id)))
             retention(symbol,'request.json',core.encode(request))
-            retention(symbol,'attempt.json',core.encode(dict(attempt=1,compute_sha=compute_sha,execution_day=day)))
+            retention(symbol,'attempt.json',core.encode(dict(attempt=1,compute_sha=compute_sha,execution_day=day,
+                wire_request=daily_wire_request_plan(request))))
             writer=ExactPublisher(repo,head,day,request_id)
             writer.pre_push_guard=guard
             debit=admission.debit_before_request(h,writer,repo/'data/market-data',day,limits,

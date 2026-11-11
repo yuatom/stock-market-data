@@ -527,3 +527,37 @@ def test_final_freshness_stamp_cannot_escape_debited_slot(real_fixture,monkeypat
     assert after[0] and not state['requests']
     ledger=json.loads((store/'data/market-data/collector-state/2026-11/2026-11-11-twelve-data-budget.json').read_bytes())
     assert ledger['credits']==1
+
+
+@pytest.mark.parametrize('out_of_range',[False,True])
+def test_actual_hosted_transport_uses_inclusive_wire_and_private_evidence(real_fixture,monkeypatch,out_of_range):
+    from urllib.parse import parse_qs,urlsplit
+    store,remote,base,kwargs,state,responses=real_fixture
+    if out_of_range:
+        doc=json.loads(responses['IBIT']);doc['values'][-1]['datetime']='2024-09-07'
+        responses['IBIT']=core.encode(doc)
+    calls=[]
+    def http(url,**options):
+        params=parse_qs(urlsplit(url).query);calls.append(params)
+        assert params['end_date']==[core.DATES[-1]+' 23:59:59']
+        symbol=params['symbol'][0];state['requests'].append(symbol);state['minute']+=1
+        return responses[symbol]
+    monkeypatch.setattr(r.admission.load_helpers().collectors,'_http_raw',http)
+    kwargs['transport']=r.capture_transport
+    result=r.run_official(**kwargs)
+    assert result['status']==('PARTIAL' if out_of_range else 'COMPLETE')
+    assert result['requests']==11 and len(calls)==11
+    if out_of_range:
+        assert result['outcomes'][0]['symbol']=='IBIT' and result['outcomes'][0]['status']=='REJECTED'
+        assert len(core.read_series(r.market_tree(store,result['store_commit']),'IBIT'))==260
+    else:
+        assert sum(item['new_rows'] for item in result['outcomes'])==54
+    for symbol in core.SYMBOLS:
+        prefix=store/f"capture-evidence/{kwargs['approval_digest']}/{symbol}"
+        attempt=json.loads((prefix/'attempt.json').read_bytes());logical=json.loads((prefix/'request.json').read_bytes())
+        assert logical['end_date']==core.DATES[-1]
+        assert attempt['wire_request']['parameters']['end_date']==logical['end_date']+' 23:59:59'
+        assert 'apikey' not in attempt['wire_request']['parameters']
+        assert 'synthetic-provider-key' not in (prefix/'attempt.json').read_text()
+    ledger=json.loads((store/'data/market-data/collector-state/2026-11/2026-11-11-twelve-data-budget.json').read_bytes())
+    assert ledger['credits']==11 and max(ledger['minutes'].values())==1
