@@ -27,10 +27,10 @@ def test_official_workflow_manual_main_shared_lock_and_no_artifacts():
     assert job['concurrency'] == {'group': 'market-data-collector', 'cancel-in-progress': False, 'queue': 'max'}
     assert 'upload-artifact' not in text
     assert set(triggers['workflow_dispatch']['inputs']) == {'expected_compute_sha', 'expected_receipt_commitment'}
-    assert 'PRIVATE_AUTHORITY_CHANNEL_NOT_CONFIGURED' in text
+    assert 'PRIVATE_AUTHORITY_CHANNEL_NOT_CONFIGURED' not in text
     gate=job['steps'][0]
     assert 'secrets.' not in str(gate) and 'actions/checkout' not in str(gate)
-    assert 'raise SystemExit(2)' in gate['run']
+    assert 'MANUAL_OWNER_MAIN_FIRST_ATTEMPT_REQUIRED' in gate['run']
     assert 'approval_json' not in text and 'GITHUB_OUTPUT' not in text
 
 
@@ -459,3 +459,71 @@ def test_verifier_rejects_malformed_ephemeral_config_before_child(tmp_path,monke
     def forbidden(*args,**kwargs): raise AssertionError('must not launch child')
     monkeypatch.setattr(r.subprocess,'run',forbidden)
     with pytest.raises(r.OfficialStop):r.verify_literal_publication(tmp_path,'a'*40)
+
+
+def test_historical_append_before_todays_seven_keeps_current_accounting(real_fixture,monkeypatch):
+    store,remote,base,kwargs,state,responses=real_fixture
+    approval=core.strict_load(kwargs['approval_raw']);approval['valid_from']='2026-11-11T05:00:00+00:00'
+    kwargs['approval_raw']=core.encode(approval);kwargs['approval_digest']=core.sha(kwargs['approval_raw'])
+    def clock():return datetime(2026,11,11,6,state['minute'],10,tzinfo=timezone.utc)
+    kwargs['clock']=clock
+    class Clock:
+        @staticmethod
+        def now(tz=None):return clock()
+    monkeypatch.setattr(r.admission.load_helpers().collectors,'datetime',Clock)
+    result=r.run_official(**kwargs)
+    assert result['status']=='COMPLETE' and len(state['requests'])==11
+    ledger=json.loads((store/'data/market-data/collector-state/2026-11/2026-11-11-twelve-data-budget.json').read_bytes())
+    assert ledger['credits']==11 and max(ledger['minutes'].values())==1
+
+
+def test_append_yesterday_cutoff_before_seven_stops_before_claim(real_fixture):
+    store,remote,base,kwargs,state,responses=real_fixture
+    approval=core.strict_load(kwargs['approval_raw'])
+    approval.update(execution_day='2024-09-07',valid_from='2024-09-07T04:00:00+00:00',valid_until='2024-09-08T00:00:00+00:00')
+    kwargs['approval_raw']=core.encode(approval);kwargs['approval_digest']=core.sha(kwargs['approval_raw'])
+    kwargs['clock']=lambda:datetime(2024,9,7,8,0,10,tzinfo=timezone.utc)
+    with pytest.raises(r.OfficialStop):r.run_official(**kwargs)
+    assert not state['requests'] and not (store/'capture-evidence').exists()
+    assert git(remote,'rev-parse','main')==base
+
+
+@pytest.mark.parametrize('change',['expiry','maturity','day'])
+def test_final_provider_guard_rechecks_historical_freshness(real_fixture,monkeypatch,change):
+    store,remote,base,kwargs,state,responses=real_fixture
+    original_clock=kwargs['clock']; after=[False]
+    approval=core.strict_load(kwargs['approval_raw'])
+    approval['valid_until']='2026-11-11T13:00:30+00:00'
+    kwargs['approval_raw']=core.encode(approval);kwargs['approval_digest']=core.sha(kwargs['approval_raw'])
+    kwargs['clock']=lambda:(datetime(2026,11,12,5,tzinfo=timezone.utc) if change=='day' else datetime(2026,11,11,13,0,31,tzinfo=timezone.utc)) if after[0] and change in ('expiry','day') else original_clock()
+    original_guard=r.admission.guard_provider_request
+    def final_guard(*args,**options):
+        original_guard(*args,**options);after[0]=True
+    monkeypatch.setattr(r.admission,'guard_provider_request',final_guard)
+    original_maturity=r.admission.validate_historical_target
+    def maturity(*args,**options):
+        if after[0] and change=='maturity':raise r.admission.AdmissionError('input_not_mature')
+        return original_maturity(*args,**options)
+    monkeypatch.setattr(r.admission,'validate_historical_target',maturity)
+    with pytest.raises(r.OfficialStop):r.run_official(**kwargs)
+    assert after[0] and not state['requests']
+    ledger=json.loads((store/'data/market-data/collector-state/2026-11/2026-11-11-twelve-data-budget.json').read_bytes())
+    assert ledger['credits']==1  # Unused confirmed debit is never refunded.
+
+
+@pytest.mark.parametrize('minute,second',[(1,10),(0,58)])
+def test_final_freshness_stamp_cannot_escape_debited_slot(real_fixture,monkeypatch,minute,second):
+    store,remote,base,kwargs,state,responses=real_fixture
+    original_clock=kwargs['clock'];after=[False]
+    kwargs['clock']=lambda:datetime(2026,11,11,13,minute,second,tzinfo=timezone.utc) if after[0] else original_clock()
+    def transport(request,key,access,before):
+        before();state['requests'].append(request['symbol'])
+        raise RuntimeError('synthetic stop after forbidden provider boundary')
+    kwargs['transport']=transport
+    original=r.admission.guard_provider_request
+    def guard(*args,**options):original(*args,**options);after[0]=True
+    monkeypatch.setattr(r.admission,'guard_provider_request',guard)
+    with pytest.raises(r.OfficialStop):r.run_official(**kwargs)
+    assert after[0] and not state['requests']
+    ledger=json.loads((store/'data/market-data/collector-state/2026-11/2026-11-11-twelve-data-budget.json').read_bytes())
+    assert ledger['credits']==1

@@ -109,12 +109,13 @@ platform/lock attestation. All real invocations must use the reviewed workflow.
         spec=access['twelve_data_basic']
         require(spec['base_url']=='https://api.twelvedata.com' and spec['time_series_path']=='/time_series' and spec['interval_daily']=='1day')
         require(type(access['http']['timeout_seconds']) is int and 0<access['http']['timeout_seconds']<=120)
+        maturity=config['collector']['twelve_data_daily']['settlement_maturity']['minimum_next_day_et']
         start,end=_stamp(approval['valid_from']),_stamp(approval['valid_until'])
         def fresh():
             now=clock();require(start<=now<end and now.astimezone(admission.ET).date().isoformat()==day and time.monotonic()<deadline)
+            admission.validate_historical_target(day,request['end_date'],maturity,now)
+            return now
         fresh()
-        maturity=config['collector']['twelve_data_daily']['settlement_maturity']['minimum_next_day_et']
-        admission.validate_target(day,maturity,clock())
         head=approval_commit
         receipts=[]
         def retain(name,payload):
@@ -135,12 +136,13 @@ platform/lock attestation. All real invocations must use the reviewed workflow.
         debit=admission.debit_before_request(h,writer,store/'data/market-data',day,
             config['collector']['budgets']['twelve_data_basic'],clock=clock,
             deadline=min(deadline,time.monotonic()+(end-clock()).total_seconds()),
-            maturity=maturity,compute=compute,compute_sha=compute_sha)
+            maturity='00:00',compute=compute,compute_sha=compute_sha)  # Current ET accounting, cutoff guarded separately.
         head=debit.store_commit_sha
         def before_request():
             fresh()
             admission.guard_provider_request(writer,debit,compute,compute_sha,day,clock=clock,deadline=deadline)
-            fresh()
+            stamp=fresh().astimezone(timezone.utc)
+            require(stamp.strftime('%Y-%m-%dT%H:%MZ')==debit.minute and stamp.second<58 and time.monotonic()<deadline)
         result=capture_daily_response(request=request,api_key=key,access=access,before_request=before_request,
             retain_raw=lambda raw:retain('response.raw',raw),retain_envelope=lambda raw:retain('envelope.json',raw),clock=clock)
         terminal=dict(result,schema_version=1,request_id=request_id,approval_sha256=approval_sha256,

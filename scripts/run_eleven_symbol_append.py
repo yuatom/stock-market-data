@@ -273,10 +273,15 @@ CLI supplies only actual default boundaries; it has no test bypass switches.
         approval = validate_approval(approval_raw,approval_digest,clock())
         compute_sha=approval['compute_sha']; day=approval['execution_day']
         repo=Path(repo); compute=Path(compute)
+        def fresh():
+            now=clock()
+            validate_approval(approval_raw,approval_digest,now)
+            admission.validate_historical_target(day,approval['historical_cutoff'],maturity,now)
+            return now
         def guard():
-            validate_approval(approval_raw,approval_digest,clock())
             surface_guard(compute,repo,compute_sha,request_id)
-        guard(); visibility(store_token)
+            fresh()
+        surface_guard(compute,repo,compute_sha,request_id); visibility(store_token)
         requests=qualify_registry(json.loads(REGISTRY.read_bytes()),approval['registry_sha256'],for_append=False)
         head=approval['expected_store_sha']
         retained._require_checkout(repo,head); need(retained._remote_main(repo)==head)
@@ -291,6 +296,8 @@ CLI supplies only actual default boundaries; it has no test bypass switches.
         for symbol in core.SYMBOLS: core.validate_base(base,symbol,blobs[symbol],scopes[symbol])
         h=admission.load_helpers(); config=h.collectors.load_yaml(compute/'config/market-data-store.yaml')
         access=h.collectors.load_yaml(compute/'config/market-data-collector-access.yaml')
+        maturity=config['collector']['twelve_data_daily']['settlement_maturity']['minimum_next_day_et']
+        guard()  # No claim/debit before the exact requested cutoff is mature.
         limits=config['collector']['budgets']['twelve_data_basic']
         need(limits['hard_credits_per_day']==200 and limits['hard_credits_per_minute']==8)
         budget_relative=f'data/market-data/collector-state/{day[:7]}/{day}-twelve-data-budget.json'
@@ -336,6 +343,8 @@ CLI supplies only actual default boundaries; it has no test bypass switches.
                 need(not called and attempted<11)
                 guard()
                 admission.guard_provider_request(writer,debit,compute,compute_sha,day,clock=clock,deadline=deadline)
+                stamp=fresh().astimezone(timezone.utc)  # No slow Git after the shared guard.
+                need(stamp.strftime('%Y-%m-%dT%H:%MZ')==debit.minute and stamp.second<58 and time.monotonic()<deadline)
                 called=True; attempted+=1
             raw=transport(request,key,access,before_request)
             need(called and type(raw) is bytes and 0<len(raw)<=core.MAX_RAW_BYTES)

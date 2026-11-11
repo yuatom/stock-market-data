@@ -15,7 +15,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from dynamic_baseline_targets import parse_dynamic_selection
@@ -131,6 +131,32 @@ def validate_target(day: str, maturity: str, now: datetime) -> None:
         if parsed != local.date():
             raise ValueError
     except (ValueError, TypeError):
+        raise AdmissionError('invalid_target') from None
+    if local < boundary:
+        raise AdmissionError('input_not_mature')
+
+
+def validate_historical_target(day: str, cutoff: str, maturity: str, now: datetime) -> None:
+    """Keep today's ET accounting date, mature the exact completed-market cutoff.
+
+This does not alter validate_target or the shared debit/HTTP accounting guards.
+Historical routes must recheck this separately immediately before provider I/O.
+"""
+    try:
+        if not isinstance(now, datetime) or now.utcoffset() is None:
+            raise ValueError
+        validate_target(day, '00:00', now)
+        if not isinstance(cutoff, str) or not re.fullmatch(r'\d{4}-\d{2}-\d{2}', cutoff):
+            raise ValueError
+        last = datetime.strptime(cutoff, '%Y-%m-%d').date()
+        local = now.astimezone(ET)
+        if last >= local.date():
+            raise ValueError
+        if not isinstance(maturity, str) or not re.fullmatch(r'(?:[01]\d|2[0-3]):[0-5]\d', maturity):
+            raise ValueError
+        hour, minute = (int(x) for x in maturity.split(':'))
+        boundary = datetime.combine(last + timedelta(days=1), datetime.min.time(), ET).replace(hour=hour, minute=minute)
+    except (ValueError, TypeError, OverflowError):
         raise AdmissionError('invalid_target') from None
     if local < boundary:
         raise AdmissionError('input_not_mature')

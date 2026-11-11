@@ -12,9 +12,9 @@ Deployments must independently verify the approved repository remains private, t
 
 ## SOXX evidence-only capture
 
-The dedicated `soxx-capture-only.yml` deployment guard accepts a public reviewed Compute SHA and opaque salted receipt commitment. It permits owner manual dispatch on main and the first attempt only, then stops before private input, checkout or credential access because executing integration is not activated. Private approval commits and digests must never be supplied as public workflow inputs. The complete runtime is tested locally; activating a private input binding requires a separate reviewed change.
+The dedicated `soxx-capture-only.yml` deployment guard accepts a public reviewed Compute SHA and opaque salted receipt commitment. It permits only exact owner manual dispatch on main and the first attempt, then invokes the reviewed private binding. Private approval commits and digests must never be supplied as public workflow inputs. Runtime validation and explicit one-shot permission are still required.
 
-The canonical approval object is supplied privately under `capture-approvals/<digest>.json`. Its commit must add only that normal file and have exactly the approved baseline parent. Its scope supplies exact request parameters, accounting day, UTC validity window, repository identity and one-request/one-credit limits. Run identity is excluded from the stable approval digest and added to the create-only execution claim. File presence does not establish user consent; creating the approval and dispatching its digest require explicit authorization.
+The canonical approval object is supplied privately under `capture-approvals/<digest>.json`. Its commit must add only that normal file and have exactly the approved baseline parent. Its scope supplies exact request parameters, accounting day, UTC validity window, repository identity and one-request/one-credit limits. Run identity is excluded from the stable approval digest and added to the create-only execution claim. File presence does not establish user consent; creating the approval and dispatching the opaque receipt commitment require explicit authorization.
 
 The sequence is approval verification, claim/request/attempt retention, one official durable budget debit, unchanged immediate provider guard, one response, raw retention, envelope retention and private terminal receipt. No Store commit is permitted between debit and provider guard. All failures stop without refund, automatic rerun or recovery fallback. Malformed responses may have retained raw bytes without a valid envelope. Public output is value-free.
 
@@ -28,8 +28,8 @@ Capture and append are distinct gates. Raw bytes must be durably retained before
 
 ## Activation
 
-Review source and tests first. Prepare exact private authority and current immutable pins only for an explicitly approved one-shot operation. Independently verify freshness, privacy, budget and no earlier uncertain execution immediately before dispatch. Code publication does not activate either route.
+Review source and tests first. Prepare exact private authority and current immutable pins only for an explicitly approved one-shot operation. Independently verify freshness, privacy, budget and no earlier uncertain execution immediately before dispatch. Source publication alone does not authorize or dispatch an operation.
 
-## Current deployment guard
+## Hosted deployment boundary
 
-No authorized private authority-delivery channel is currently bound. Publishing this source does not create one. The public SOXX workflow fails closed with `PRIVATE_AUTHORITY_CHANNEL_NOT_CONFIGURED` before any private checkout, secret use or provider request. The runtime implementation and tests remain available for an explicitly reviewed private integration. Do not remove this gate merely to accept authority through public inputs or logs.
+The manual workflows bind the reviewed private authority route. Their first step validates the fixed repository, owner, actors, manual main invocation, first attempt, exact source and opaque commitment before checkout or credential injection. The wrapper retains all private receipt, source, lock, expiry, budget and replay checks. Enabling this route is not evidence that any capture or append occurred. Exact private authority and explicit one-shot permission remain required.

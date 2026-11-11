@@ -78,22 +78,19 @@ changes update that cache; evidence commits must preserve its tree identity.
 The request deadline is unchanged. Local synthetic measurements are not a hosted
 latency guarantee.
 
-Implementation and tests are local only. Deployment, fresh exact private contract,
+Fresh exact private contract,
 reviewed approval, available credits and authorized manual execution remain
 separate actions. No live provider capture or production publication is claimed.
 
 
-## Deployment gate
-The checked-in workflow accepts a public Compute SHA and opaque salted receipt
-commitment, and requires a manual,
-owner, main, first-attempt invocation. It then exits with
-PRIVATE_AUTHORITY_CHANNEL_NOT_CONFIGURED before any checkout, credential access
-or provider operation. It accepts no private dispatch inputs and emits no private
-outputs. The quiet private authority readers are implemented but unbound. Executing integration
-must be reviewed separately; no secret provisioning is performed or implied.
+## Hosted deployment boundary
+The checked-in workflow accepts only a public Compute SHA and opaque salted
+receipt commitment. Its first step validates the fixed repository, owner and
+actors, manual main invocation, first attempt and exact source before checkout
+or credential injection. The reviewed wrapper then verifies private receipt and
+authority bindings under the shared collector lock. No secret provisioning is
+performed or implied, and source availability is not permission to execute.
 
-The runtime API is fully implemented for a future authorized private caller. Its
-CLI emits only a coarse status and terminal-confirmation flag, never Store hashes,
-per-symbol counts, dates, private receipt paths or detailed outcomes. Detailed
-results remain in the private caller/Store context. Deployment-gated is not
-activated or production-ready.
+The runtime emits only coarse public status. Store hashes, per-symbol counts,
+dates, private receipt paths and detailed outcomes remain private. Enabling the
+workflow does not claim that a provider capture or production append occurred.

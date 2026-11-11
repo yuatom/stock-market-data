@@ -37,7 +37,9 @@ jobs:
           import os, re
           if not re.fullmatch('[0-9a-f]{64}', os.environ.get('EXPECTED_RECEIPT_COMMITMENT', '')):
               raise SystemExit('RECEIPT_COMMITMENT_REQUIRED')
-          if (os.environ['GITHUB_REPOSITORY'] != 'yuatom/stock-market-data' or
+          if (os.environ.get('GITHUB_EVENT_NAME') != 'workflow_dispatch' or
+              os.environ.get('GITHUB_REPOSITORY_OWNER') != 'yuatom' or
+              os.environ['GITHUB_REPOSITORY'] != 'yuatom/stock-market-data' or
               os.environ['GITHUB_REF'] != 'refs/heads/main' or
               os.environ['GITHUB_RUN_ATTEMPT'] != '1' or
               os.environ['GITHUB_ACTOR'] != 'yuatom' or
@@ -47,16 +49,6 @@ jobs:
               os.environ['EXPECTED_COMPUTE_SHA'] != os.environ['GITHUB_SHA']):
               raise SystemExit('capture requires exact reviewed source')
 
-      - name: Stop before private input or credential access
-        shell: bash
-        run: |
-          # scripts/run_soxx_capture.py is tested locally with private authority.
-          # Never send that authority through public workflow inputs or logs.
-          # No approved private delivery channel has been bound to this workflow.
-          echo 'PRIVATE_AUTHORITY_CHANNEL_NOT_CONFIGURED'
-          exit 2
-
-      # Deliberately unreachable until the gate above is separately authorized for removal.
       - name: Checkout exact reviewed Compute source
         uses: actions/checkout@v4
         with:

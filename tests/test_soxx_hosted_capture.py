@@ -199,3 +199,52 @@ class HostedCaptureTests(f.RecoveryIntegrationFixture,unittest.TestCase):
         with patch.object(self.h.collectors,'_http_raw',return_value=self.raw):
             with self.assertRaises(self.m.HostedCaptureError):self.call()
         self.assertFalse((self.repo/'capture-evidence').exists())
+
+    def _replace_synthetic_approval_for_clock(self, now, cutoff, window_seconds=30):
+        # Only this test's synthetic bare remote is rewritten.
+        old=self.repo/'capture-approvals'/f'{self.approval_sha}.json';old.unlink()
+        self.approval.update(valid_from=(now-timedelta(seconds=30)).isoformat(),
+            valid_until=(now+timedelta(seconds=window_seconds)).isoformat())
+        self.approval['request']['end_date']=cutoff
+        raw=self.m.encode(self.approval);self.approval_sha=hashlib.sha256(raw).hexdigest()
+        (old.parent/f'{self.approval_sha}.json').write_bytes(raw)
+        f.git(self.repo,'add','-A');f.git(self.repo,'commit','--amend','-m','synthetic approval')
+        f.git(self.repo,'push','--force','origin','main')
+        self.approval_commit=f.git(self.repo,'rev-parse','HEAD')
+
+    def test_old_cutoff_before_todays_seven_uses_current_day_credit(self):
+        early=f.NOW.replace(hour=8)
+        self._replace_synthetic_approval_for_clock(early,'2026-10-16')
+        with patch.object(f,'NOW',early),patch.object(self.h.collectors,'_http_raw',return_value=self.raw) as http:
+            result=self.call()
+        self.assertEqual(result['status'],'CAPTURE_RETAINED_UNQUALIFIED')
+        self.assertEqual(http.call_count,1)
+        self.assertEqual(self.current_budget()['credits'],1)
+        self.assertTrue((self.repo/'data/market-data/collector-state/2026-10/2026-10-18-twelve-data-budget.json').exists())
+
+    def test_yesterday_cutoff_before_seven_never_claims_or_debits(self):
+        early=f.NOW.replace(hour=8)
+        self._replace_synthetic_approval_for_clock(early,'2026-10-17')
+        with patch.object(f,'NOW',early),patch.object(self.h.collectors,'_http_raw',return_value=self.raw) as http:
+            with self.assertRaises(self.m.HostedCaptureError):self.call()
+        http.assert_not_called()
+        self.assertFalse((self.repo/'data/market-data/collector-state/2026-10/2026-10-18-twelve-data-budget.json').exists())
+        self.assertFalse((self.repo/'capture-evidence').exists())
+
+    def _assert_final_slot_is_rechecked(self, minute, second):
+        now=f.NOW
+        self._replace_synthetic_approval_for_clock(now,'2026-10-16',window_seconds=180)
+        later=now.replace(minute=minute,second=second)
+        original=self.a.guard_provider_request
+        def guard(*args,**kwargs):
+            original(*args,**kwargs);f.NOW=later
+        with patch.object(f,'NOW',now),patch.object(self.a,'guard_provider_request',side_effect=guard),patch.object(self.h.collectors,'_http_raw',return_value=self.raw) as http:
+            with self.assertRaises(self.m.HostedCaptureError):self.call()
+        http.assert_not_called()
+        self.assertEqual(self.current_budget()['credits'],1)
+
+    def test_final_freshness_rejects_minute_rollover(self):
+        self._assert_final_slot_is_rechecked(1,10)
+
+    def test_final_freshness_rejects_reserved_58_boundary(self):
+        self._assert_final_slot_is_rechecked(0,58)

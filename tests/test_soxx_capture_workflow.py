@@ -12,15 +12,15 @@ class SoxxWorkflowTests(unittest.TestCase):
         self.assertEqual(doc['permissions'],{'contents':'read'})
         self.assertNotIn('upload-artifact',raw)
         self.assertNotIn('continue-on-error',raw)
-        self.assertIn('run_soxx_capture.py',raw)
+        self.assertIn('scripts.run_private_authority_route --route soxx_capture_only',raw)
 
-    def test_unverified_private_authority_channel_blocks_before_secrets(self):
+    def test_identity_checked_before_checkout_and_secrets(self):
         raw=(ROOT/'.github/workflows/soxx-capture-only.yml').read_text();doc=yaml.safe_load(raw)
         trigger=doc.get('on',doc.get(True))
         self.assertEqual(set(trigger['workflow_dispatch']['inputs']),{'expected_compute_sha', 'expected_receipt_commitment'})
-        gate=doc['jobs']['private_authority_preflight']['steps'][1]
+        gate=doc['jobs']['private_authority_preflight']['steps'][0]
         self.assertNotIn('secrets.',str(gate))
-        self.assertIn('exit 2',gate['run'])
+        self.assertIn('GITHUB_TRIGGERING_ACTOR',gate['run'])
         self.assertNotIn('approval_sha256:',raw)
-        self.assertIn('PRIVATE_AUTHORITY_CHANNEL_NOT_CONFIGURED',raw)
-        self.assertIn('exit 2',raw)
+        self.assertNotIn('PRIVATE_AUTHORITY_CHANNEL_NOT_CONFIGURED',raw)
+        self.assertIn('GITHUB_REPOSITORY_OWNER',gate['run'])

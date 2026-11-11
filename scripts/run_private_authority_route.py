@@ -1,4 +1,4 @@
-"""Dormant hosted binding. Both deployment workflow gates remain CLOSED.
+"""Reviewed hosted binding behind exact manual owner/source checks.
 
 Only an independently approved, reviewed GitHub job holding the repository-wide
 collector concurrency lock may call this entrypoint. Environment comparisons
@@ -162,8 +162,7 @@ def _invoke(*, route, compute, compute_sha, store, selection, request_id, key, t
 def run_route(*, route, compute_sha, expected_commitment, token, key, destination):
     """Private return-free composition except fixed success status; never retries.
 
-No authorization or concurrency bypass flag is supported. This callable remains
-unbound until a reviewed workflow and exact execution grant are approved.
+No authorization or concurrency bypass flag is supported. Every invocation still requires the reviewed workflow and exact execution grant.
 """
     old_bytecode = sys.dont_write_bytecode
     old_path = list(sys.path)
