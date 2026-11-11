@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "kind": "eleven_symbol_append_contract",
+  "baseline_store_sha": "PRIVATE_RUNTIME_COMMIT_REQUIRED",
+  "historical_cutoff": "PRIVATE_RUNTIME_DATE_REQUIRED",
+  "targets": []
+}

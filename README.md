@@ -23,3 +23,29 @@ PYTHON="$PWD/.venv/bin/python" sh scripts/run_contract_tests.sh
 入口会检查 Python 版本与依赖，然后执行 `python -m pytest tests -v`；依赖不可用时退出，不会自动安装。原自动合同测试 workflow 已移除；正式采集及生产工作流保持各自的执行条件。本地测试结果需绑定实际源码版本，不能代替生产数据验收或未核实的服务器端合并门禁。
 
 当前迁移状态：等待创建 private `stock-market-data-store`，随后迁移现有 256-session baseline / Session Capture / Stage Snapshot，并切换 Collector 与 `stock-dairy` consumer。
+
+## Bounded append runtime
+
+`python -m scripts.simulate_eleven_symbol_append --output /new/local/directory`
+runs fabricated local acceptance data only. It performs no provider request or
+remote publication and does not establish hosted durability.
+
+The official runtime in `scripts/run_eleven_symbol_append.py` requires an exact
+approved private contract for Store pins, counts, dates and append scope. No real
+private contract is tracked in public source. The checked-in template is invalid
+until populated and approved privately.
+
+The manual workflow is deliberately deployment-gated. It accepts only a public
+Compute identity and exits before any checkout, credential access or provider
+operation because no approved private authority-input channel is configured.
+There are no private approval dispatch inputs or public outputs. No new secret or
+credential storage is provisioned. See [runtime contract](docs/eleven-symbol-append.md)
+for immutability, qualification, receipt and failure behavior.
+
+### Evidence-only SOXX hosted capture
+
+The manual `soxx-capture-only.yml` deployment guard currently stops before
+private input or credential access. The complete evidence-only runtime is
+locally tested and requires a separately reviewed private authority channel.
+See [hosted capture boundaries](docs/hosted-capture-routes.md) for immutable
+private approval, retention and separate activation requirements.

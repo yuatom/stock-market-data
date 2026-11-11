@@ -73,8 +73,13 @@ def _sha(raw):
 def validate_request(request: dict) -> dict:
     _closed(request, REQUEST_KEYS, 'request')
     for key, expected in [('provider','twelve_data'),('interval','1day'),('type','ETF'),('adjust','splits'),('order','asc'),
-                          ('exchange','NASDAQ'),('mic_code','XNAS'),('currency','USD')]:
+                          ('exchange','NASDAQ'),('currency','USD')]:
         _require(request[key] == expected, 'unsupported request '+key)
+    # Explicit SOXX profile support, not an XNAS/XNMS alias. The response
+    # identity must still equal the exact request below. Public source:
+    # https://twelvedata.com/markets/256481/etf/nasdaq/soxx (2026-11-11).
+    allowed_mics = ('XNAS', 'XNMS') if request['symbol'] == 'SOXX' else ('XNAS',)
+    _require(request['mic_code'] in allowed_mics, 'unsupported request mic_code')
     for key, pattern in [('symbol',r'[A-Z][A-Z0-9.-]{0,14}'),('exchange',r'[A-Z][A-Z0-9 ]{0,30}'),
                          ('mic_code',r'[A-Z0-9]{4}'),('currency',r'[A-Z]{3}')]:
         _require(type(request[key]) is str and re.fullmatch(pattern, request[key]), 'invalid identity '+key)

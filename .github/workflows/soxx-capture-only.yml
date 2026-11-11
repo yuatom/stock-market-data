@@ -1,0 +1,74 @@
+name: SOXX private capture only
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_compute_sha:
+        description: Exact reviewed current Compute main SHA
+        required: true
+        type: string
+      expected_receipt_commitment:
+        description: Opaque salted commitment to the exact private receipt
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: market-data-collector
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  private_authority_preflight:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - name: Validate exact manual source identity
+        env:
+          EXPECTED_COMPUTE_SHA: ${{ inputs.expected_compute_sha }}
+          EXPECTED_RECEIPT_COMMITMENT: ${{ inputs.expected_receipt_commitment }}
+        shell: python
+        run: |
+          import os, re
+          if not re.fullmatch('[0-9a-f]{64}', os.environ.get('EXPECTED_RECEIPT_COMMITMENT', '')):
+              raise SystemExit('RECEIPT_COMMITMENT_REQUIRED')
+          if (os.environ.get('GITHUB_EVENT_NAME') != 'workflow_dispatch' or
+              os.environ.get('GITHUB_REPOSITORY_OWNER') != 'yuatom' or
+              os.environ['GITHUB_REPOSITORY'] != 'yuatom/stock-market-data' or
+              os.environ['GITHUB_REF'] != 'refs/heads/main' or
+              os.environ['GITHUB_RUN_ATTEMPT'] != '1' or
+              os.environ['GITHUB_ACTOR'] != 'yuatom' or
+              os.environ['GITHUB_TRIGGERING_ACTOR'] != 'yuatom'):
+              raise SystemExit('unsupported capture execution surface')
+          if (not re.fullmatch('[0-9a-f]{40}',os.environ.get('EXPECTED_COMPUTE_SHA','')) or
+              os.environ['EXPECTED_COMPUTE_SHA'] != os.environ['GITHUB_SHA']):
+              raise SystemExit('capture requires exact reviewed source')
+
+      - name: Checkout exact reviewed Compute source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: compute
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install runtime dependency
+        run: python -m pip install --disable-pip-version-check PyYAML==6.0.3
+      - name: Run private authority route
+        working-directory: compute
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+          EXPECTED_COMPUTE_SHA: ${{ inputs.expected_compute_sha }}
+          EXPECTED_RECEIPT_COMMITMENT: ${{ inputs.expected_receipt_commitment }}
+          MARKET_DATA_STORE_TOKEN: ${{ secrets.MARKET_DATA_STORE_TOKEN }}
+          TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
+        run: |
+          python -B -m scripts.run_private_authority_route --route soxx_capture_only --compute-sha "$EXPECTED_COMPUTE_SHA" --receipt-commitment "$EXPECTED_RECEIPT_COMMITMENT"
