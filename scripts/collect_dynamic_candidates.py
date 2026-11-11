@@ -128,6 +128,7 @@ def _ensure_daily_history(*, symbols: Sequence[str], trade_date: str, store_root
     failures: list[dict[str, str]] = []
     for symbol in symbols:
         try:
+            store.assert_legacy_basis(store_root, provider=collectors.TWELVE_PROVIDER, symbol=symbol)
             collectors.wait_for_twelve_budget(store_root, trade_date, per_day=int(budget["hard_credits_per_day"]), per_minute=int(budget["hard_credits_per_minute"]))
             fetched = collectors.fetch_twelve_daily(symbol, key, access, outputsize=target_records)
             collectors.consume_twelve_credit(store_root, trade_date, amount=1, per_day=int(budget["hard_credits_per_day"]), per_minute=int(budget["hard_credits_per_minute"]))

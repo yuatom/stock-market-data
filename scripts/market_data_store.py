@@ -111,11 +111,26 @@ def _normalize_bar(bar: Mapping[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+def assert_legacy_basis(root: str | Path, *, provider: str, symbol: str) -> None:
+    """Updated legacy APIs cannot silently consume an explicitly selected basis.
+
+    A catalog's presence is enough to fence, even if malformed or a symlink.
+    This cannot constrain older deployed code that does not implement the guard.
+    """
+    if not provider or "/" in provider or ".." in provider or not symbol or "/" in symbol or ".." in symbol:
+        raise MarketDataError("invalid series identity")
+    root = Path(root)
+    catalog = root / "series-active" / "daily" / provider / (symbol.upper() + ".json")
+    if os.path.lexists(catalog) or any(p.is_symlink() for p in (catalog.parent, catalog.parent.parent, catalog.parent.parent.parent)):
+        raise MarketDataSourceAffinityError("explicit_versioned_basis_required")
+
+
 def _series_dir(root: Path, provider: str, symbol: str) -> Path:
     if not provider or "/" in provider or ".." in provider:
         raise MarketDataError("invalid provider")
     if not symbol or "/" in symbol or ".." in symbol:
         raise MarketDataError("invalid symbol")
+    assert_legacy_basis(root, provider=provider, symbol=symbol)
     return root / "series" / "daily" / provider / symbol.upper()
 
 
