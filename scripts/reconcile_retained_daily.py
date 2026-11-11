@@ -25,6 +25,9 @@ SAFE_FAILURE_REASONS = frozenset({
     'RETAINED_ACCOUNTING_CHANGED', 'RETAINED_ACCOUNTING_MISSING',
     'RETAINED_ADDITIONS_CHANGED', 'RETAINED_ARGUMENTS_INVALID',
     'RETAINED_BASE_BLOBS_CHANGED', 'RETAINED_BASE_COVERAGE_CHANGED',
+    'RETAINED_BASE_ADVANCE_INVALID', 'RETAINED_BASE_ADVANCE_SCOPE_INVALID',
+    'RETAINED_BASE_HISTORY_INVALID', 'RETAINED_BASE_TRAVERSAL_LIMIT',
+    'RETAINED_BASE_FETCH_IDENTITY_CHANGED',
     'RETAINED_BASE_PROVENANCE_CHANGED', 'RETAINED_BASE_PROVENANCE_MISSING',
     'RETAINED_CANDIDATE_CONTENT_CHANGED', 'RETAINED_CANDIDATE_INVALID',
     'RETAINED_CANDIDATE_PARENT_CHANGED', 'RETAINED_CHECKOUT_DIRTY',
@@ -102,7 +105,7 @@ def validate_request(raw: str) -> dict[str, Any]:
     return value
 
 import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import hashlib
 import os
@@ -131,6 +134,18 @@ REQUEST_ID_RE = re.compile(r'[1-9][0-9]{0,29}-[1-9][0-9]{0,9}')
 COMPUTE_REPOSITORY = 'yuatom/stock-market-data'
 STORE_REPOSITORY = 'yuatom/stock-market-data-store'
 SOURCE_AUTHORITY_COMPUTE = '0ef366bea33862076b57fb101a4498d489f826db'
+BASE_ADVANCE_POLICY = 'nov10_close_artifacts_only_v1'
+MAX_BASE_COMMITS = 64
+MAX_BASE_PATHS_PER_COMMIT = 256
+MAX_BASE_DIFF_BYTES = 256 * 1024
+CLOSE_RECEIPT_RE = re.compile(re.escape(PREFIX) + r'collector-state/2026-11/2026-11-10-(?:close|close_retry)-[0-9a-f]{16}-publication\.json')
+CLOSE_PROOF_RE = re.compile(re.escape(PREFIX) + r'proofs/deterministic-metrics/2026-11/2026-11-10/close/[0-9a-f]{40}/close-(?:[01][0-9]|2[0-3])[0-5][0-9][0-5][0-9]-et\.json')
+MUTABLE_CLOSE_PATHS = frozenset({
+    INVENTORY,
+    PREFIX + 'collector-state/2026-11/2026-11-10-close-missing.json',
+    PREFIX + 'collector-state/2026-11/2026-11-10-close_retry-missing.json',
+    PREFIX + 'proofs/deterministic-metrics/2026-11/2026-11-10/close/latest.json',
+})
 
 
 @dataclass(frozen=True)
@@ -142,6 +157,7 @@ class PinnedInputs:
     expected_index_blob_sha: str
     expected_shard_blob_shas: tuple[tuple[str, str], ...]
     additions_sha256: str
+    approved_reviewed_store_sha: str | None = None
 
     @classmethod
     def from_request(cls, request: dict[str, Any]) -> PinnedInputs:
@@ -149,7 +165,8 @@ class PinnedInputs:
         return cls(**{key: request[key] for key in (
             'expected_store_sha', 'source_candidate_sha', 'source_tail_blob_sha',
             'expected_index_blob_sha', 'additions_sha256')},
-            expected_shard_blob_shas=tuple(sorted(request['expected_shard_blob_shas'].items())))
+            expected_shard_blob_shas=tuple(sorted(request['expected_shard_blob_shas'].items())),
+            approved_reviewed_store_sha=request['expected_store_sha'])
 
 
 @dataclass(frozen=True)
@@ -163,7 +180,7 @@ def git_bytes(root: Path, *args: str) -> bytes:
     """One bounded Git invocation. Never echo private Git diagnostics or retry writes."""
     try:
         result = subprocess.run(
-            ['git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false',
+            ['git', '--no-replace-objects', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false',
              '-C', str(root), *args], capture_output=True, check=False, timeout=60,
             env=dict(os.environ, GIT_TERMINAL_PROMPT='0', GCM_INTERACTIVE='Never'),
         )
@@ -186,7 +203,8 @@ def _require(condition: bool, reason: str) -> None:
 def _identity(pins: PinnedInputs, compute_sha: str, request_id: str) -> None:
     _require(isinstance(compute_sha, str) and bool(SHA_RE.fullmatch(compute_sha)), 'RETAINED_COMPUTE_INVALID')
     _require(isinstance(request_id, str) and bool(REQUEST_ID_RE.fullmatch(request_id)), 'RETAINED_REQUEST_ID_INVALID')
-    values = (pins.expected_store_sha, pins.source_candidate_sha, pins.source_tail_blob_sha,
+    values = (pins.expected_store_sha, pins.approved_reviewed_store_sha or pins.expected_store_sha,
+              pins.source_candidate_sha, pins.source_tail_blob_sha,
               pins.expected_index_blob_sha, *(value for _, value in pins.expected_shard_blob_shas))
     _require(all(isinstance(value, str) and SHA_RE.fullmatch(value) for value in values), 'RETAINED_PINS_INVALID')
     _require(tuple(name for name, _ in pins.expected_shard_blob_shas) == SHARDS, 'RETAINED_PINS_INVALID')
@@ -254,6 +272,75 @@ def require_execution_surface(compute_repo: Path, compute_sha: str, request_id: 
     _require_checkout(compute_repo, compute_sha)
     _require_origin(compute_repo, COMPUTE_REPOSITORY)
     _require(_remote_main(compute_repo) == compute_sha, 'RETAINED_COMPUTE_MAIN_CHANGED')
+
+
+
+def validate_store_base(root: Path, pins: PinnedInputs) -> None:
+    """Independently verify every immutable transition from reviewed to actual base."""
+    reviewed = pins.approved_reviewed_store_sha or pins.expected_store_sha
+    actual = pins.expected_store_sha
+    _require(all(isinstance(sha, str) and SHA_RE.fullmatch(sha) for sha in (reviewed, actual)),
+             'RETAINED_BASE_ADVANCE_INVALID')
+    _require(not os.environ.get('GIT_GRAFT_FILE') and not (root / '.git/info/grafts').exists(),
+             'RETAINED_BASE_HISTORY_INVALID')
+    _require(git_text(root, 'rev-parse', '--is-shallow-repository') == 'false',
+             'RETAINED_BASE_HISTORY_INVALID')
+    for sha in {reviewed, actual}:
+        _require(git_text(root, 'cat-file', '-t', sha) == 'commit', 'RETAINED_BASE_HISTORY_INVALID')
+    if actual == reviewed:
+        return
+    try:
+        ancestor = git_text(root, 'merge-base', reviewed, actual)
+    except ReconciliationError:
+        raise ReconciliationError('RETAINED_BASE_HISTORY_INVALID') from None
+    _require(ancestor == reviewed, 'RETAINED_BASE_HISTORY_INVALID')
+    commits = git_text(root, 'rev-list', '--reverse', '--max-count=' + str(MAX_BASE_COMMITS + 1),
+                       reviewed + '..' + actual).splitlines()
+    _require(0 < len(commits) <= MAX_BASE_COMMITS, 'RETAINED_BASE_TRAVERSAL_LIMIT')
+    prior = reviewed
+    for commit in commits:
+        _require(bool(SHA_RE.fullmatch(commit)), 'RETAINED_BASE_HISTORY_INVALID')
+        _require(git_text(root, 'rev-list', '--parents', '-n', '1', commit).split() == [commit, prior],
+                 'RETAINED_BASE_HISTORY_INVALID')
+        raw = git_bytes(root, 'diff', '--raw', '-z', '--no-renames', '--no-ext-diff',
+                        '--no-textconv', '--no-abbrev', '--no-color', prior, commit, '--')
+        _require(len(raw) <= MAX_BASE_DIFF_BYTES, 'RETAINED_BASE_TRAVERSAL_LIMIT')
+        fields = raw.rstrip(b'\0').split(b'\0') if raw else []
+        _require(len(fields) % 2 == 0 and len(fields) // 2 <= MAX_BASE_PATHS_PER_COMMIT,
+                 'RETAINED_BASE_TRAVERSAL_LIMIT')
+        _require(bool(fields), 'RETAINED_BASE_ADVANCE_SCOPE_INVALID')
+        for offset in range(0, len(fields), 2):
+            metadata = fields[offset].decode('ascii').split()
+            path = fields[offset + 1].decode('utf-8')
+            _require(len(metadata) == 5, 'RETAINED_BASE_ADVANCE_SCOPE_INVALID')
+            old_mode, new_mode, old_blob, new_blob, status = metadata
+            _require(status in {'A', 'M'} and new_mode == '100644'
+                     and old_mode == (':000000' if status == 'A' else ':100644')
+                     and bool(SHA_RE.fullmatch(old_blob)) and bool(SHA_RE.fullmatch(new_blob)),
+                     'RETAINED_BASE_ADVANCE_SCOPE_INVALID')
+            mutable = path in MUTABLE_CLOSE_PATHS
+            immutable_addition = status == 'A' and bool(CLOSE_RECEIPT_RE.fullmatch(path) or CLOSE_PROOF_RE.fullmatch(path))
+            _require(mutable or immutable_addition, 'RETAINED_BASE_ADVANCE_SCOPE_INVALID')
+        prior = commit
+    _require(prior == actual, 'RETAINED_BASE_HISTORY_INVALID')
+
+
+def resolve_store_base(root: Path, pins: PinnedInputs) -> PinnedInputs:
+    """Resolve once under the workflow lock; no repoll/rebuild or publication retry."""
+    reviewed = pins.approved_reviewed_store_sha or pins.expected_store_sha
+    _require(pins.expected_store_sha == reviewed, 'RETAINED_BASE_ADVANCE_INVALID')
+    _require_checkout(root, reviewed)
+    actual = _remote_main(root)
+    _require(isinstance(actual, str) and bool(SHA_RE.fullmatch(actual)), 'RETAINED_BASE_ADVANCE_INVALID')
+    git_bytes(root, 'fetch', '--no-tags', '--no-recurse-submodules', 'origin', actual)
+    _require(git_text(root, 'rev-parse', 'FETCH_HEAD') == actual, 'RETAINED_BASE_FETCH_IDENTITY_CHANGED')
+    effective = replace(pins, expected_store_sha=actual, approved_reviewed_store_sha=reviewed)
+    validate_store_base(root, effective)
+    _require_checkout(root, reviewed)
+    if actual != reviewed:
+        git_bytes(root, 'checkout', '--detach', actual)
+    _require_checkout(root, actual)
+    return effective
 
 
 def _tree(root: Path, commit: str) -> tuple[dict[str, bytes], dict[str, tuple[str, str]]]:
@@ -338,6 +425,8 @@ def _derive_changes(base: dict[str, bytes], source: Path, *, pins: PinnedInputs,
         lineage = {
             'ingest_kind': 'retained_candidate_append_reconciliation', 'request_id': request_id,
             'compute_sha': compute_sha, 'store_start_sha': pins.expected_store_sha,
+            'approved_reviewed_store_sha': pins.approved_reviewed_store_sha or pins.expected_store_sha,
+            'base_advance_policy': BASE_ADVANCE_POLICY,
             'source_candidate_sha': pins.source_candidate_sha, 'source_tail_blob_sha': pins.source_tail_blob_sha,
             'additions_sha256': pins.additions_sha256,
         }
@@ -360,6 +449,8 @@ def _derive_changes(base: dict[str, bytes], source: Path, *, pins: PinnedInputs,
             'production_recovery_accepted': False, 'publication_requires_terminal_receipt': True,
             'compute_sha': compute_sha, 'input_source_authority_compute_sha': SOURCE_AUTHORITY_COMPUTE,
             'store_start_sha': pins.expected_store_sha, 'source_candidate_sha': pins.source_candidate_sha,
+            'approved_reviewed_store_sha': pins.approved_reviewed_store_sha or pins.expected_store_sha,
+            'base_advance_policy': BASE_ADVANCE_POLICY,
             'source_tail_blob_sha': pins.source_tail_blob_sha, 'source_candidate_publication': 'NOT_ASSERTED',
             'additions_sha256': pins.additions_sha256, 'addition_dates': list(DATES),
             'existing_records': 310, 'new_records': 6, 'result_records': 316,
@@ -393,6 +484,7 @@ def prepare_candidate(store_repo: Path, source_repo: Path, *, pins: PinnedInputs
     _identity(pins, compute_sha, request_id)
     _require_checkout(store_repo, pins.expected_store_sha)
     _require_checkout(source_repo, pins.source_candidate_sha)
+    validate_store_base(store_repo, pins)
     base, _ = _tree(store_repo, pins.expected_store_sha)
     changes = _derive_changes(base, source_repo, pins=pins, compute_sha=compute_sha,
                               request_id=request_id, generated_at=generated_at or datetime.now(timezone.utc).isoformat())
@@ -431,6 +523,7 @@ def validate_candidate(store_repo: Path, source_repo: Path, *, candidate_sha: st
     _require(bool(SHA_RE.fullmatch(candidate_sha)), 'RETAINED_CANDIDATE_INVALID')
     _require_checkout(store_repo, candidate_sha)
     _require_checkout(source_repo, pins.source_candidate_sha)
+    validate_store_base(store_repo, pins)
     parents = git_text(store_repo, 'rev-list', '--parents', '-n', '1', candidate_sha).split()
     _require(parents == [candidate_sha, pins.expected_store_sha], 'RETAINED_CANDIDATE_PARENT_CHANGED')
     report_path, manifest_path = _paths(request_id)
@@ -504,8 +597,7 @@ def execute(args: argparse.Namespace, request: dict[str, Any]) -> dict[str, Any]
         _at_stage('SOURCE_ORIGIN_GUARD', _require_origin, source_repo, STORE_REPOSITORY)
     production_guard()
     pins = PinnedInputs.from_request(request)
-    current_store = _at_stage('STORE_MAIN_GUARD', _remote_main, store_repo)
-    _at_stage('STORE_MAIN_GUARD', _require, current_store == pins.expected_store_sha, 'RETAINED_STORE_MAIN_CHANGED')
+    pins = _at_stage('STORE_MAIN_GUARD', resolve_store_base, store_repo, pins)
     prepared = _at_stage('CANDIDATE_PREPARATION', prepare_candidate, store_repo, source_repo,
                          pins=pins, compute_sha=args.compute_sha, request_id=args.request_id)
     candidate_sha = _at_stage('CANDIDATE_COMMIT', commit_candidate, store_repo, prepared)

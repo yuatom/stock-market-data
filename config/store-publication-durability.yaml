@@ -22,6 +22,8 @@ writer_scope:
       entrypoint: scripts/reconcile_retained_daily.py
       publication_helper: scripts/verify_store_publication.py
       separate_request_specific_output_manifest: true
+      base_advance_policy: nov10_close_artifacts_only_v1
+      exact_actual_base_rechecked_before_single_push: true
   all_store_writers_must_share_concurrency_group: market-data-collector
   terminal_success_for_new_or_existing_store_head_requires_durability_pass: true
 

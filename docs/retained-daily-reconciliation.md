@@ -8,21 +8,19 @@ Source implementation, tests, review, merge, or a validated request do not autho
 
 The initial schema permits only the explicitly reviewed GLD case:
 
-- Current Store commit: `3a516c3d097cdf57f9f9e6e1c5c8a0a6399c0ad5`.
+- Reviewed Store anchor: `3a516c3d097cdf57f9f9e6e1c5c8a0a6399c0ad5`.
 - Retained candidate commit: `e2b6227de5d026e1d01216c3c5ed6a63c9d670ee`.
 - Candidate tail blob: `e63ca19a19ae8b0f948a6b8c38eabda03127fb6a`.
 - Six additions: November 2, 3, 4, 5, 6, and 9, 2026.
 - All 310 existing records remain unchanged. The known October 30 volume disagreement is reported without values and resolved only by preserving the existing record; it is not silently accepted as a revision.
 
-The current Store pin advances the prior `4b511e8c8d211adfaff0e1ddbcce75c070a32781` pin after review of one intervening close-collection commit. That commit adds close-publication and deterministic-proof artifacts and updates close missing/latest metadata and inventory; GLD shard/index blobs and all budget bytes are unchanged. This is an explicit reviewed repin under the same six-date authorization, not automatic rebasing. The append preserves those newer close/proof artifacts byte-for-byte and regenerates inventory from the entire new base.
-
-Every current shard/index pin, addition digest and conflict policy must match the schema. This is not permission for arbitrary retained candidates, symbols, dates or altered history. A changed production head is a blocker, not permission to silently repin. A later target needs a separately reviewed contract and authorization.
+The reviewed anchor incorporates the previously reviewed close-collection publication. `base_advance_policy: nov10_close_artifacts_only_v1` permits only the narrow descendant validation below. Every GLD shard/index pin, retained source, addition digest, six-date scope and conflict/budget policy still matches the exact schema. This is not permission for arbitrary new baselines, symbols, dates, datasets or altered history. Unknown drift requires separate review and authorization.
 
 The retained candidate is readable as an exact immutable object. This route does not claim that candidate was successfully published or that the failed original run succeeded. Existing request counters and historical receipts remain evidence of their original transactions.
 
 ## Manual execution surface
 
-`.github/workflows/reconcile-retained-daily.yml` accepts only `workflow_dispatch` on Compute `main`. Its job uses the same `market-data-collector` concurrency group as existing writers, with cancellation disabled. The exact reviewed Compute SHA must match the event and checkout; both current Store and retained source candidate are checked out by validated exact SHA. No provider secret is exposed.
+`.github/workflows/reconcile-retained-daily.yml` accepts only `workflow_dispatch` on Compute `main`. Its job uses the same `market-data-collector` concurrency group as existing writers, with cancellation disabled. The exact reviewed Compute SHA must match the event and checkout; the reviewed Store anchor and retained source candidate are checked out by validated exact SHA. No provider secret is exposed.
 
 The workflow first validates the value-free request, then materializes private Store checkouts. Request input is passed through environment variables and quoted arguments, never interpolated into executable shell source. The retained candidate checkout does not persist write credentials. The Store checkout is the sole potential publication origin.
 
@@ -31,6 +29,22 @@ The workflow first validates the value-free request, then materializes private S
 The executing step disables inherited system and global Git configuration for its process and children, including the terminal verifier. This prevents runner-installed executable defaults such as Git LFS filters from entering this non-LFS route without changing the host configuration. Repository-local credentials remain available; all existing repository-local routing, filter, hook, checkout and identity guards remain enforced. No filter allowlist or guard bypass is added.
 
 Pre-publication rejection reports only an explicit allowlisted reason and execution stage. Unknown exceptions retain the generic rejection reason. Arguments, exception text, Git diagnostics, credentials and private values are never copied into this diagnostic output. The existing post-push `UNCONFIRMED` boundary is unchanged; a diagnostic code is not permission to retry or publish.
+
+## Bounded close-only baseline advancement
+
+After acquiring the shared workflow writer lock and validating execution/origin identity, the CLI reads current Store main once and fetches that exact SHA without tags, submodules, a floating ref or force. `FETCH_HEAD` must equal the selected SHA. The initial checkout must be the clean reviewed anchor. No checkout advancement or candidate write happens until the fetched immutable history is validated.
+
+Only a non-shallow linear descendant chain of at most 64 commits is accepted. Every adjacent commit is independently inspected across the entire repository, with at most 256 changed paths and 256 KiB of raw diff metadata per commit. Replacement objects are disabled; local graft files and inherited `GIT_GRAFT_FILE` overrides are rejected before ancestry inspection. Checking only the final net diff is insufficient: a forbidden change later reverted still fails.
+
+Allowed changes are restricted to November 10, 2026:
+
+- New `collector-state/2026-11/2026-11-10-close-<16 lowercase hex>-publication.json` or `close_retry` publication receipts.
+- New `proofs/deterministic-metrics/2026-11/2026-11-10/close/<40 lowercase hex>/close-<valid HHMMSS>-et.json` proof blobs.
+- Additions or updates to the exact `2026-11-10-close-missing.json` / `2026-11-10-close_retry-missing.json` collector-state files, deterministic close `latest.json`, and `collector-state/market-data-inventory.json`.
+
+All paths above are under `data/market-data/`. Existing receipts/proof blobs cannot be rewritten. Deletions, renames, merges, symlinks, executable/type/mode changes, unknown paths, other dates and all GLD/history/source/attribute/accounting changes are rejected. In particular, every historical budget byte remains unchanged. Existing artifacts from the selected actual base are preserved; inventory is regenerated from that full base plus the six GLD additions.
+
+Immutable pins retain both `approved_reviewed_store_sha` and actual `store_start_sha`. These identities and the fixed policy are recorded in report and append lineage. Preparation and independent final candidate verification revalidate the entire reviewed-to-actual chain from Git objects; staged provenance is never treated as authority. Main is resolved only once. The exact actual base is still checked immediately before the single push. Any later drift stops this execution, without resampling, rebuilding or retrying.
 
 ## Write and proof boundaries
 

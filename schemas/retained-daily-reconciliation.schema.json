@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://stock-market-data.invalid/schemas/retained-daily-reconciliation.schema.json",
   "title": "Exact retained GLD daily append request contract",
-  "description": "This contract bounds one separately authorized retained-data reconciliation. No generic retry, provider acquisition, budget change, or old-record replacement is authorized. Compute execution identity is separately pinned by the official workflow.",
+  "description": "This contract bounds one separately authorized retained-data reconciliation from its exact reviewed Store anchor, permitting only independently verified Nov 10 close-artifact descendants under the named policy. No generic retry, provider acquisition, budget change, or old-record replacement is authorized. Compute execution identity is separately pinned by the official workflow.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -11,6 +11,7 @@
     "provider",
     "symbol",
     "expected_store_sha",
+    "base_advance_policy",
     "source_candidate_sha",
     "source_tail_blob_sha",
     "expected_index_blob_sha",
@@ -35,7 +36,8 @@
       "const": "GLD"
     },
     "expected_store_sha": {
-      "const": "3a516c3d097cdf57f9f9e6e1c5c8a0a6399c0ad5"
+      "const": "3a516c3d097cdf57f9f9e6e1c5c8a0a6399c0ad5",
+      "description": "Exact reviewed anchor; the named policy alone may select a verified bounded close-only descendant."
     },
     "source_candidate_sha": {
       "const": "e2b6227de5d026e1d01216c3c5ed6a63c9d670ee"
@@ -81,6 +83,9 @@
     },
     "budget_policy": {
       "const": "preserve_all_bytes"
+    },
+    "base_advance_policy": {
+      "const": "nov10_close_artifacts_only_v1"
     }
   },
   "const": {
@@ -115,6 +120,7 @@
         ]
       }
     ],
-    "budget_policy": "preserve_all_bytes"
+    "budget_policy": "preserve_all_bytes",
+    "base_advance_policy": "nov10_close_artifacts_only_v1"
   }
 }

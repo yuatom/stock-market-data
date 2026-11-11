@@ -21,6 +21,7 @@ REQUEST = {
     'schema_version': 1, 'mode': 'retained_daily_append',
     'provider': 'twelve_data_basic', 'symbol': 'GLD',
     'expected_store_sha': '3a516c3d097cdf57f9f9e6e1c5c8a0a6399c0ad5',
+    'base_advance_policy': 'nov10_close_artifacts_only_v1',
     'source_candidate_sha': 'e2b6227de5d026e1d01216c3c5ed6a63c9d670ee',
     'source_tail_blob_sha': 'e63ca19a19ae8b0f948a6b8c38eabda03127fb6a',
     'expected_index_blob_sha': '89fc17e2680c86446e9082df6b5913e32e04e605',
@@ -52,7 +53,7 @@ def test_request_validation_emits_only_safe_exact_checkout_identities():
     assert result.stderr == ''
 
 
-@pytest.mark.parametrize('mutation', ['extra', 'symbol', 'dates', 'base', 'source', 'tail', 'index', 'sealed', 'digest', 'conflicts', 'budget', 'boolean_version'])
+@pytest.mark.parametrize('mutation', ['extra', 'symbol', 'dates', 'base', 'source', 'tail', 'index', 'sealed', 'digest', 'conflicts', 'budget', 'base_policy', 'boolean_version'])
 def test_request_refuses_scope_or_identity_changes(mutation):
     request = copy.deepcopy(REQUEST)
     if mutation == 'extra': request['private_payload'] = 'PRIVATE_VALUE'
@@ -64,6 +65,7 @@ def test_request_refuses_scope_or_identity_changes(mutation):
     elif mutation == 'sealed': request['expected_shard_blob_shas']['000000.json'] = '0' * 40
     elif mutation == 'conflicts': request['expected_conflicts'] = []
     elif mutation == 'budget': request['budget_policy'] = 'reset'
+    elif mutation == 'base_policy': request['base_advance_policy'] = 'arbitrary_descendants'
     else: request['schema_version'] = True
     result = cli('--validate-request-only', '--request-json', json.dumps(request))
     assert result.returncode != 0
