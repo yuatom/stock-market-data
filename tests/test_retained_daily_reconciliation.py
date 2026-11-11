@@ -20,7 +20,7 @@ DATES = ['2026-11-02', '2026-11-03', '2026-11-04', '2026-11-05', '2026-11-06', '
 REQUEST = {
     'schema_version': 1, 'mode': 'retained_daily_append',
     'provider': 'twelve_data_basic', 'symbol': 'GLD',
-    'expected_store_sha': '4b511e8c8d211adfaff0e1ddbcce75c070a32781',
+    'expected_store_sha': '3a516c3d097cdf57f9f9e6e1c5c8a0a6399c0ad5',
     'source_candidate_sha': 'e2b6227de5d026e1d01216c3c5ed6a63c9d670ee',
     'source_tail_blob_sha': 'e63ca19a19ae8b0f948a6b8c38eabda03127fb6a',
     'expected_index_blob_sha': '89fc17e2680c86446e9082df6b5913e32e04e605',
@@ -554,3 +554,78 @@ def test_production_origin_rejects_external_vcs_transport_helper(fixture):
     git(writer, 'config', 'remote.origin.vcs', 'forbidden-helper')
     with pytest.raises(r.ReconciliationError):
         r._require_origin(writer, 'yuatom/stock-market-data')
+
+
+
+def test_previous_store_pin_is_rejected_after_exact_reviewed_repin():
+    request = copy.deepcopy(REQUEST)
+    request['expected_store_sha'] = '4b511e8c8d211adfaff0e1ddbcce75c070a32781'
+    result = cli('--validate-request-only', '--request-json', json.dumps(request))
+    assert result.returncode == 1
+    assert json.loads(result.stderr)['reason'] == 'RETAINED_REQUEST_INVALID'
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(request, json.loads(SCHEMA.read_text()))
+
+
+def test_advanced_store_preserves_close_proofs_budgets_and_rebuilds_inventory(fixture):
+    from dataclasses import replace
+    from scripts.build_market_data_inventory import build_inventory
+    from scripts import market_data_store as store
+    r, writer, source, remote, pins = fixture
+    original_rows = store.read_daily_series(writer / PREFIX, provider='twelve_data_basic', symbol='GLD')
+    proof = PREFIX + 'proofs/deterministic-metrics/2026-11/2026-11-10/close/' + COMPUTE + '/close-171301-et.json'
+    proof_latest = PREFIX + 'proofs/deterministic-metrics/2026-11/2026-11-10/close/latest.json'
+    receipt = PREFIX + 'collector-state/2026-11/2026-11-10-close-fixture-publication.json'
+    missing = PREFIX + 'collector-state/2026-11/2026-11-10-close-missing.json'
+    snapshot = 'snapshots/2026-11/2026-11-10/close/synthetic-close.json'
+    snapshot_latest = PREFIX + 'snapshots/2026-11/2026-11-10/close/latest.json'
+    advanced_files = {
+        proof: {'synthetic_proof': True, 'must_preserve': ['all', 'bytes']},
+        proof_latest: {'proof_path': proof[len(PREFIX):], 'proof_blob_sha': 'a' * 40},
+        receipt: {'status': 'durability_verified', 'synthetic_close': True},
+        missing: {'stage': 'close', 'missing': [{'symbol': 'SYNTHETIC', 'reason': 'fixture'}]},
+        PREFIX + snapshot: {'trade_date': '2026-11-10', 'stage': 'close', 'snapshot_id': 'synthetic-close',
+                            'generated_at': TIMESTAMP, 'actual_data_cutoff': TIMESTAMP,
+                            'data_refs': [{'provider': 'fixture', 'window': 'close'}], 'missing': []},
+        snapshot_latest: {'snapshot_path': snapshot},
+        INVENTORY: {'deliberately_stale': True},
+    }
+    for path, document in advanced_files.items():
+        write(writer, path, document)
+    git(writer, 'add', '.')
+    git(writer, 'commit', '-qm', 'synthetic unrelated close publication')
+    new_base = git(writer, 'rev-parse', 'HEAD')
+    assert git(writer, 'rev-parse', new_base + '^') == pins.expected_store_sha
+    base, base_entries = r._tree(writer, new_base)
+    # Moving main is still rejected until the explicit new immutable pin is supplied.
+    with pytest.raises(r.ReconciliationError, match='RETAINED_CHECKOUT_DRIFT'):
+        prepare(fixture)
+    advanced_pins = replace(pins, expected_store_sha=new_base)
+    advanced_fixture = (r, writer, source, remote, advanced_pins)
+    prepared = prepare(advanced_fixture)
+    sha = r.commit_candidate(writer, prepared)
+    assert git(writer, 'rev-parse', sha + '^') == new_base
+    assert set(prepared.changes) == {SERIES + '000256.json', SERIES + '_index.json', REPORT, INVENTORY, MANIFEST}
+    candidate, candidate_entries = r._tree(writer, sha)
+    for path, raw in base.items():
+        if path not in prepared.changes:
+            assert candidate[path] == raw
+            assert candidate_entries[path] == base_entries[path]
+    for path in set(advanced_files) - {INVENTORY}:
+        assert candidate[path] == base[path]
+    budgets = {path: blob(raw) for path, raw in base.items()
+               if path.startswith(PREFIX + 'collector-state/') and 'budget' in Path(path).name.lower()}
+    report = json.loads(candidate[REPORT])
+    assert report['store_start_sha'] == new_base
+    assert report['unchanged_budget_blobs'] == budgets
+    assert report['provider_requests'] == report['additional_debits'] == report['refunds'] == 0
+    assert all(candidate[path] == base[path] for path in budgets)
+    after = store.read_daily_series(writer / PREFIX, provider='twelve_data_basic', symbol='GLD')
+    assert after[:310] == original_rows and [row['trade_date'] for row in after[310:]] == DATES
+    inventory = json.loads(candidate[INVENTORY])
+    expected_inventory = build_inventory(writer / PREFIX)
+    expected_inventory['generated_at'] = TIMESTAMP
+    assert inventory == expected_inventory
+    assert inventory['stage_snapshot_summary'][0]['snapshot_id'] == 'synthetic-close'
+    assert {row['symbol']: row['record_count'] for row in inventory['daily_series_summary']['series']} == {'GLD': 316, 'SPY': 1}
+    assert len(validate(advanced_fixture, sha)) == 6

@@ -8,11 +8,13 @@ Source implementation, tests, review, merge, or a validated request do not autho
 
 The initial schema permits only the explicitly reviewed GLD case:
 
-- Current Store commit: `4b511e8c8d211adfaff0e1ddbcce75c070a32781`.
+- Current Store commit: `3a516c3d097cdf57f9f9e6e1c5c8a0a6399c0ad5`.
 - Retained candidate commit: `e2b6227de5d026e1d01216c3c5ed6a63c9d670ee`.
 - Candidate tail blob: `e63ca19a19ae8b0f948a6b8c38eabda03127fb6a`.
 - Six additions: November 2, 3, 4, 5, 6, and 9, 2026.
 - All 310 existing records remain unchanged. The known October 30 volume disagreement is reported without values and resolved only by preserving the existing record; it is not silently accepted as a revision.
+
+The current Store pin advances the prior `4b511e8c8d211adfaff0e1ddbcce75c070a32781` pin after review of one intervening close-collection commit. That commit adds close-publication and deterministic-proof artifacts and updates close missing/latest metadata and inventory; GLD shard/index blobs and all budget bytes are unchanged. This is an explicit reviewed repin under the same six-date authorization, not automatic rebasing. The append preserves those newer close/proof artifacts byte-for-byte and regenerates inventory from the entire new base.
 
 Every current shard/index pin, addition digest and conflict policy must match the schema. This is not permission for arbitrary retained candidates, symbols, dates or altered history. A changed production head is a blocker, not permission to silently repin. A later target needs a separately reviewed contract and authorization.
 
