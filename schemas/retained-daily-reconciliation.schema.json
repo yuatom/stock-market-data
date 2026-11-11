@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stock-market-data.invalid/schemas/retained-daily-reconciliation.schema.json",
+  "title": "Exact retained GLD daily append request contract",
+  "description": "This contract bounds one separately authorized retained-data reconciliation. No generic retry, provider acquisition, budget change, or old-record replacement is authorized. Compute execution identity is separately pinned by the official workflow.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "mode",
+    "provider",
+    "symbol",
+    "expected_store_sha",
+    "source_candidate_sha",
+    "source_tail_blob_sha",
+    "expected_index_blob_sha",
+    "expected_shard_blob_shas",
+    "addition_dates",
+    "additions_sha256",
+    "conflict_policy",
+    "expected_conflicts",
+    "budget_policy"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "mode": {
+      "const": "retained_daily_append"
+    },
+    "provider": {
+      "const": "twelve_data_basic"
+    },
+    "symbol": {
+      "const": "GLD"
+    },
+    "expected_store_sha": {
+      "const": "4b511e8c8d211adfaff0e1ddbcce75c070a32781"
+    },
+    "source_candidate_sha": {
+      "const": "e2b6227de5d026e1d01216c3c5ed6a63c9d670ee"
+    },
+    "source_tail_blob_sha": {
+      "const": "e63ca19a19ae8b0f948a6b8c38eabda03127fb6a"
+    },
+    "expected_index_blob_sha": {
+      "const": "89fc17e2680c86446e9082df6b5913e32e04e605"
+    },
+    "expected_shard_blob_shas": {
+      "const": {
+        "000000.json": "ee576daed8557ee49fdd30229aa2bc2bbf01ed93",
+        "000128.json": "0aee5a9cb428b329cc5d752f324db7ce836f6cc3",
+        "000256.json": "f23ab9254ab9b8bf36868ef33b54c96d27e8ab94"
+      }
+    },
+    "addition_dates": {
+      "const": [
+        "2026-11-02",
+        "2026-11-03",
+        "2026-11-04",
+        "2026-11-05",
+        "2026-11-06",
+        "2026-11-09"
+      ]
+    },
+    "additions_sha256": {
+      "const": "7f5634906e6ac316dcef735b18dbad1ae959593c36951fcd52e1037a3a2ae2d3"
+    },
+    "conflict_policy": {
+      "const": "preserve_existing"
+    },
+    "expected_conflicts": {
+      "const": [
+        {
+          "trade_date": "2026-10-30",
+          "fields": [
+            "volume"
+          ]
+        }
+      ]
+    },
+    "budget_policy": {
+      "const": "preserve_all_bytes"
+    }
+  },
+  "const": {
+    "schema_version": 1,
+    "mode": "retained_daily_append",
+    "provider": "twelve_data_basic",
+    "symbol": "GLD",
+    "expected_store_sha": "4b511e8c8d211adfaff0e1ddbcce75c070a32781",
+    "source_candidate_sha": "e2b6227de5d026e1d01216c3c5ed6a63c9d670ee",
+    "source_tail_blob_sha": "e63ca19a19ae8b0f948a6b8c38eabda03127fb6a",
+    "expected_index_blob_sha": "89fc17e2680c86446e9082df6b5913e32e04e605",
+    "expected_shard_blob_shas": {
+      "000000.json": "ee576daed8557ee49fdd30229aa2bc2bbf01ed93",
+      "000128.json": "0aee5a9cb428b329cc5d752f324db7ce836f6cc3",
+      "000256.json": "f23ab9254ab9b8bf36868ef33b54c96d27e8ab94"
+    },
+    "addition_dates": [
+      "2026-11-02",
+      "2026-11-03",
+      "2026-11-04",
+      "2026-11-05",
+      "2026-11-06",
+      "2026-11-09"
+    ],
+    "additions_sha256": "7f5634906e6ac316dcef735b18dbad1ae959593c36951fcd52e1037a3a2ae2d3",
+    "conflict_policy": "preserve_existing",
+    "expected_conflicts": [
+      {
+        "trade_date": "2026-10-30",
+        "fields": [
+          "volume"
+        ]
+      }
+    ],
+    "budget_policy": "preserve_all_bytes"
+  }
+}

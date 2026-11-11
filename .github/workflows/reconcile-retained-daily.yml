@@ -1,0 +1,114 @@
+name: Retained Daily Reconciliation
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_compute_sha:
+        description: Exact current Compute main commit containing this reviewed route
+        required: true
+        type: string
+      request_json:
+        description: Explicit value-free retained GLD append request with exact Store/source pins
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  reconcile:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    concurrency:
+      group: market-data-collector
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - name: Validate exact manual Compute identity before checkout
+        env:
+          EXPECTED_COMPUTE_SHA: ${{ inputs.expected_compute_sha }}
+        shell: python
+        run: |
+          import os
+          import re
+          expected = os.environ.get('EXPECTED_COMPUTE_SHA', '')
+          if os.environ['GITHUB_REF'] != 'refs/heads/main' or os.environ['GITHUB_EVENT_NAME'] != 'workflow_dispatch':
+              raise SystemExit('reconciliation requires manual main execution')
+          if not re.fullmatch(r'[0-9a-f]{40}', expected) or expected != os.environ['GITHUB_SHA']:
+              raise SystemExit('reconciliation requires exact Compute event identity')
+
+      - name: Checkout exact reviewed Compute contract
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.expected_compute_sha }}
+          fetch-depth: 1
+          path: compute
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install existing contract dependency
+        run: python -m pip install --disable-pip-version-check PyYAML
+
+      - name: Validate exact append request before private checkouts
+        id: request
+        working-directory: compute
+        env:
+          REQUEST_JSON: ${{ inputs.request_json }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/reconcile_retained_daily.py \
+            --validate-request-only --request-json "$REQUEST_JSON" \
+            > "$RUNNER_TEMP/reconciliation-identities.json"
+          python - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+          value = json.loads((Path(os.environ['RUNNER_TEMP']) / 'reconciliation-identities.json').read_text())
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              for key in ('expected_store_sha', 'source_candidate_sha'):
+                  sha = value[key]
+                  if not isinstance(sha, str) or not re.fullmatch(r'[0-9a-f]{40}', sha):
+                      raise SystemExit('invalid validated checkout identity')
+                  output.write(f'{key}={sha}\n')
+          PY
+
+      - name: Checkout exact current private Store
+        uses: actions/checkout@v4
+        with:
+          repository: yuatom/stock-market-data-store
+          token: ${{ secrets.MARKET_DATA_STORE_TOKEN }}
+          ref: ${{ steps.request.outputs.expected_store_sha }}
+          fetch-depth: 0
+          path: store
+
+      - name: Read retained candidate at its exact private commit
+        uses: actions/checkout@v4
+        with:
+          repository: yuatom/stock-market-data-store
+          token: ${{ secrets.MARKET_DATA_STORE_TOKEN }}
+          ref: ${{ steps.request.outputs.source_candidate_sha }}
+          fetch-depth: 1
+          path: candidate
+          persist-credentials: false
+
+      - name: Reconcile retained additions with guarded publication
+        working-directory: compute
+        env:
+          EXPECTED_COMPUTE_SHA: ${{ inputs.expected_compute_sha }}
+          REQUEST_JSON: ${{ inputs.request_json }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/reconcile_retained_daily.py \
+            --request-json "$REQUEST_JSON" \
+            --compute-sha "$EXPECTED_COMPUTE_SHA" \
+            --store-repo ../store \
+            --candidate-repo ../candidate \
+            --request-id "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
