@@ -101,6 +101,9 @@ jobs:
       - name: Reconcile retained additions with guarded publication
         working-directory: compute
         env:
+          # Ignore runner-wide executable defaults; repo-local routing/filter guards remain mandatory.
+          GIT_CONFIG_NOSYSTEM: '1'
+          GIT_CONFIG_GLOBAL: /dev/null
           EXPECTED_COMPUTE_SHA: ${{ inputs.expected_compute_sha }}
           REQUEST_JSON: ${{ inputs.request_json }}
         shell: bash

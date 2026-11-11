@@ -26,6 +26,10 @@ The workflow first validates the value-free request, then materializes private S
 
 `--validate-request-only` validates input without Store writes and returns only the two exact checkout identities as JSON. The executing CLI separately enforces the official workflow/event/ref/Compute identity and clean pinned checkouts. Validation alone is not a successful operation or dispatch authorization.
 
+The executing step disables inherited system and global Git configuration for its process and children, including the terminal verifier. This prevents runner-installed executable defaults such as Git LFS filters from entering this non-LFS route without changing the host configuration. Repository-local credentials remain available; all existing repository-local routing, filter, hook, checkout and identity guards remain enforced. No filter allowlist or guard bypass is added.
+
+Pre-publication rejection reports only an explicit allowlisted reason and execution stage. Unknown exceptions retain the generic rejection reason. Arguments, exception text, Git diagnostics, credentials and private values are never copied into this diagnostic output. The existing post-push `UNCONFIRMED` boundary is unchanged; a diagnostic code is not permission to retry or publish.
+
 ## Write and proof boundaries
 
 One complete forward candidate may contain only:
