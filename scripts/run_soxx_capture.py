@@ -11,6 +11,7 @@ import admit_market_data_baseline as admission
 from capture_private_response import _stamp
 from capture_store_retention import retain_capture_object,_git as _retention_git,GIT_SAFETY
 from raw_response_evidence import _load,validate_request
+from inclusive_daily_wire import daily_wire_request_plan
 from rebase_market_data_baseline import capture_daily_response
 
 REPOSITORY='yuatom/stock-market-data-store'
@@ -129,7 +130,7 @@ platform/lock attestation. All real invocations must use the reviewed workflow.
         for name,value in (
             ('claim.json',dict(schema_version=1,approval_sha256=approval_sha256,approval_commit=approval_commit,request_id=request_id,status='CONSUMED_NO_REPLAY')),
             ('request.json',request),
-            ('attempt.json',dict(request_id=request_id,approval_sha256=approval_sha256,state='CLAIMED_BEFORE_DEBIT_NOT_PROOF_OF_HTTP'))):
+            ('attempt.json',dict(request_id=request_id,approval_sha256=approval_sha256,state='CLAIMED_BEFORE_DEBIT_NOT_PROOF_OF_HTTP',wire_request=daily_wire_request_plan(request)))):
             fresh();retain(name,encode(value))
         fresh()
         writer=admission.StorePublisher(store,head,day,request_id)
@@ -144,7 +145,7 @@ platform/lock attestation. All real invocations must use the reviewed workflow.
             stamp=fresh().astimezone(timezone.utc)
             require(stamp.strftime('%Y-%m-%dT%H:%MZ')==debit.minute and stamp.second<58 and time.monotonic()<deadline)
         result=capture_daily_response(request=request,api_key=key,access=access,before_request=before_request,
-            retain_raw=lambda raw:retain('response.raw',raw),retain_envelope=lambda raw:retain('envelope.json',raw),clock=clock)
+            retain_raw=lambda raw:retain('response.raw',raw),retain_envelope=lambda raw:retain('envelope.json',raw),clock=clock,inclusive_end_of_day=True)
         terminal=dict(result,schema_version=1,request_id=request_id,approval_sha256=approval_sha256,
             compute_sha=compute_sha,approval_commit=approval_commit,debit_commit_sha=debit.store_commit_sha,
             budget_blob_sha=debit.budget_blob_sha,budget_minute=debit.minute,receipts=receipts,

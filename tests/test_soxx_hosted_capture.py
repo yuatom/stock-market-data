@@ -248,3 +248,22 @@ class HostedCaptureTests(f.RecoveryIntegrationFixture,unittest.TestCase):
 
     def test_final_freshness_rejects_reserved_58_boundary(self):
         self._assert_final_slot_is_rechecked(0,58)
+
+    def test_hosted_wire_boundary_and_private_attempt_match_logical_scope(self):
+        from urllib.parse import parse_qs,urlsplit
+        observed=[]
+        def http(url,**kwargs):
+            params=parse_qs(urlsplit(url).query);observed.append(params)
+            self.assertEqual(params['end_date'],['2026-10-16 23:59:59'])
+            self.assertEqual(params['start_date'],['2026-10-13'])
+            return self.raw
+        with patch.object(self.h.collectors,'_http_raw',side_effect=http):result=self.call()
+        prefix=self.repo/'capture-evidence'/self.approval_sha/'SOXX'
+        attempt=json.loads((prefix/'attempt.json').read_bytes())
+        wire=attempt['wire_request']
+        self.assertEqual(wire['endpoint'],'https://api.twelvedata.com/time_series')
+        self.assertEqual(wire['parameters']['end_date'],'2026-10-16 23:59:59')
+        self.assertNotIn('apikey',wire['parameters'])
+        self.assertEqual(json.loads((prefix/'request.json').read_bytes()),self.approval['request'])
+        self.assertEqual(len(observed),1);self.assertEqual(result['requests_attempted'],1)
+        self.assertEqual(self.current_budget()['credits'],1)

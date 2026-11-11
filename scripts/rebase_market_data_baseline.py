@@ -337,7 +337,7 @@ def _capture_step(action, code, phase, requests_attempted, raw_sha256=None):
 
 def capture_daily_response(*, request: dict, api_key: str, access: Mapping[str, Any],
                            before_request, retain_raw, retain_envelope,
-                           clock=None) -> dict[str, Any]:
+                           clock=None, inclusive_end_of_day: bool = False) -> dict[str, Any]:
     """Capture one response as private, unqualified evidence, never recovery.
 
     Opt-in callers must supply an authorized official one-use
@@ -345,11 +345,16 @@ def capture_daily_response(*, request: dict, api_key: str, access: Mapping[str, 
     private retention callbacks. A matching callback digest acknowledges content
     identity only, not authenticated durability. Local callbacks cannot grant
     authorization or qualify data. No market history parser/writer is called.
+    inclusive_end_of_day is an explicit hosted-route wire policy only: keep the
+    approved/envelope date scope, send its same-date 23:59:59 boundary. Default
+    behavior stays unchanged. The official caller retains the private wire plan.
     """
     import hashlib
     from raw_response_evidence import build_envelope, validate_request, MAX_RAW_BYTES
     def prepare():
         frozen = validate_request(request)
+        if type(inclusive_end_of_day) is not bool:
+            raise ValueError('invalid capture wire policy')
         if not all(callable(callback) for callback in (before_request, retain_raw, retain_envelope)):
             raise ValueError("mandatory external boundaries missing")
         if (not isinstance(api_key, str) or not api_key or len(api_key) > 4096 or
@@ -364,8 +369,13 @@ def capture_daily_response(*, request: dict, api_key: str, access: Mapping[str, 
             type(user_agent) is not str or not user_agent or len(user_agent) > 256 or
             any(ord(char) < 32 or ord(char) > 126 for char in user_agent)):
             raise ValueError("transport bounds invalid")
-        params = {key: frozen[key] for key in ('symbol','interval','exchange','mic_code',
-            'type','adjust','dp','start_date','end_date','outputsize','order')}
+        if inclusive_end_of_day:
+            from inclusive_daily_wire import daily_wire_parameters
+            params = daily_wire_parameters(frozen)
+        else:
+            # Preserve the existing default for unrelated capture callers.
+            params = {key: frozen[key] for key in ('symbol','interval','exchange','mic_code',
+                'type','adjust','dp','start_date','end_date','outputsize','order')}
         params.update(format='JSON', apikey=api_key)
         url = 'https://api.twelvedata.com/time_series?' + urllib.parse.urlencode(params)
         return frozen, timeout, user_agent, url
