@@ -34,3 +34,23 @@ finite_daily_current:
   receipt_current_time_expiry_required: true
   old_one_shot_freshness_contract_unchanged: true
   volume_policy: BLOCKED_UNRESOLVED
+finite_initial_read:
+  current_authority_owner: scripts/initial_basis_delivery.py#current_initial_delivery
+  pure_validator: scripts/initial_basis_read.py
+  independently_approved_exact_proof_ref_required: true
+  allowed_scopes: [prior_session_core_context]
+  approved_single_consumer_trade_date_required: true
+  original_receipt_binds_admitted_initial_sha: true
+  independently_approved_digest_sources_selector_calendar_receipt_run_required: true
+  separately_approved_read_authority_binds_one_current_read_sha: true
+  unchanged_protected_blobs_and_all_parent_diffs_required: true
+  maximum_intervening_commits: 512
+  current_normal_immutable_retention_ref_required: true
+  expires_no_later_than_original_receipt: true
+  maximum_read_window_hours: 24
+  provider_request_limit: 0
+  verification_limit: 1
+  dispatch_from_read_path: forbidden
+  catalog_advance_invalidates_initial_read: true
+  old_one_shot_freshness_contract_unchanged: true
+  volume_policy: BLOCKED_UNRESOLVED
