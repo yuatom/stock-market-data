@@ -10,6 +10,8 @@
 
 ## 本地合同测试
 
+新的手动保留候选追加对账入口及其授权、并发和凭证边界见 [Retained daily append reconciliation](docs/retained-daily-reconciliation.md)。代码或测试通过不等于已获生产执行授权。
+
 在待验证的精确源码版本中使用 Python 3.12 虚拟环境，并安装 `PyYAML`、`pytest` 和 `jsonschema`。例如，依赖可用时运行：
 
 ```sh

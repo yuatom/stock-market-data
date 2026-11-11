@@ -16,6 +16,12 @@ writer_scope:
     - .github/workflows/market-data-collector-runtime.yml
     - .github/workflows/dynamic-candidate-runtime.yml
     - .github/workflows/extended-hours-readiness.yml
+  guarded_manual_wrappers:
+    .github/workflows/reconcile-retained-daily.yml:
+      job: reconcile
+      entrypoint: scripts/reconcile_retained_daily.py
+      publication_helper: scripts/verify_store_publication.py
+      separate_request_specific_output_manifest: true
   all_store_writers_must_share_concurrency_group: market-data-collector
   terminal_success_for_new_or_existing_store_head_requires_durability_pass: true
 

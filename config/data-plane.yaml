@@ -129,6 +129,9 @@ workflow_execution:
   runtime_authority_ref: main
   runtime_trigger: workflow_call
   scheduled_and_manual_entrypoint: .github/workflows/market-data-collector.yml
+  retained_daily_reconciliation_entrypoint: .github/workflows/reconcile-retained-daily.yml
+  retained_daily_reconciliation_request: schemas/retained-daily-reconciliation.schema.json
+  retained_daily_reconciliation_provider_acquisition_forbidden: true
   control_dispatcher_template: config/control-branch-dispatcher.yml
   control_branches: [collector-requests, maintenance-requests]
   store_publication_durability_authority: config/store-publication-durability.yaml

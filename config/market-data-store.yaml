@@ -54,6 +54,22 @@ series:
     target_record_count_source: maximum_of_series_analysis_windows_may_read_last_sessions
     normal_mode: verified_prefix_extension_then_append_only
     normal_mode_provider_revision_behavior: fail_closed_and_require_explicit_rebase
+    retained_candidate_reconciliation:
+      mode: retained_daily_append
+      trigger: separate_explicit_workflow_dispatch_only
+      workflow: .github/workflows/reconcile-retained-daily.yml
+      request_authority: schemas/retained-daily-reconciliation.schema.json
+      scope: exact_schema_pinned_GLD_six_retained_dates_only
+      source: exact_preexisting_private_candidate_commit_and_blob
+      provider_requests_allowed: false
+      all_budget_files_byte_immutable: true
+      old_logical_records_and_prior_lineage_immutable: true
+      sealed_shards_and_original_archives_immutable: true
+      overlap_conflicts: preserve_existing_and_record_explicitly
+      original_recovery_retry_or_success_claim_forbidden: true
+      authority: new_explicit_request_not_old_candidate_receipt
+      publication: one_complete_forward_commit_with_independent_required_output_closure
+      uncertain_publication: stop_without_retry_metadata_push_refund_or_rollback
     historical_tail_backfill:
       mode: daily_history_tail_backfill
       trigger: explicit_workflow_dispatch_only
