@@ -17,7 +17,7 @@ class SoxxWorkflowTests(unittest.TestCase):
     def test_unverified_private_authority_channel_blocks_before_secrets(self):
         raw=(ROOT/'.github/workflows/soxx-capture-only.yml').read_text();doc=yaml.safe_load(raw)
         trigger=doc.get('on',doc.get(True))
-        self.assertEqual(set(trigger['workflow_dispatch']['inputs']),{'expected_compute_sha'})
+        self.assertEqual(set(trigger['workflow_dispatch']['inputs']),{'expected_compute_sha', 'expected_receipt_commitment'})
         self.assertNotIn('secrets.',raw)
         self.assertNotIn('approval_sha256:',raw)
         self.assertIn('PRIVATE_AUTHORITY_CHANNEL_NOT_CONFIGURED',raw)

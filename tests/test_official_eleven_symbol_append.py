@@ -26,7 +26,7 @@ def test_official_workflow_manual_main_shared_lock_and_no_artifacts():
     assert "github.ref == 'refs/heads/main'" in job['if']
     assert job['concurrency'] == {'group': 'market-data-collector', 'cancel-in-progress': False, 'queue': 'max'}
     assert 'upload-artifact' not in text
-    assert set(triggers['workflow_dispatch']['inputs']) == {'expected_compute_sha'}
+    assert set(triggers['workflow_dispatch']['inputs']) == {'expected_compute_sha', 'expected_receipt_commitment'}
     assert 'PRIVATE_AUTHORITY_CHANNEL_NOT_CONFIGURED' in text
     assert 'secrets.' not in text and 'actions/checkout' not in text
     assert 'approval_json' not in text and 'GITHUB_OUTPUT' not in text

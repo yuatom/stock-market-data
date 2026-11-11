@@ -6,6 +6,10 @@ on:
         description: Exact reviewed public Compute main commit
         required: true
         type: string
+      expected_receipt_commitment:
+        description: Opaque salted commitment to the exact private receipt
+        required: true
+        type: string
 permissions:
   contents: read
 jobs:
@@ -22,9 +26,12 @@ jobs:
         shell: python
         env:
           EXPECTED_COMPUTE_SHA: ${{ inputs.expected_compute_sha }}
+          EXPECTED_RECEIPT_COMMITMENT: ${{ inputs.expected_receipt_commitment }}
         run: |
           import os
           import re
+          if not re.fullmatch('[0-9a-f]{64}', os.environ.get('EXPECTED_RECEIPT_COMMITMENT', '')):
+              raise SystemExit('RECEIPT_COMMITMENT_REQUIRED')
           expected = os.environ.get('EXPECTED_COMPUTE_SHA', '')
           if (not re.fullmatch('[0-9a-f]{40}', expected)
               or expected != os.environ.get('GITHUB_SHA')

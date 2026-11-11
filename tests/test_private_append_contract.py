@@ -21,7 +21,7 @@ def test_deployment_template_always_exits_before_private_operations(monkeypatch,
     workflow=yaml.safe_load((r.ROOT/'.github/workflows/eleven-symbol-append.yml').read_text())
     steps=workflow['jobs']['append']['steps']
     assert len(steps)==1
-    env={'EXPECTED_COMPUTE_SHA':'c'*40,'GITHUB_SHA':'c'*40,'GITHUB_EVENT_NAME':'workflow_dispatch',
+    env={'EXPECTED_RECEIPT_COMMITMENT':'d'*64,'EXPECTED_COMPUTE_SHA':'c'*40,'GITHUB_SHA':'c'*40,'GITHUB_EVENT_NAME':'workflow_dispatch',
          'GITHUB_REF':'refs/heads/main','GITHUB_ACTOR':'fixture-owner',
          'GITHUB_REPOSITORY_OWNER':'fixture-owner','GITHUB_RUN_ATTEMPT':'1'}
     for key,value in env.items():monkeypatch.setenv(key,value)
