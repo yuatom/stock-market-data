@@ -20,7 +20,7 @@ DATES = ['2026-11-02', '2026-11-03', '2026-11-04', '2026-11-05', '2026-11-06', '
 REQUEST = {
     'schema_version': 1, 'mode': 'retained_daily_append',
     'provider': 'twelve_data_basic', 'symbol': 'GLD',
-    'expected_store_sha': '3a516c3d097cdf57f9f9e6e1c5c8a0a6399c0ad5',
+    'expected_store_sha': '33217ffbc356b1006605b9cd736e7be7fd116e18',
     'base_advance_policy': 'nov10_close_artifacts_only_v1',
     'source_candidate_sha': 'e2b6227de5d026e1d01216c3c5ed6a63c9d670ee',
     'source_tail_blob_sha': 'e63ca19a19ae8b0f948a6b8c38eabda03127fb6a',
@@ -559,9 +559,11 @@ def test_production_origin_rejects_external_vcs_transport_helper(fixture):
 
 
 
-def test_previous_store_pin_is_rejected_after_exact_reviewed_repin():
+@pytest.mark.parametrize('previous', ['4b511e8c8d211adfaff0e1ddbcce75c070a32781',
+                                      '3a516c3d097cdf57f9f9e6e1c5c8a0a6399c0ad5'])
+def test_previous_store_pin_is_rejected_after_exact_reviewed_repin(previous):
     request = copy.deepcopy(REQUEST)
-    request['expected_store_sha'] = '4b511e8c8d211adfaff0e1ddbcce75c070a32781'
+    request['expected_store_sha'] = previous
     result = cli('--validate-request-only', '--request-json', json.dumps(request))
     assert result.returncode == 1
     assert json.loads(result.stderr)['reason'] == 'RETAINED_REQUEST_INVALID'

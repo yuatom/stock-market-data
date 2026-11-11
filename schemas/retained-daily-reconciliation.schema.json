@@ -36,7 +36,7 @@
       "const": "GLD"
     },
     "expected_store_sha": {
-      "const": "3a516c3d097cdf57f9f9e6e1c5c8a0a6399c0ad5",
+      "const": "33217ffbc356b1006605b9cd736e7be7fd116e18",
       "description": "Exact reviewed anchor; the named policy alone may select a verified bounded close-only descendant."
     },
     "source_candidate_sha": {
@@ -93,7 +93,7 @@
     "mode": "retained_daily_append",
     "provider": "twelve_data_basic",
     "symbol": "GLD",
-    "expected_store_sha": "3a516c3d097cdf57f9f9e6e1c5c8a0a6399c0ad5",
+    "expected_store_sha": "33217ffbc356b1006605b9cd736e7be7fd116e18",
     "source_candidate_sha": "e2b6227de5d026e1d01216c3c5ed6a63c9d670ee",
     "source_tail_blob_sha": "e63ca19a19ae8b0f948a6b8c38eabda03127fb6a",
     "expected_index_blob_sha": "89fc17e2680c86446e9082df6b5913e32e04e605",
