@@ -8,13 +8,13 @@ Source implementation, tests, review, merge, or a validated request do not autho
 
 The initial schema permits only the explicitly reviewed GLD case:
 
-- Reviewed Store anchor: `3a516c3d097cdf57f9f9e6e1c5c8a0a6399c0ad5`.
+- Reviewed Store anchor: `33217ffbc356b1006605b9cd736e7be7fd116e18`.
 - Retained candidate commit: `e2b6227de5d026e1d01216c3c5ed6a63c9d670ee`.
 - Candidate tail blob: `e63ca19a19ae8b0f948a6b8c38eabda03127fb6a`.
 - Six additions: November 2, 3, 4, 5, 6, and 9, 2026.
 - All 310 existing records remain unchanged. The known October 30 volume disagreement is reported without values and resolved only by preserving the existing record; it is not silently accepted as a revision.
 
-The reviewed anchor incorporates the previously reviewed close-collection publication. `base_advance_policy: nov10_close_artifacts_only_v1` permits only the narrow descendant validation below. Every GLD shard/index pin, retained source, addition digest, six-date scope and conflict/budget policy still matches the exact schema. This is not permission for arbitrary new baselines, symbols, dates, datasets or altered history. Unknown drift requires separate review and authorization.
+The reviewed anchor incorporates the separately reviewed metadata-only advances through `33217ffbc356b1006605b9cd736e7be7fd116e18`: close/close_retry publication and proof metadata, an existing close_retry receipt update, Nasdaq probe metadata, close_final publication metadata, and derived inventory. Each intervening commit was reviewed individually; GLD history, budget bytes and all other persisted market facts were unchanged. These existing metadata artifacts are preserved from the new anchor. This manual anchor update does not extend the automatic whitelist: receipt rewrites, Nasdaq probe updates and close_final updates after the anchor still require separate review. `base_advance_policy: nov10_close_artifacts_only_v1` permits only the narrow descendant validation below. Every GLD shard/index pin, retained source, addition digest, six-date scope and conflict/budget policy still matches the exact schema. This is not permission for arbitrary new baselines, symbols, dates, datasets or altered history. Unknown drift requires separate review and authorization.
 
 The retained candidate is readable as an exact immutable object. This route does not claim that candidate was successfully published or that the failed original run succeeded. Existing request counters and historical receipts remain evidence of their original transactions.
 
