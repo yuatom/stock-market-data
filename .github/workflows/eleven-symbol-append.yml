@@ -1,0 +1,39 @@
+name: Eleven Symbol Append
+on:
+  workflow_dispatch:
+    inputs:
+      expected_compute_sha:
+        description: Exact reviewed public Compute main commit
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  append:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    concurrency:
+      group: market-data-collector
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - name: Fail closed until a private authority channel is approved
+        shell: python
+        env:
+          EXPECTED_COMPUTE_SHA: ${{ inputs.expected_compute_sha }}
+        run: |
+          import os
+          import re
+          expected = os.environ.get('EXPECTED_COMPUTE_SHA', '')
+          if (not re.fullmatch('[0-9a-f]{40}', expected)
+              or expected != os.environ.get('GITHUB_SHA')
+              or os.environ.get('GITHUB_EVENT_NAME') != 'workflow_dispatch'
+              or os.environ.get('GITHUB_REF') != 'refs/heads/main'
+              or os.environ.get('GITHUB_ACTOR') != os.environ.get('GITHUB_REPOSITORY_OWNER')
+              or os.environ.get('GITHUB_RUN_ATTEMPT') != '1'):
+              raise SystemExit('MANUAL_OWNER_MAIN_FIRST_ATTEMPT_REQUIRED')
+          # No private authority data, checkout, credentials or provider calls here.
+          # A separately reviewed private input integration must replace this gate.
+          print('PRIVATE_AUTHORITY_CHANNEL_NOT_CONFIGURED')
+          raise SystemExit(2)

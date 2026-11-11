@@ -2,8 +2,10 @@
 
 This opt-in API is independent of the normal recovery caller. It makes one
 provider request only when an authorized official runner calls it. No existing
-workflow, CLI mode, schedule, recovery failure handler, or legacy collector calls
-it. Adding this code does not authorize a request and does not restore SOXX.
+legacy workflow, CLI mode, schedule, recovery failure handler, or collector calls
+it. The separate hosted capture runtime remains opt-in; its public workflow
+fails closed until an approved private authority channel is configured. Adding
+source does not authorize a request and does not restore SOXX.
 
 ## Existing entry points remain unchanged
 
@@ -39,7 +41,9 @@ The capture-specific request is a closed credential-free object. The included
 `raw_response_evidence.validate_request` pins provider identity, instrument,
 daily interval, explicit `adjust=splits`, explicit `dp` (-1 or 0–11), bounded
 outputsize, ascending order and the exact start/end dates. Scope is currently
-Nasdaq/XNAS/USD ETF. Request parameters are caller assertions, not attested by
+Nasdaq/XNAS/USD ETF, plus explicitly selected SOXX/XNMS from the public provider
+profile https://twelvedata.com/markets/256481/etf/nasdaq/soxx. XNAS and XNMS are
+not aliases: response MIC must equal the chosen request exactly. Request parameters are caller assertions, not attested by
 provider response metadata. API keys are never added to the evidence object.
 
 ## One-request sequence

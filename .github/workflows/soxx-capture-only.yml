@@ -1,0 +1,48 @@
+name: SOXX private capture only
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_compute_sha:
+        description: Exact reviewed current Compute main SHA
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: market-data-collector
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  private_authority_preflight:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Validate exact manual source identity
+        env:
+          EXPECTED_COMPUTE_SHA: ${{ inputs.expected_compute_sha }}
+        shell: python
+        run: |
+          import os, re
+          if (os.environ['GITHUB_REPOSITORY'] != 'yuatom/stock-market-data' or
+              os.environ['GITHUB_REF'] != 'refs/heads/main' or
+              os.environ['GITHUB_RUN_ATTEMPT'] != '1' or
+              os.environ['GITHUB_ACTOR'] != 'yuatom' or
+              os.environ['GITHUB_TRIGGERING_ACTOR'] != 'yuatom'):
+              raise SystemExit('unsupported capture execution surface')
+          if (not re.fullmatch('[0-9a-f]{40}',os.environ.get('EXPECTED_COMPUTE_SHA','')) or
+              os.environ['EXPECTED_COMPUTE_SHA'] != os.environ['GITHUB_SHA']):
+              raise SystemExit('capture requires exact reviewed source')
+
+      - name: Stop before private input or credential access
+        shell: bash
+        run: |
+          # scripts/run_soxx_capture.py is tested locally with private authority.
+          # Never send that authority through public workflow inputs or logs.
+          # No approved private delivery channel has been bound to this workflow.
+          echo 'PRIVATE_AUTHORITY_CHANNEL_NOT_CONFIGURED'
+          exit 2

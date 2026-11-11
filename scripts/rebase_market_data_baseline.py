@@ -340,8 +340,8 @@ def capture_daily_response(*, request: dict, api_key: str, access: Mapping[str, 
                            clock=None) -> dict[str, Any]:
     """Capture one response as private, unqualified evidence, never recovery.
 
-    No CLI/workflow invokes this opt-in API. The external official runner must
-    supply its authorized one-use budget/source/concurrency guard and exact
+    Opt-in callers must supply an authorized official one-use
+    budget/source/concurrency guard and exact
     private retention callbacks. A matching callback digest acknowledges content
     identity only, not authenticated durability. Local callbacks cannot grant
     authorization or qualify data. No market history parser/writer is called.

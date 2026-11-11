@@ -1,0 +1,125 @@
+{
+  "observed_date": "2026-11-11",
+  "method": "Public Twelve Data instrument overview pages read via web search, no authenticated API call",
+  "profiles": [
+    {
+      "symbol": "IBIT",
+      "exchange": "NASDAQ",
+      "profile_mic_code": "XNMS",
+      "type": "ETF",
+      "country": "United States",
+      "url": "https://twelvedata.com/markets/779898/etf/nasdaq/ibit",
+      "response_mic_equivalence_verified": false,
+      "legacy_basis_equivalence_verified": false
+    },
+    {
+      "symbol": "IWM",
+      "exchange": "NYSE",
+      "profile_mic_code": "ARCX",
+      "type": "ETF",
+      "country": "United States",
+      "url": "https://twelvedata.com/markets/141255/etf/nyse/iwm",
+      "response_mic_equivalence_verified": false,
+      "legacy_basis_equivalence_verified": false
+    },
+    {
+      "symbol": "KWEB",
+      "exchange": "NYSE",
+      "profile_mic_code": "ARCX",
+      "type": "ETF",
+      "country": "United States",
+      "url": "https://twelvedata.com/markets/785193/etf/nyse/kweb",
+      "response_mic_equivalence_verified": false,
+      "legacy_basis_equivalence_verified": false
+    },
+    {
+      "symbol": "QQQ",
+      "exchange": "NASDAQ",
+      "profile_mic_code": "XNMS",
+      "type": "ETF",
+      "country": "United States",
+      "url": "https://twelvedata.com/markets/958673/etf/nasdaq/qqq",
+      "response_mic_equivalence_verified": false,
+      "legacy_basis_equivalence_verified": false
+    },
+    {
+      "symbol": "SMH",
+      "exchange": "NASDAQ",
+      "profile_mic_code": "XNMS",
+      "type": "ETF",
+      "country": "United States",
+      "url": "https://twelvedata.com/markets/291499/etf/nasdaq/smh",
+      "response_mic_equivalence_verified": false,
+      "legacy_basis_equivalence_verified": false
+    },
+    {
+      "symbol": "SPY",
+      "exchange": "NYSE",
+      "profile_mic_code": "ARCX",
+      "type": "ETF",
+      "country": "United States",
+      "url": "https://twelvedata.com/markets/568728/etf/nyse/spy",
+      "response_mic_equivalence_verified": false,
+      "legacy_basis_equivalence_verified": false
+    },
+    {
+      "symbol": "TLT",
+      "exchange": "NASDAQ",
+      "profile_mic_code": "XNMS",
+      "type": "ETF",
+      "country": "United States",
+      "url": "https://twelvedata.com/markets/333615/etf/nasdaq/tlt",
+      "response_mic_equivalence_verified": false,
+      "legacy_basis_equivalence_verified": false
+    },
+    {
+      "symbol": "VIXY",
+      "exchange": "CBOE",
+      "profile_mic_code": "BATS",
+      "type": "ETF",
+      "country": "United States",
+      "url": "https://twelvedata.com/markets/105229/etf/cboe/vixy",
+      "response_mic_equivalence_verified": false,
+      "legacy_basis_equivalence_verified": false
+    },
+    {
+      "symbol": "XLE",
+      "exchange": "NYSE",
+      "profile_mic_code": "ARCX",
+      "type": "ETF",
+      "country": "United States",
+      "url": "https://twelvedata.com/markets/776406/etf/nyse/xle",
+      "response_mic_equivalence_verified": false,
+      "legacy_basis_equivalence_verified": false
+    },
+    {
+      "symbol": "XLU",
+      "exchange": "NYSE",
+      "profile_mic_code": "ARCX",
+      "type": "ETF",
+      "country": "United States",
+      "url": "https://twelvedata.com/markets/227896/etf/nyse/xlu",
+      "response_mic_equivalence_verified": false,
+      "legacy_basis_equivalence_verified": false
+    },
+    {
+      "symbol": "XLK",
+      "exchange": "NYSE",
+      "profile_mic_code": "ARCX",
+      "type": "ETF",
+      "country": "United States",
+      "url": "https://twelvedata.com/markets/998455/etf/nyse/xlk",
+      "response_mic_equivalence_verified": false,
+      "legacy_basis_equivalence_verified": false
+    }
+  ],
+  "api_docs": {
+    "url": "https://twelvedata.com/docs/market-data/time-series",
+    "documented_current_defaults": {
+      "adjust": "splits",
+      "dp": -1
+    },
+    "credits_per_symbol": 1,
+    "notes": "Current docs are not proof of historical defaults or precise rounding/volume-adjustment semantics. Segment profile MIC may differ from response operating MIC. Do not silently alias."
+  }
+}
