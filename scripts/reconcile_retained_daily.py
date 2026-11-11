@@ -18,7 +18,58 @@ APPROVED_REQUEST = json.loads(SCHEMA_PATH.read_text(encoding='utf-8'))['const']
 
 
 class ReconciliationError(RuntimeError):
-    """A fixed, value-free reason suitable for the public CLI boundary."""
+    """An internal failure; only explicit allowlisted diagnostics may be public."""
+
+
+SAFE_FAILURE_REASONS = frozenset({
+    'RETAINED_ACCOUNTING_CHANGED', 'RETAINED_ACCOUNTING_MISSING',
+    'RETAINED_ADDITIONS_CHANGED', 'RETAINED_ARGUMENTS_INVALID',
+    'RETAINED_BASE_BLOBS_CHANGED', 'RETAINED_BASE_COVERAGE_CHANGED',
+    'RETAINED_BASE_PROVENANCE_CHANGED', 'RETAINED_BASE_PROVENANCE_MISSING',
+    'RETAINED_CANDIDATE_CONTENT_CHANGED', 'RETAINED_CANDIDATE_INVALID',
+    'RETAINED_CANDIDATE_PARENT_CHANGED', 'RETAINED_CHECKOUT_DIRTY',
+    'RETAINED_CHECKOUT_DRIFT', 'RETAINED_CHECKOUT_INVALID', 'RETAINED_CLOSURE_INVALID',
+    'RETAINED_COMPUTE_INVALID', 'RETAINED_COMPUTE_MAIN_CHANGED',
+    'RETAINED_CONFLICT_SET_CHANGED', 'RETAINED_DELETION_FORBIDDEN',
+    'RETAINED_EXECUTION_SURFACE_INVALID', 'RETAINED_GIT_FAILED',
+    'RETAINED_GIT_HOOK_INVALID', 'RETAINED_GIT_ROUTING_INVALID',
+    'RETAINED_GIT_UNAVAILABLE', 'RETAINED_LINEAGE_CHANGED', 'RETAINED_MAIN_UNREADABLE',
+    'RETAINED_NO_OVERWRITE_FAILED', 'RETAINED_ORIGIN_INVALID',
+    'RETAINED_OUTPUT_COLLISION', 'RETAINED_PINS_INVALID',
+    'RETAINED_RECONCILIATION_REJECTED', 'RETAINED_REQUEST_ID_INVALID',
+    'RETAINED_REQUEST_INVALID', 'RETAINED_SEALED_SHARDS_CHANGED',
+    'RETAINED_SOURCE_BLOB_CHANGED', 'RETAINED_SOURCE_DATES_CHANGED',
+    'RETAINED_SOURCE_IDENTITY_CHANGED', 'RETAINED_SOURCE_ROWS_CHANGED',
+    'RETAINED_STORE_MAIN_CHANGED', 'RETAINED_TERMINAL_PROOF_INVALID',
+    'RETAINED_TIMESTAMP_INVALID', 'RETAINED_TREE_EMPTY', 'RETAINED_TREE_MODE_INVALID',
+    'RETAINED_TREE_PATH_INVALID', 'RETAINED_WRITE_SCOPE_CHANGED',
+})
+SAFE_FAILURE_STAGES = frozenset({
+    'ARGUMENT_VALIDATION', 'REQUEST_VALIDATION', 'EXECUTION', 'COMPUTE_GUARD',
+    'STORE_ORIGIN_GUARD', 'SOURCE_ORIGIN_GUARD', 'STORE_MAIN_GUARD',
+    'CANDIDATE_PREPARATION', 'CANDIDATE_COMMIT', 'PUBLICATION',
+})
+
+
+def safe_failure_reason(error: Exception) -> str:
+    reason = error.args[0] if isinstance(error, ReconciliationError) and len(error.args) == 1 else None
+    return reason if type(reason) is str and reason in SAFE_FAILURE_REASONS else 'RETAINED_RECONCILIATION_REJECTED'
+
+
+def safe_failure_stage(error: Exception) -> str:
+    stage = getattr(error, 'stage', None) if isinstance(error, ReconciliationError) else None
+    return stage if type(stage) is str and stage in SAFE_FAILURE_STAGES else 'EXECUTION'
+
+
+def _at_stage(stage: str, operation, *args, **kwargs):
+    """Annotate failure without logging exception text, Git output, or inputs."""
+    try:
+        return operation(*args, **kwargs)
+    except Exception as error:
+        failure = ReconciliationError(safe_failure_reason(error))
+        prior = getattr(error, 'stage', None) if isinstance(error, ReconciliationError) else None
+        failure.stage = prior if type(prior) is str and prior in SAFE_FAILURE_STAGES else stage
+        raise failure from None
 
 
 def canonical(value: Any) -> bytes:
@@ -448,16 +499,18 @@ def execute(args: argparse.Namespace, request: dict[str, Any]) -> dict[str, Any]
     store_repo, source_repo = Path(args.store_repo).resolve(), Path(args.candidate_repo).resolve()
     _require(len({compute_repo, store_repo, source_repo}) == 3, 'RETAINED_CHECKOUT_INVALID')
     def production_guard():
-        require_execution_surface(compute_repo, args.compute_sha, args.request_id)
-        _require_origin(store_repo, STORE_REPOSITORY)
-        _require_origin(source_repo, STORE_REPOSITORY)
+        _at_stage('COMPUTE_GUARD', require_execution_surface, compute_repo, args.compute_sha, args.request_id)
+        _at_stage('STORE_ORIGIN_GUARD', _require_origin, store_repo, STORE_REPOSITORY)
+        _at_stage('SOURCE_ORIGIN_GUARD', _require_origin, source_repo, STORE_REPOSITORY)
     production_guard()
     pins = PinnedInputs.from_request(request)
-    _require(_remote_main(store_repo) == pins.expected_store_sha, 'RETAINED_STORE_MAIN_CHANGED')
-    prepared = prepare_candidate(store_repo, source_repo, pins=pins, compute_sha=args.compute_sha, request_id=args.request_id)
-    candidate_sha = commit_candidate(store_repo, prepared)
-    return publish_candidate(store_repo, source_repo, candidate_sha=candidate_sha, pins=pins,
-                             compute_sha=args.compute_sha, request_id=args.request_id, pre_push_guard=production_guard)
+    current_store = _at_stage('STORE_MAIN_GUARD', _remote_main, store_repo)
+    _at_stage('STORE_MAIN_GUARD', _require, current_store == pins.expected_store_sha, 'RETAINED_STORE_MAIN_CHANGED')
+    prepared = _at_stage('CANDIDATE_PREPARATION', prepare_candidate, store_repo, source_repo,
+                         pins=pins, compute_sha=args.compute_sha, request_id=args.request_id)
+    candidate_sha = _at_stage('CANDIDATE_COMMIT', commit_candidate, store_repo, prepared)
+    return _at_stage('PUBLICATION', publish_candidate, store_repo, source_repo, candidate_sha=candidate_sha,
+                     pins=pins, compute_sha=args.compute_sha, request_id=args.request_id, pre_push_guard=production_guard)
 
 
 class SafeParser(argparse.ArgumentParser):
@@ -474,16 +527,17 @@ def main(argv: list[str] | None = None) -> int:
         parser.add_argument('--store-repo')
         parser.add_argument('--candidate-repo')
         parser.add_argument('--request-id')
-        args = parser.parse_args(argv)
-        request = validate_request(args.request_json)
+        args = _at_stage('ARGUMENT_VALIDATION', parser.parse_args, argv)
+        request = _at_stage('REQUEST_VALIDATION', validate_request, args.request_json)
         if args.validate_request_only:
             print(json.dumps({key: request[key] for key in ('expected_store_sha', 'source_candidate_sha')}, sort_keys=True))
             return 0
-        receipt = execute(args, request)
+        receipt = _at_stage('EXECUTION', execute, args, request)
         print(json.dumps(receipt, sort_keys=True))
         return 0 if receipt['status'] == 'VERIFIED' else 1
-    except Exception:
-        print(json.dumps({'status': 'REJECTED', 'reason': 'RETAINED_RECONCILIATION_REJECTED'}), file=sys.stderr)
+    except Exception as error:
+        print(json.dumps({'status': 'REJECTED', 'reason': safe_failure_reason(error),
+                          'stage': safe_failure_stage(error)}, sort_keys=True), file=sys.stderr)
         return 1
 
 
