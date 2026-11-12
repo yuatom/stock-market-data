@@ -293,10 +293,12 @@ def run_route(*,store,api,compute,compute_sha,commitment,trade_date,env,key,acce
                 if not store.exists(store.head(),updater._transition_path(prior)):
                     return scope_hold('ACQUISITION_HELD_REVIEW_REQUIRED',binding=binding,grant_digest=updater.digest)
             if not store.exists(store.head(),'data/market-data/series-active/daily/twelve_data_basic/SOXX.json'):
-                # Planned first-activation hold: no provider call and no legacy
-                # fallback. Other symbols may continue under their old grants.
-                _save_private(delegation_output,_delegation(updater,binding,trade_date=trade_date,request_id=request_id,status='ACQUISITION_HELD_PENDING_INITIAL_BASIS',selector=None))
-                return 'FINITE_DAILY_BASIS_HELD'
+                # Only an approved isolated first candidate can bootstrap. The
+                # catalog stays absent on main until new data verifies and CAS wins.
+                try:updater._previous(slot,store.head())
+                except Exception:
+                    _save_private(delegation_output,_delegation(updater,binding,trade_date=trade_date,request_id=request_id,status='ACQUISITION_HELD_PENDING_INITIAL_BASIS',selector=None))
+                    return 'FINITE_DAILY_BASIS_HELD'
             if source_check:source_check()
             wait_for_daily_budget_window(updater,slot,clock=clock)
             candidate=updater.run_slot(slot['slot_id'],request_id,capture=capture or provider_capture(key,access))
