@@ -150,6 +150,25 @@ class DailyUpdater:
     def _current_selector(self,head):
         catalog=B._parse(self.store.read(head,CATALOG));sel=catalog|{'read_sha':head};B._selection(sel);return sel
 
+    def _unselected_initial(self,slot,head):
+        # First promotion may start from a separately approved isolated candidate.
+        # Never select the initial catalog on main merely to make capture runnable.
+        B._need(slot == self.grant['slots'][0])
+        prior=self.grant['initial_selector']
+        parents=self.store.g.commit(prior['read_sha'])[1]
+        B._need(len(parents)==1)
+        base=parents[0]
+        B._need(not self.store.exists(base,CATALOG) and not self.store.exists(head,CATALOG))
+        B._need(self.store.g.text('merge-base',base,head)==base)
+        history=self.store.g.text('rev-list','--parents','--max-count=513',base+'..'+head).splitlines()
+        B._need(len(history)<=512)
+        for record in history:
+            parts=record.split();B._need(len(parts)>=2)
+            for parent in parts[1:]:
+                B._need(parent==base or self.store.g.text('merge-base',base,parent)==base)
+                B._need(not self.store.g.read('diff-tree','--no-commit-id','--name-only','--no-renames','-r',parent,parts[0],'--',CATALOG))
+        return prior
+
     def _previous(self,slot,head):
         slots=self.grant['slots'];idx=slots.index(slot)
         prior=self.grant['initial_selector']
@@ -159,7 +178,8 @@ class DailyUpdater:
             B._need(transition['grant_sha256']==self.digest and transition['slot_id']==s['slot_id'] and transition['previous_basis_id']==prior['basis_id'])
             B._need(self.store.g.text('merge-base',candidate,head)==candidate)
             prior=transition['catalog']|{'read_sha':candidate}
-        current=self._current_selector(head)
+        current=(self._current_selector(head) if self.store.exists(head,CATALOG)
+                 else self._unselected_initial(slot,head))
         B._need({k:v for k,v in current.items() if k!='read_sha'}=={k:v for k,v in prior.items() if k!='read_sha'})
         snap=self._snapshot(current)
         dates=[d for d in self._sessions(slot) if d<=snap['last_trade_date']]
@@ -301,7 +321,8 @@ class DailyUpdater:
         delta=self.store.g.text('diff-tree','--no-commit-id','--name-only','--no-renames','-r',parents[0],head).splitlines()
         B._need(set(delta)=={prefix+'/claim.json',budget} and not self.store.exists(parents[0],prefix+'/claim.json'))
         cursor=parents[0]
-        B._need(cursor==claim['previous_selector']['read_sha'])
+        expected_previous,_=self._previous(slot,cursor)
+        B._need(claim['previous_selector']==expected_previous)
         before=B._parse(self.store.read(cursor,budget)) if self.store.exists(cursor,budget) else dict(schema_version=1,trade_date=day,credits=0,minutes={})
         after=B._parse(self.store.read(head,budget));minute=claim['budget_minute']
         expected_minutes=dict(before['minutes']);expected_minutes[minute]=expected_minutes.get(minute,0)+1
