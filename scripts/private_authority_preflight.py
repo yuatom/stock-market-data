@@ -12,7 +12,8 @@ from scripts.private_authority_materialize import materialize_store
 from scripts.private_authority_receipt_transport import fetch_private_receipt
 
 WORKFLOWS = {'soxx_capture_only': 'soxx-capture-only.yml',
-             'eleven_symbol_conditional_append': 'eleven-symbol-append.yml'}
+             'eleven_symbol_conditional_append': 'eleven-symbol-append.yml',
+             'twelve_symbol_conditional_append': 'twelve-symbol-append.yml'}
 
 
 class PrivatePreflightError(RuntimeError):

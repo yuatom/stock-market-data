@@ -133,11 +133,15 @@ def _store_binding(store, route, compute_sha, selection):
 
 
 def _coordinator(route):
-    # Fresh -B process with a reviewed clean checkout is the supported caller.
+    # Explicit closed routing before import; unknown modes never become eleven.
+    modules = {'soxx_capture_only': 'run_soxx_capture',
+               'eleven_symbol_conditional_append': 'run_eleven_symbol_append',
+               'twelve_symbol_conditional_append': 'run_twelve_symbol_append'}
+    if type(route) is not str or route not in modules:
+        raise PrivateRouteError(STOP)
     scripts = str(Path(__file__).resolve().parent)
     if scripts not in sys.path: sys.path.insert(0, scripts)
-    return importlib.import_module('run_soxx_capture' if route == 'soxx_capture_only'
-                                   else 'run_eleven_symbol_append')
+    return importlib.import_module(modules[route])
 
 
 def _invoke(*, route, compute, compute_sha, store, selection, request_id, key, token):
@@ -170,8 +174,10 @@ No authorization or concurrency bypass flag is supported. Every invocation still
         with _quiet(), _environment():
             sys.dont_write_bytecode = True
             _validate_identity(route, compute_sha, os.environ)
-            if route == 'eleven_symbol_conditional_append':
-                _need(os.environ.get('GITHUB_WORKFLOW') == 'Eleven Symbol Append')
+            append_workflows = {'eleven_symbol_conditional_append': 'Eleven Symbol Append',
+                                'twelve_symbol_conditional_append': 'Twelve Symbol Append'}
+            if route in append_workflows:
+                _need(os.environ.get('GITHUB_WORKFLOW') == append_workflows[route])
             _need(type(expected_commitment) is str and re.fullmatch('[0-9a-f]{64}',expected_commitment))
             _need(type(token) is str and re.fullmatch(r'[A-Za-z0-9_.-]{8,4096}',token))
             _need(type(key) is str and 8 <= len(key) <= 4096 and all(33 <= ord(c) <= 126 for c in key))

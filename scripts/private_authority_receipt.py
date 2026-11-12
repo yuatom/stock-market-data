@@ -13,7 +13,7 @@ import re
 
 DOMAIN = b'private-authority-receipt:v1\x00'
 MAX_RECEIPT_BYTES = 2048
-ROUTES = frozenset({'soxx_capture_only', 'eleven_symbol_conditional_append'})
+ROUTES = frozenset({'soxx_capture_only', 'eleven_symbol_conditional_append', 'twelve_symbol_conditional_append'})
 _KEYS = frozenset({'schema_version', 'kind', 'route', 'compute_sha',
                    'authority_store_sha', 'descriptor_commit', 'nonce'})
 
