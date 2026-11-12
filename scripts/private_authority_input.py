@@ -22,10 +22,11 @@ import re
 import subprocess
 
 from scripts import eleven_symbol_append as append
+from scripts import twelve_symbol_append as twelve
 from scripts.raw_response_evidence import validate_request
 
 DESCRIPTOR_PATH = 'capture-authority/selection.json'
-ROUTES = frozenset({'soxx_capture_only', 'eleven_symbol_conditional_append'})
+ROUTES = frozenset({'soxx_capture_only', 'eleven_symbol_conditional_append', 'twelve_symbol_conditional_append'})
 MAX_JSON_BYTES = 65536
 STORE_REPOSITORY = 'yuatom/stock-market-data-store'
 DESCRIPTOR_KEYS = frozenset({'schema_version', 'kind', 'route', 'compute_sha',
@@ -222,12 +223,14 @@ class _LocalGit:
 
 
 def _approval_common(value, route, compute):
+    limits = {'soxx_capture_only': 1, 'eleven_symbol_conditional_append': 11, 'twelve_symbol_conditional_append': 12}
+    _need(type(route) is str and route in limits)
     _need(type(value) is dict and set(value) == (SOXX_KEYS if route == 'soxx_capture_only' else ELEVEN_KEYS))
     _need(type(value['schema_version']) is int and value['schema_version'] == 1)
     _need(value['mode'] == route and value['compute_sha'] == compute)
     _need(value['evidence_repository'] == STORE_REPOSITORY and value['evidence_prefix'] == 'capture-evidence')
     for name in ('request_limit', 'credit_limit'):
-        _need(type(value[name]) is int and value[name] == (1 if route == 'soxx_capture_only' else 11))
+        _need(type(value[name]) is int and value[name] == limits[route])
     _window(value)
 
 
@@ -282,6 +285,32 @@ def _eleven(reader, descriptor, head, compute):
     return raw
 
 
+def _twelve(reader, descriptor, head, compute):
+    """Closed twelve-target authority; never widen the existing eleven branch."""
+    approval = descriptor['approval']
+    _approval_common(approval, 'twelve_symbol_conditional_append', compute)
+    _need(approval['expected_store_sha'] == head)
+    digest = _hex(approval['private_contract_sha256'], 64)
+    _hex(approval['registry_sha256'], 64)
+    _need(approval['basis_policy'] == 'full_ohlc_overlap_preserve_volume_v1')
+    cutoff = _day(approval['historical_cutoff'])
+    _need(cutoff < approval['execution_day'])
+    raw = _encode(approval)
+    _need(hashlib.sha256(raw).hexdigest() == descriptor['approval_sha256'])
+    relative = 'capture-contracts/' + digest + '.json'
+    blob, contract_raw = reader.blob(head, relative)
+    _json(contract_raw)  # Preserve private selector canonical-byte boundary.
+    contract = twelve.validate_contract(contract_raw, digest)
+    _need(contract['historical_cutoff'] == cutoff)
+    baseline = _hex(contract['baseline_store_sha'])
+    reader.single_addition(head, baseline, relative, blob)
+    for target in contract['targets']:
+        for name, expected in target['files'].items():
+            path = append.series_prefix(target['symbol'], symbols=twelve.SYMBOLS) + name
+            _need(reader.normal_blob_identity(baseline, path) == expected)
+    return raw
+
+
 def load_authority(store, route, compute_sha, expected_store_head, descriptor_commit):
     """Select only a privately pinned local object, never permission or execution.
 
@@ -305,7 +334,9 @@ remains at expected_store_head, not at the off-main descriptor commit.
               and descriptor['compute_sha'] == compute_sha and descriptor['authority_store_sha'] == expected_store_head)
         _hex(descriptor['approval_sha256'], 64)
         reader.single_addition(descriptor_commit, expected_store_head, DESCRIPTOR_PATH, blob)
-        approval_raw = (_soxx if route == 'soxx_capture_only' else _eleven)(reader, descriptor, expected_store_head, compute_sha)
+        loader = {'soxx_capture_only': _soxx, 'eleven_symbol_conditional_append': _eleven,
+                  'twelve_symbol_conditional_append': _twelve}[route]
+        approval_raw = loader(reader, descriptor, expected_store_head, compute_sha)
         reader.assert_unmodified_graph()
         reader.bind_refs(route, compute_sha, expected_store_head, descriptor_commit)
         return PrivateAuthoritySelection(approval_raw, descriptor['approval_sha256'], expected_store_head, descriptor_commit)
