@@ -1,0 +1,220 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "kind",
+    "formula_contract",
+    "compute_sha",
+    "basis_id",
+    "scope",
+    "required_sessions",
+    "volume_policy",
+    "selector",
+    "result"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "kind": {
+      "const": "price_basis_metric_proof"
+    },
+    "formula_contract": {
+      "const": "stock_dairy_calculation_policy_v2"
+    },
+    "compute_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "basis_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "scope": {
+      "enum": [
+        "prior_session_core_context",
+        "current_target"
+      ]
+    },
+    "required_sessions": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 5000,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "format": "date"
+      }
+    },
+    "volume_policy": {
+      "const": "BLOCKED_UNRESOLVED"
+    },
+    "selector": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "provider",
+        "symbol",
+        "basis_id",
+        "snapshot_blob_sha",
+        "admission_blob_sha"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "provider": {
+          "const": "twelve_data_basic"
+        },
+        "symbol": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9.-]{0,14}$"
+        },
+        "basis_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "snapshot_blob_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "admission_blob_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "result": {
+      "type": "object",
+      "required": [
+        "metric_semantics",
+        "target_trade_date",
+        "target_close",
+        "prior_series_last_trade_date",
+        "prior_record_count",
+        "returns_pct",
+        "moving_averages",
+        "volume",
+        "relative_strength_pct"
+      ],
+      "properties": {
+        "metric_semantics": {
+          "const": "target_close_vs_provider_affine_prior_session_series"
+        },
+        "target_trade_date": {
+          "type": "string",
+          "format": "date"
+        },
+        "target_close": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "prior_series_last_trade_date": {
+          "type": "string",
+          "format": "date"
+        },
+        "prior_record_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "returns_pct": {
+          "type": "object",
+          "required": [
+            "1session",
+            "3session",
+            "5session"
+          ],
+          "properties": {
+            "1session": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "3session": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "5session": {
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        "moving_averages": {
+          "type": "object",
+          "required": [
+            "ma20",
+            "target_vs_ma20_pct",
+            "ma50",
+            "target_vs_ma50_pct"
+          ],
+          "properties": {
+            "ma20": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "target_vs_ma20_pct": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "ma50": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "target_vs_ma50_pct": {
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        "volume": {
+          "type": "object",
+          "required": [
+            "status",
+            "reason"
+          ],
+          "properties": {
+            "status": {
+              "const": "blocked"
+            },
+            "reason": {
+              "const": "BLOCKED_UNRESOLVED"
+            }
+          },
+          "additionalProperties": false
+        },
+        "relative_strength_pct": {
+          "type": "object",
+          "required": [
+            "status"
+          ],
+          "properties": {
+            "status": {
+              "const": "unavailable"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

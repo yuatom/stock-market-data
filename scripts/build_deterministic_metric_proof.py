@@ -148,6 +148,10 @@ def _exact_shard_refs(root: Path, *, index_rel: str, index: Mapping[str, Any], s
 
 
 def _load_daily_series(root: Path, symbol: str, target_trade_date: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    try:
+        store_integrity.assert_legacy_basis(root, provider=PROVIDER, symbol=symbol)
+    except store_integrity.MarketDataError:
+        raise MetricProofError("explicit_versioned_basis_required") from None
     index_rel = f"series/daily/{PROVIDER}/{symbol.upper()}/_index.json"
     try:
         index, index_blob = _read_json_exact(root, index_rel)

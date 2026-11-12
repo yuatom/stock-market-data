@@ -63,17 +63,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: main
-          fetch-depth: 1
-          path: compute
-
-      - name: Checkout private Market Data Store
-        uses: actions/checkout@v4
-        with:
-          repository: yuatom/stock-market-data-store
-          token: ${{ secrets.MARKET_DATA_STORE_TOKEN }}
-          ref: main
           fetch-depth: 0
-          path: store
+          persist-credentials: false
+          path: compute
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -82,6 +74,13 @@ jobs:
 
       - name: Install bounded runtime dependency
         run: python -m pip install --disable-pip-version-check PyYAML
+
+      - name: Quietly clone private Market Data Store
+        working-directory: compute
+        env:
+          MARKET_DATA_STORE_TOKEN: ${{ secrets.MARKET_DATA_STORE_TOKEN }}
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python -B -m scripts.quiet_private_store clone --destination ../store
 
       - name: Resolve and validate collector invocation
         id: invocation
@@ -315,8 +314,10 @@ jobs:
               fh.write(f'probe_path={probe_path}\n')
               fh.write(f'probe_blob_sha={probe_blob_sha}\n')
               fh.write(f'market_data_contract_sha={compute_sha}\n')
-              fh.write(f'market_data_store_input_sha={store_sha}\n')
               fh.write(f"maintenance_authorized={'true' if maintenance_authorized else 'false'}\n")
+          private_pin = Path(os.environ['RUNNER_TEMP']) / 'market-data-store-input-sha'
+          private_pin.write_text(store_sha + '\n', encoding='ascii')
+          private_pin.chmod(0o600)
           print(json.dumps({
               'logical_trigger': event,
               'control_branch': branch or None,
@@ -327,7 +328,6 @@ jobs:
               'probe_path': probe_path or None,
               'probe_blob_sha': probe_blob_sha or None,
               'market_data_contract_sha': compute_sha,
-              'market_data_store_input_sha': store_sha,
               'maintenance_authorized': maintenance_authorized,
               'schedule_delivery_observation': schedule_delivery_observation,
           }, sort_keys=True))
@@ -401,6 +401,68 @@ jobs:
           }, sort_keys=True))
           PY
 
+      - name: Quietly clone isolated finite daily Store
+        if: steps.invocation.outputs.mode == 'previous_session_eod' && vars.DAILY_BASIS_GRANT_COMMITMENT != ''
+        working-directory: compute
+        env:
+          MARKET_DATA_STORE_TOKEN: ${{ secrets.MARKET_DATA_STORE_TOKEN }}
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python -B -m scripts.quiet_private_store clone --destination ../daily-basis-store
+
+      - name: Run finite daily basis owner
+        id: daily_basis_owner
+        if: steps.invocation.outputs.mode == 'previous_session_eod' && vars.DAILY_BASIS_GRANT_COMMITMENT != ''
+        working-directory: compute
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+          MARKET_DATA_STORE_TOKEN: ${{ secrets.MARKET_DATA_STORE_TOKEN }}
+          TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
+          DAILY_BASIS_GRANT_COMMITMENT: ${{ vars.DAILY_BASIS_GRANT_COMMITMENT }}
+          DAILY_BASIS_TRIGGER_KIND: ${{ inputs.trigger_kind }}
+          DAILY_BASIS_SCHEDULE: ${{ inputs.schedule }}
+          COMPUTE_SHA: ${{ steps.invocation.outputs.market_data_contract_sha }}
+          TRADE_DATE: ${{ steps.invocation.outputs.trade_date }}
+        run: |
+          set -euo pipefail
+          python -B -m scripts.run_daily_basis_route \
+            --store ../daily-basis-store --compute-sha "$COMPUTE_SHA" \
+            --trade-date "$TRADE_DATE" \
+            --delegation-output "$RUNNER_TEMP/daily-basis-delegation.json"
+          printf 'delegation_path=%s\n' "$RUNNER_TEMP/daily-basis-delegation.json" >> "$GITHUB_OUTPUT"
+
+      - name: Materialize verified daily Store base
+        if: steps.daily_basis_owner.outputs.delegation_path != ''
+        env:
+          OWNER_FILE: ${{ steps.daily_basis_owner.outputs.delegation_path }}
+          MARKET_DATA_STORE_TOKEN: ${{ secrets.MARKET_DATA_STORE_TOKEN }}
+        run: |
+          python - <<'PYTHON'
+          import sys
+          try:
+              import json, os, subprocess, sys
+              from pathlib import Path
+              sys.path.insert(0, 'compute')
+              from scripts.quiet_private_store import git_environment
+              private_env=git_environment(os.environ['MARKET_DATA_STORE_TOKEN'])
+              def git(*args):
+                  return subprocess.check_output(['git','-C','store','-c','core.hooksPath=/dev/null','-c','core.fsmonitor=false',*args],stderr=subprocess.DEVNULL,text=True,env=private_env).strip()
+              receipt=json.loads(Path(os.environ['OWNER_FILE']).read_text())
+              expected=receipt['store_sha']
+              assert not git('status','--porcelain') and not git('ls-files','--others')
+              # Read/fetch only. Unknown concurrent main advancement aborts rather
+              # than rebasing a selected version or inventing a new owner receipt.
+              assert git('ls-remote','origin','refs/heads/main').split()==[expected,'refs/heads/main']
+              git('fetch','--no-tags','--no-recurse-submodules','origin')
+              assert git('rev-parse','refs/remotes/origin/main')==expected
+              git('checkout','--detach',expected)
+              assert git('rev-parse','HEAD')==expected and not git('status','--porcelain')
+              pin=Path(os.environ['RUNNER_TEMP'])/'market-data-store-input-sha'
+              pin.write_text(expected+'\n',encoding='ascii');pin.chmod(0o600)
+          except Exception:
+              print('PRIVATE_STORE_BASE_REFRESH_STOPPED')
+              sys.exit(2)
+          PYTHON
+
       - name: Collect qualified facts into private Store checkout
         if: steps.invocation.outputs.mode != 'smoke_readonly'
         working-directory: compute
@@ -412,8 +474,9 @@ jobs:
           PROBE_PATH: ${{ steps.invocation.outputs.probe_path }}
           MAINTENANCE_AUTHORIZED: ${{ steps.invocation.outputs.maintenance_authorized }}
           MARKET_DATA_COMPUTE_SHA: ${{ steps.invocation.outputs.market_data_contract_sha }}
-          MARKET_DATA_STORE_INPUT_SHA: ${{ steps.invocation.outputs.market_data_store_input_sha }}
           MARKET_DATA_REQUEST_ID: ${{ steps.invocation.outputs.request_id }}
+          DAILY_BASIS_DELEGATION_FILE: ${{ steps.daily_basis_owner.outputs.delegation_path }}
+          DAILY_BASIS_GRANT_COMMITMENT: ${{ vars.DAILY_BASIS_GRANT_COMMITMENT }}
         run: |
           set -euo pipefail
           collector_failed() {
@@ -423,6 +486,7 @@ jobs:
               2>/dev/null || echo '{"status":"collector_failed","summary_status":"unavailable"}'
             return "$collector_status"
           }
+          export MARKET_DATA_STORE_INPUT_SHA="$(cat "$RUNNER_TEMP/market-data-store-input-sha")"
           store_root='../store/data/market-data'
           universe_common=(
             --store-root "$store_root"
@@ -498,6 +562,9 @@ jobs:
               'probe_path','probe_blob_sha','sample_only'
           }
           safe = {k: result[k] for k in sorted(result) if k in allowed}
+          if result.get('delegated_daily_symbols'):
+              safe['delegated_daily_symbol_count'] = len(result['delegated_daily_symbols'])
+              safe['daily_basis_owner_status'] = sorted({x['status'] for x in result['delegated_daily_symbols']})
           if isinstance(result.get('failures'), list):
               safe['failure_count'] = len(result['failures'])
               if result.get('mode') == 'previous_session_eod':
@@ -566,10 +633,12 @@ jobs:
         working-directory: store
         shell: bash
         env:
+          MARKET_DATA_STORE_TOKEN: ${{ secrets.MARKET_DATA_STORE_TOKEN }}
           MODE: ${{ steps.invocation.outputs.mode }}
           TRADE_DATE: ${{ steps.invocation.outputs.trade_date }}
           MARKET_DATA_CONTRACT_SHA: ${{ steps.invocation.outputs.market_data_contract_sha }}
         run: |
+          python -B ../compute/scripts/quiet_private_store.py run --repo . <<'PRIVATE_SCRIPT'
           set -euo pipefail
           store_base_sha="$(git rev-parse HEAD)"
           git add -- data/market-data
@@ -611,12 +680,16 @@ jobs:
             sleep $((attempt * 2))
           done
           exit 1
+          PRIVATE_SCRIPT
 
       - name: Verify durable Store publication
         if: steps.invocation.outputs.mode != 'smoke_readonly'
         working-directory: store
         shell: bash
+        env:
+          MARKET_DATA_STORE_TOKEN: ${{ secrets.MARKET_DATA_STORE_TOKEN }}
         run: |
+          python -B ../compute/scripts/quiet_private_store.py run --repo . <<'PRIVATE_SCRIPT'
           set -euo pipefail
           args=()
           manifest_path='${{ steps.publication.outputs.publication_manifest_path }}'
@@ -628,3 +701,4 @@ jobs:
             --expected-commit "$(git rev-parse HEAD)" \
             --writer-status store_persisted \
             "${args[@]}"
+          PRIVATE_SCRIPT

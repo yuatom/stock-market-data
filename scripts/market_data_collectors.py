@@ -28,6 +28,7 @@ try:
         MarketDataConflict,
         canonical_bytes,
         append_daily_bars,
+        assert_legacy_basis,
         git_blob_sha_bytes,
         json_sha256,
         read_daily_series,
@@ -39,6 +40,7 @@ except ImportError:  # pragma: no cover
         MarketDataConflict,
         canonical_bytes,
         append_daily_bars,
+        assert_legacy_basis,
         git_blob_sha_bytes,
         json_sha256,
         read_daily_series,
@@ -444,6 +446,18 @@ def _write_private_eod_diagnostic(
     result["result_state_path"] = relative.as_posix()
 
 
+def _load_daily_basis_owner(store_root, trade_date):
+    filename = os.environ.get("DAILY_BASIS_DELEGATION_FILE", "")
+    if not filename:
+        return {}
+    import sys
+    repository_root = str(Path(__file__).resolve().parents[1])
+    if repository_root not in sys.path:
+        sys.path.insert(0, repository_root)
+    from scripts.daily_basis_delegation import load_daily_basis_owner
+    return load_daily_basis_owner(store_root, trade_date, filename, dict(os.environ))
+
+
 def collect_previous_session_eod(
     *,
     trade_date: str,
@@ -473,10 +487,16 @@ def collect_previous_session_eod(
     conflict_diagnostics: list[dict[str, Any]] = []
     conflict_record_count = 0
     universe = _daily_universe(watchlist, completeness)
+    daily_basis_owner = _load_daily_basis_owner(store_root, trade_date)
+    delegated_daily_symbols = []
 
     for symbol, asset_class in universe:
+        if symbol in daily_basis_owner:
+            delegated_daily_symbols.append({"symbol": symbol, "status": daily_basis_owner[symbol]})
+            continue
         phase = "budget_check"
         try:
+            assert_legacy_basis(store_root, provider=TWELVE_PROVIDER, symbol=symbol)
             wait_for_twelve_budget(
                 store_root,
                 trade_date,
@@ -590,6 +610,7 @@ def collect_previous_session_eod(
         "conflict_diagnostics_truncated": conflict_record_count > len(conflict_diagnostics),
         "conflict_diagnostics": conflict_diagnostics,
         "failures": failures,
+        **({"delegated_daily_symbols": delegated_daily_symbols} if delegated_daily_symbols else {}),
     }
     _write_private_eod_diagnostic(
         store_root=store_root,

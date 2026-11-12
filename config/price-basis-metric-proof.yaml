@@ -1,0 +1,56 @@
+schema_version: 1
+contract_version: 1
+consumer: yuatom/stock-dairy
+parent_arithmetic_owner: config/deterministic-metric-proof.yaml#formulas
+formula_contract: stock_dairy_calculation_policy_v2
+producer: scripts/build_price_basis_metric_proof.py
+schema: schemas/price-basis-metric-proof.schema.json
+selection: explicit_per_symbol_price_basis_only
+default_legacy_proof_unchanged: true
+proof_kind: price_basis_metric_proof
+store_path_prefix: data/market-data/proofs/price-basis/
+proof_ref: {claim_scope: price_basis_metric_proof, provider: twelve_data_basic, session: regular}
+scopes: [prior_session_core_context, current_target]
+immutable_selector_without_read_sha_is_embedded: true
+all_source_membership_must_be_verified_at_final_frozen_store_sha: true
+frozen_selector_private_receipt_binds_enclosing_store_sha: true
+source_snapshot_admission_catalog_envelope_terminal_must_match: true
+current_target_requires_same_snapshot_and_completed_session: true
+independently_trusted_calendar_required_by_consumer: true
+volume_policy: BLOCKED_UNRESOLVED
+unsupported_scope_or_basis_or_benchmark: reject
+no_provider_fetch_no_store_write_no_activation: true
+private_delivery_workflow: yuatom/stock-market-data-store/.github/workflows/basis-consumer-delivery.yml
+private_delivery_emitter: scripts/emit_basis_consumer_delivery.py
+finite_daily_current:
+  producer: scripts/daily_basis_updates.py
+  current_authority_owner: scripts/run_daily_basis_route.py#current_delivery
+  exact_proof_path: capture-evidence/daily-basis/{grant_sha256}/{slot_id}/price-proof.json
+  original_receipt_binds_admitted_candidate_sha: true
+  separately_approved_finite_authority_binds_one_current_read_sha: true
+  unchanged_protected_blobs_and_all_parent_diffs_required: true
+  maximum_intervening_commits: 512
+  current_normal_immutable_retention_ref_required: true
+  receipt_current_time_expiry_required: true
+  old_one_shot_freshness_contract_unchanged: true
+  volume_policy: BLOCKED_UNRESOLVED
+finite_initial_read:
+  current_authority_owner: scripts/initial_basis_delivery.py#current_initial_delivery
+  pure_validator: scripts/initial_basis_read.py
+  independently_approved_exact_proof_ref_required: true
+  allowed_scopes: [prior_session_core_context]
+  approved_single_consumer_trade_date_required: true
+  original_receipt_binds_admitted_initial_sha: true
+  independently_approved_digest_sources_selector_calendar_receipt_run_required: true
+  separately_approved_read_authority_binds_one_current_read_sha: true
+  unchanged_protected_blobs_and_all_parent_diffs_required: true
+  maximum_intervening_commits: 512
+  current_normal_immutable_retention_ref_required: true
+  expires_no_later_than_original_receipt: true
+  maximum_read_window_hours: 24
+  provider_request_limit: 0
+  verification_limit: 1
+  dispatch_from_read_path: forbidden
+  catalog_advance_invalidates_initial_read: true
+  old_one_shot_freshness_contract_unchanged: true
+  volume_policy: BLOCKED_UNRESOLVED

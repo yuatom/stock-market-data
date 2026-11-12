@@ -215,6 +215,7 @@ def initialize(
     universe = collection.daily_universe(universe_config)
     for symbol, asset_class in universe:
         try:
+            store.assert_legacy_basis(store_root, provider=collectors.TWELVE_PROVIDER, symbol=symbol)
             collectors.wait_for_twelve_budget(
                 store_root,
                 trade_date,
