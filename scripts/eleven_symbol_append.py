@@ -17,7 +17,11 @@ from pathlib import Path
 import re
 import tempfile
 
-from scripts import market_data_store as store
+try:
+    from scripts import market_data_store as store
+except ModuleNotFoundError as exc:
+    if exc.name != 'scripts': raise
+    import market_data_store as store
 
 SYMBOLS = ('IBIT', 'IWM', 'KWEB', 'QQQ', 'SMH', 'SPY', 'TLT', 'VIXY', 'XLE', 'XLU', 'XLK')
 # Public simulator constants are fabricated and are never official runtime scope.
@@ -81,8 +85,8 @@ def dates_for(symbol):
     return DATES[1:] if symbol == 'XLK' else DATES
 
 
-def series_prefix(symbol):
-    require(symbol in SYMBOLS)
+def series_prefix(symbol, *, symbols=SYMBOLS):
+    require(symbol in symbols)
     return PREFIX + 'series/daily/twelve_data_basic/' + symbol + '/'
 
 
@@ -120,8 +124,8 @@ def validate_scope(scope, symbol):
     return scope
 
 
-def series_names(files, symbol):
-    prefix=series_prefix(symbol)
+def series_names(files, symbol, *, symbols=SYMBOLS):
+    prefix=series_prefix(symbol, symbols=symbols)
     try:
         index=strict_load(files[prefix+'_index.json'])
         metas=index['shards']
@@ -139,9 +143,9 @@ def series_names(files, symbol):
         raise RunStopped('LOCAL_RUN_STOPPED') from None
 
 
-def read_series(files, symbol):
+def read_series(files, symbol, *, symbols=SYMBOLS):
     """Read only the immutable index-declared closure, with no public inventory pins."""
-    prefix=series_prefix(symbol);names=series_names(files,symbol)
+    prefix=series_prefix(symbol, symbols=symbols);names=series_names(files,symbol, symbols=symbols)
     index=strict_load(files[prefix+'_index.json'])
     require(type(index) is dict and index.get('symbol')==symbol and index.get('provider')=='twelve_data_basic' and
             index.get('asset_class')=='etf' and index.get('series_id')==f'twelve_data_basic:{symbol}:regular:1d' and
@@ -159,12 +163,12 @@ def read_series(files, symbol):
     return rows
 
 
-def validate_base(files, symbol, blob_pins, scope=None):
+def validate_base(files, symbol, blob_pins, scope=None, *, symbols=SYMBOLS):
     scope=validate_scope(scope if scope is not None else synthetic_scope(symbol,blob_pins),symbol)
-    require(scope['files']==blob_pins and set(blob_pins)==set(series_names(files,symbol)))
-    prefix=series_prefix(symbol)
+    require(scope['files']==blob_pins and set(blob_pins)==set(series_names(files,symbol, symbols=symbols)))
+    prefix=series_prefix(symbol, symbols=symbols)
     require(all(store.git_blob_sha_bytes(files[prefix+name])==digest for name,digest in blob_pins.items()))
-    old=read_series(files,symbol)
+    old=read_series(files,symbol, symbols=symbols)
     require(len(old)==scope['old_count'] and old[0]['trade_date']==scope['first_date'] and old[-1]['trade_date']==scope['last_date'])
     return old
 
@@ -198,8 +202,11 @@ def inspect_raw(raw, request, old, symbol, scope):
     conflicts = []
     for prior, current in zip(old, values):
         reject(all(type(prior.get(f)) in (int, float) and math.isfinite(prior[f]) for f in FIELDS), 'BASIS_MISMATCH')
-        reject(all(Decimal(str(prior[f])) == current[f] for f in FIELDS[:-1]), 'BASIS_MISMATCH')
-        if Decimal(str(prior['volume'])) != current['volume']:
+        comparison=classify_daily_overlap(
+            dict(trade_date=prior['trade_date'], **{f:prior[f] for f in FIELDS}),
+            dict(trade_date=prior['trade_date'], **{f:str(current[f]) for f in FIELDS}))
+        reject(comparison['price_eligible'], 'BASIS_MISMATCH')
+        if comparison['classification']=='VOLUME_ONLY':
             conflicts.append(prior['trade_date'])
     additions = []
     for raw_row, numbers in zip(rows[len(old):], values[len(old):]):
@@ -213,13 +220,13 @@ def prepare_candidate(base, symbol, raw, profile, lineage, blob_pins):
     return prepare_qualified_candidate(base, symbol, raw, request, lineage, blob_pins, synthetic_scope(symbol,blob_pins))
 
 
-def prepare_qualified_candidate(base, symbol, raw, request, lineage, blob_pins, scope):
+def prepare_qualified_candidate(base, symbol, raw, request, lineage, blob_pins, scope, *, symbols=SYMBOLS):
     """Pure construction only. Official caller MUST first qualify pinned profile.
 
     This function grants no provider identity, adjusted-basis or execution authority.
     Its request must already be independently approved by the official runner.
     """
-    require(symbol in SYMBOLS and type(request) is dict and set(request) == REQUEST_KEYS)
+    require(symbol in symbols and type(request) is dict and set(request) == REQUEST_KEYS)
     scope=validate_scope(scope,symbol)
     require(request['symbol'] == symbol and request['start_date'] == scope['first_date'] and
             request['end_date'] == scope['addition_dates'][-1] and type(request['outputsize']) is int and
@@ -228,11 +235,11 @@ def prepare_qualified_candidate(base, symbol, raw, request, lineage, blob_pins, 
             type(request['dp']) is int and request['dp'] == -1 and
             request['provider'] == 'twelve_data' and request['currency'] == 'USD' and
             request['type'] == 'ETF')
-    old = validate_base(base, symbol, blob_pins, scope)
+    old = validate_base(base, symbol, blob_pins, scope, symbols=symbols)
     additions, conflicts = inspect_raw(raw, request, old, symbol, scope)
-    prefix = series_prefix(symbol)
+    prefix = series_prefix(symbol, symbols=symbols)
     original_index = strict_load(base[prefix + '_index.json'])
-    names=series_names(base,symbol)
+    names=series_names(base,symbol, symbols=symbols)
     sealed=[m['path'] for m in original_index['shards'][:-1]]
     tail=original_index['shards'][-1]['path']
     with tempfile.TemporaryDirectory(prefix='eleven-candidate-') as directory:
@@ -246,7 +253,7 @@ def prepare_qualified_candidate(base, symbol, raw, request, lineage, blob_pins, 
                                 bars=additions, lineage=lineage)
         after = {str(p.relative_to(root)): p.read_bytes() for p in root.rglob('*') if p.is_file()}
     require(set(after) == {prefix + n for n in names})
-    require(encode(read_series(after, symbol)) == encode(old + additions))
+    require(encode(read_series(after, symbol, symbols=symbols)) == encode(old + additions))
     index = strict_load(after[prefix + '_index.json'])
     mutable = {'record_count', 'last_trade_date', 'shards', 'lineage_segments'}
     require({k: v for k, v in index.items() if k not in mutable} ==
@@ -383,3 +390,40 @@ boolean override here. Only validation rejections are isolated, never I/O errors
                     requests=len(outcomes), credits=len(outcomes), outcomes=outcomes)
     except Exception:
         raise RunStopped('LOCAL_RUN_STOPPED') from None
+
+
+def classify_daily_overlap(old, new):
+    """Generic field classification, not permission or provider provenance.
+
+    Works on already identity-bound rows. Keeps non-price metadata strict, uses
+    Decimal numeric equivalence, and never promotes volume to usable data.
+    """
+    outcome=dict(classification='QUALITY_INVALID',price_eligible=False,
+                 volume_policy='BLOCKED_UNRESOLVED',changed_fields=[])
+    try:
+        require(type(old) is dict and type(new) is dict)
+        require(old.get('trade_date')==new.get('trade_date'))
+        require(type(old.get('trade_date')) is str and
+                date.fromisoformat(old['trade_date']).isoformat()==old['trade_date'])
+        converted=[]
+        for row in (old,new):
+            values={}
+            for f in FIELDS:
+                v=row[f];require(type(v) in (int,float,str))
+                number=Decimal(str(v));require(number.is_finite())
+                require(number>=0 if f=='volume' else number>0)
+                if f=='volume':require(number==number.to_integral_value())
+                values[f]=number
+            require(values['low']<=min(values['open'],values['close'])<=max(values['open'],values['close'])<=values['high'])
+            converted.append(values)
+        a,b=converted
+        changes=[f for f in FIELDS if a[f]!=b[f]]
+        metadata={k:v for k,v in old.items() if k not in FIELDS}
+        other={k:v for k,v in new.items() if k not in FIELDS}
+        if encode(metadata)!=encode(other):kind='METADATA_REVISION'
+        elif any(f in changes for f in FIELDS[:-1]):kind='PRICE_REVISION'
+        elif 'volume' in changes:kind='VOLUME_ONLY'
+        else:kind='EQUIVALENT'
+        return dict(outcome,classification=kind,price_eligible=kind in ('EQUIVALENT','VOLUME_ONLY'),changed_fields=changes)
+    except Exception:
+        return outcome

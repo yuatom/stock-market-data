@@ -578,6 +578,157 @@ def maintain(h, *, compute: Path, compute_sha: str, repo: Path, store_sha: str,
     return out
 
 
+def _verify_append_terminal(h,repo,*,start,sha,path,day,cutoff,request_id,symbol,selector,before,remaining,passed,compute_sha,result=None):
+    """Append-only closure: no archive/rebase paths or revised old rows allowed."""
+    import hashlib
+    import backfill_market_data_tail as tail
+    expected_path=f'{r.PREFIX}collector-state/{day[:7]}/{day}-daily-history-tail-backfill-{request_id}-{symbol}.json'
+    if path!=expected_path: _fail()
+    _immutable_blob(repo,sha,path)
+    report=json.loads(a.git(repo,'show',f'{sha}:{path}'))
+    expected=dict(mode=tail.MODE,compute_sha=compute_sha,request_id=request_id,trade_date=day,
+                  execution_date=day,historical_cutoff=cutoff,store_start_sha=start,
+                  fixed_selection=selector,target_count=1,requests_attempted=1,budget_debits=1)
+    if any(report.get(k)!=v for k,v in expected.items()): _fail()
+    budget_path=f'{r.PREFIX}collector-state/{day[:7]}/{day}-twelve-data-budget.json'
+    budget=json.loads(a.git(repo,'show',f'{sha}:{budget_path}'));_one_debit(before,budget)
+    required=[dict(path=path,blob_sha=_immutable_blob(repo,sha,path))]
+    allowed={path,budget_path}
+    old_index,old_rows,_=_immutable_series(repo,start,symbol,h.store)
+    index,rows,paths=_immutable_series(repo,sha,symbol,h.store)
+    if h.store.canonical_bytes(rows[:len(old_rows)])!=h.store.canonical_bytes(old_rows): _fail()
+    prefix=f'{r.PREFIX}series/daily/twelve_data_basic/{symbol}/'
+    for shard in old_index['shards']:
+        if shard.get('sealed') and _immutable_blob(repo,start,prefix+shard['path'])!=_immutable_blob(repo,sha,prefix+shard['path']):_fail()
+    if result is not None and result.get('status')=='PASS':
+        if (report.get('status')!='CANDIDATE_VALIDATED' or len(rows)<=len(old_rows) or
+            rows[-1]['trade_date']!=cutoff or result.get('appended_count')!=1): _fail()
+        mutable={'record_count','last_trade_date','shards','lineage_segments'}
+        if {k:v for k,v in index.items() if k not in mutable}!={k:v for k,v in old_index.items() if k not in mutable}: _fail()
+        lineage=index.get('lineage_segments',[])
+        if lineage[:-1]!=old_index.get('lineage_segments',[]) or len(lineage)!=len(old_index.get('lineage_segments',[]))+1:_fail()
+        segment=lineage[-1]
+        if (segment.get('ingest_kind')!='collector_price_only_revision_v1' or
+            segment.get('volume_policy')!='BLOCKED_UNRESOLVED' or segment.get('start')!=len(old_rows) or segment.get('end')!=len(rows)-1):_fail()
+        digest=segment.get('normalized_evidence_sha256')
+        if type(digest) is not str or not re.fullmatch('[0-9a-f]{64}',digest):_fail()
+        relative=f'collector-state/{day[:7]}/price-only-{digest}.json'
+        if segment.get('normalized_evidence_path')!=relative:_fail()
+        evidence_path=r.PREFIX+relative
+        # git show returns text; canonical evidence uses no trailing transformation.
+        evidence=json.loads(a.git(repo,'show',f'{sha}:{evidence_path}'))
+        if hashlib.sha256(h.store.canonical_bytes(evidence)).hexdigest()!=digest:_fail()
+        item=dict(symbol=symbol,existing=old_rows,effective=old_index.get('identity_effective_from'),
+                  target_records=len(old_rows),outputsize=segment.get('history_outputsize'))
+        tail.qualify_tail(h,item,evidence['records'],cutoff,price_only=True)
+        if (item['rows']!=rows or item['price_only_evidence'][0]!=digest or
+            tail.tail_lineage(item,day,cutoff)!={k:v for k,v in segment.items() if k not in ('start','end')}):_fail()
+        required=[dict(path=p,blob_sha=_immutable_blob(repo,sha,p)) for p in sorted(paths|{path,r.INVENTORY,evidence_path})]
+        if result.get('verified_required_outputs')!=required:_fail()
+        allowed.update(p['path'] for p in required)
+    else:
+        if index!=old_index or rows!=old_rows:_fail()
+        if result is not None:
+            if result.get('status')!='NOOP' or report.get('status')!='NOOP':_fail()
+        elif report.get('status')!='BLOCKED' or report.get('failure_code')!='replacement_rejected':_fail()
+    r.validate_manifest(budget,required,request_id,day,mode=tail.MODE)
+    for commit,parent in _linear_commits(repo,start,sha):
+        changed=set(filter(None,a.git(repo,'diff','--name-only','-z',parent,commit,'--').split('\0')))
+        if not changed<=allowed:_fail('unexpected_change')
+    for target in remaining:
+        if target['symbol'] not in passed:
+            index_path=f"{r.PREFIX}series/daily/twelve_data_basic/{target['symbol']}/_index.json"
+            if _immutable_blob(repo,sha,index_path)!=target['index_blob_sha']:_fail('object_drift')
+    if a.git(repo,'ls-remote','origin',f'refs/tags/market-data-read/{sha}').split()!=[sha,f'refs/tags/market-data-read/{sha}']:_fail('durability_failed')
+    return report
+
+
+def maintain_append(h,*,compute,compute_sha,repo,store_sha,execution_date,historical_cutoff,
+                    request_id,config,universe,access,key,fixed_selector,clock=r.now_utc):
+    """Same fixed-target controller, append transactions only; never r.recover.
+
+    Confirmed data rejection can quarantine; unknown request/publication stops.
+    No replay, automatic resume, renewed deadline or selector refresh.
+    """
+    import backfill_market_data_tail as tail
+    deadline=time.monotonic()+600; head=store_sha; targets=[];touched=set();passed=set()
+    out=dict(mode=tail.MODE,status='BLOCKED',compute_sha=compute_sha,store_start_sha=store_sha,
+             execution_date=execution_date,historical_cutoff=historical_cutoff,request_id=request_id,
+             transactions=[],requests_attempted=0,budget_debits_confirmed=0,budget_debits_unconfirmed=0,
+             published_count=0,quarantined_symbols=[],not_attempted_symbols=[],stop=None,
+             last_verified_commit_sha=head,production_recovery_accepted=False,automatic_retry_allowed=False)
+    try:
+        if config['collector']['twelve_data_daily'].get('bounded_overlap_revision_policy')!='price_only_volume_blocked_v1':_fail('invalid_target')
+        if not key or not re.fullmatch(r'\d+-\d+',request_id):_fail('invalid_target')
+        maturity=config['collector']['twelve_data_daily']['settlement_maturity']['minimum_next_day_et']
+        tail.validate_dates(execution_date,historical_cutoff,maturity,clock());r.source_guard(compute,compute_sha)
+        _clean(repo);_remote_exact(repo,head)
+        selected=resolve_fixed_targets(h,store_repo=repo,store_sha=head,selector=fixed_selector,universe=universe)
+        targets=[dict(symbol=t['symbol'],index_blob_sha=t['index_blob_sha']) for t in selected]
+        if not targets or len(targets)>29:_fail('incomplete_targets')
+        budget=_budget(repo,execution_date,config)
+        if len(targets)>200-budget['credits']:_fail('budget_exhausted')
+        plan=dict(out,mode=MODE,trade_date=execution_date,kind='append_only_batch_plan',status='PLANNED',
+                  fixed_selection={'schema_version':1,'targets':targets},maximum_provider_requests=len(targets),
+                  overall_timeout_seconds=600,volume_policy='BLOCKED_UNRESOLVED')
+        head,plan_path=_publish_metadata(repo,head,execution_date,request_id,config,plan,deadline=deadline)
+        out.update(batch_manifest_commit_sha=head,batch_manifest_path=plan_path,last_verified_commit_sha=head)
+        for target in targets:
+            if time.monotonic()>deadline:_fail('deadline_exceeded')
+            r.source_guard(compute,compute_sha);tail.validate_dates(execution_date,historical_cutoff,maturity,clock())
+            _adopt(repo,head)
+            pending=[t for t in targets if t['symbol'] not in passed]
+            resolve_fixed_targets(h,store_repo=repo,store_sha=head,selector={'schema_version':1,'targets':pending},universe=universe)
+            symbol=target['symbol'];selector={'schema_version':1,'targets':[dict(target)]}
+            before=_budget(repo,execution_date,config);touched.add(symbol)
+            result=None
+            try:
+                result=tail.backfill(h,compute=compute,compute_sha=compute_sha,repo=repo,store_sha=head,
+                    execution_date=execution_date,historical_cutoff=historical_cutoff,request_id=request_id,
+                    config=config,universe=universe,access=access,key=key,fixed_selector=selector,clock=clock,
+                    symbol_transaction=symbol,overall_deadline=deadline)
+            except Exception as exc:
+                summary=r.failure_summary(exc)
+                out['requests_attempted']+=summary.get('requests_attempted',0)
+                out['budget_debits_confirmed']+=summary.get('budget_debits_confirmed',0)
+                out['budget_debits_unconfirmed']+=summary.get('budget_debits_unconfirmed',0)
+                receipt=getattr(exc,'confirmed_terminal',None)
+                if (not isinstance(exc,r.RecoveryError) or exc.code!='replacement_rejected' or
+                    not getattr(exc,'append_data_rejection',False) or type(receipt) is not r.ConfirmedTerminalReceipt or
+                    exc.candidate_sha or exc.publication or getattr(exc,'terminal_report_failure',None) or
+                    summary.get('requests_attempted')!=1 or summary.get('budget_debits_confirmed')!=1 or
+                    summary.get('budget_debits_unconfirmed')!=0):raise
+                sha,path=receipt.store_commit_sha,receipt.result_state_path
+                status='QUARANTINED'
+            else:
+                out['requests_attempted']+=result.get('requests_attempted',0)
+                out['budget_debits_confirmed']+=result.get('budget_debits',0)
+                sha,path=result.get('store_commit_sha'),result.get('result_state_path')
+                status=result.get('status')
+                if status=='PASS':
+                    out['published_count']+=1
+                    # Preserve a real child publication even if our next verification fails.
+                    out['transactions'].append(dict(symbol=symbol,status='PASS_UNRECONCILED',store_commit_sha=sha))
+            _verify_append_terminal(h,repo,start=head,sha=sha,path=path,day=execution_date,cutoff=historical_cutoff,
+                request_id=request_id,symbol=symbol,selector=selector,before=before,remaining=targets,
+                passed=passed|({symbol} if status=='PASS' else set()),compute_sha=compute_sha,result=result)
+            row=dict(symbol=symbol,status=status,store_start_sha=head,store_commit_sha=sha,result_state_path=path)
+            if status=='PASS':passed.add(symbol);out['transactions'][-1]=row
+            else:out['transactions'].append(row)
+            if status=='QUARANTINED':out['quarantined_symbols'].append(symbol)
+            head=sha;out['last_verified_commit_sha']=head;_adopt(repo,head)
+            checkpoint=dict(out,mode=MODE,trade_date=execution_date,kind='append_only_batch_checkpoint',status='PROGRESS_VALIDATED')
+            head,cp=_publish_metadata(repo,head,execution_date,request_id,config,checkpoint,deadline=deadline,symbol=symbol)
+            row.update(checkpoint_commit_sha=head,checkpoint_path=cp);out['last_verified_commit_sha']=head
+    except Exception as exc:
+        out['stop']=r.failure_summary(exc)
+    out['not_attempted_symbols']=[t['symbol'] for t in targets if t['symbol'] not in touched]
+    if out['stop'] is None and targets:
+        out['status']='PASS' if all(t['status'] in ('PASS','NOOP') for t in out['transactions']) else ('PARTIAL' if out['published_count'] else 'BLOCKED')
+    elif out['published_count']:out['status']='PARTIAL'
+    return out
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ('trade-date', 'compute-sha', 'store-sha', 'store-repo', 'request-id', 'fixed-selection'):
