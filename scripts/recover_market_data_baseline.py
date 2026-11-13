@@ -137,7 +137,7 @@ def verify_outputs(repo: Path, sha: str, manifest: str, outputs: list[dict],
 
 def make_writer(repo: Path, expected: str, day: str, request_id: str, *, mode: str = MODE,
                 symbol: str | None = None):
-    if symbol is not None and (mode not in (MODE, 'daily_symbol_maintenance') or not isinstance(symbol, str) or
+    if symbol is not None and (mode not in (MODE, 'daily_symbol_maintenance', 'daily_history_tail_backfill') or not isinstance(symbol, str) or
                                not re.fullmatch(r'[A-Z][A-Z0-9.-]{0,9}', symbol)):
         raise RecoveryError('invalid_target')
     if mode not in (MODE, 'daily_history_tail_backfill', 'daily_symbol_maintenance'):

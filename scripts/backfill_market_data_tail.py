@@ -24,6 +24,12 @@ from recover_market_data_baseline import RecoveryError
 from fixed_baseline_targets import parse_fixed_selection, resolve_fixed_targets
 from replacement_diagnostics import ReplacementDiagnostic
 
+try:
+    from scripts.eleven_symbol_append import classify_daily_overlap
+except ModuleNotFoundError as exc:
+    if exc.name != 'scripts': raise
+    from eleven_symbol_append import classify_daily_overlap
+
 MODE = 'daily_history_tail_backfill'
 ET = ZoneInfo('America/New_York')
 
@@ -54,7 +60,7 @@ def validate_dates(execution_date: str, historical_cutoff: str, maturity: str,
     return next_day.isoformat()
 
 
-def qualify_tail(h, item: dict, fetched: list[dict], cutoff: str) -> None:
+def qualify_tail(h, item: dict, fetched: list[dict], cutoff: str, *, price_only=False) -> None:
     """Zero-revision full retained overlap; no prefix growth or internal inserts."""
     existing = item['existing']
     if not existing or cutoff < existing[-1]['trade_date']:
@@ -65,9 +71,30 @@ def qualify_tail(h, item: dict, fetched: list[dict], cutoff: str) -> None:
                   key=lambda x: x['trade_date'])
     if not rows or rows[-1]['trade_date'] != cutoff or (len(rows) < item['target_records'] and not item['effective']):
         raise RecoveryError('replacement_rejected')
-    # Reuse the unchanged strict canonical comparison, with no revisions allowed.
-    h.rebaser.validate_replacement(existing, rows, maximum_revised_overlap_records=0,
-                                 revised_overlap_must_be_within_last_existing_sessions=1)
+    if price_only:
+        dates=[r['trade_date'] for r in rows]
+        if len(dates)!=len(set(dates)) or any(not classify_daily_overlap(r,r)['price_eligible'] for r in rows):
+            raise RecoveryError('replacement_rejected')
+        by_date={r['trade_date']:r for r in rows}
+        comparisons=[]
+        for prior in existing:
+            if prior['trade_date'] not in by_date:
+                raise RecoveryError('replacement_rejected')
+            result=classify_daily_overlap(prior,by_date[prior['trade_date']])
+            if not result['price_eligible']:
+                raise RecoveryError('replacement_rejected')
+            comparisons.append(dict(trade_date=prior['trade_date'],**result))
+        evidence=dict(schema_version=1,kind='normalized_daily_price_only_evidence',
+                      symbol=item['symbol'],historical_cutoff=cutoff,records=rows,
+                      overlap=comparisons,volume_policy='BLOCKED_UNRESOLVED')
+        raw=h.store.canonical_bytes(evidence)
+        import hashlib
+        digest=hashlib.sha256(raw).hexdigest()
+        item['price_only_evidence']=(digest,raw)
+    else:
+        # Legacy mode retains its unchanged zero-revision policy.
+        h.rebaser.validate_replacement(existing, rows, maximum_revised_overlap_records=0,
+                                     revised_overlap_must_be_within_last_existing_sessions=1)
     old_dates = {x['trade_date'] for x in existing}
     if any(existing[0]['trade_date'] <= x['trade_date'] <= existing[-1]['trade_date'] and
            x['trade_date'] not in old_dates for x in rows):
@@ -87,6 +114,21 @@ def qualify_tail(h, item: dict, fetched: list[dict], cutoff: str) -> None:
         'replacement_sha256': h.store.json_sha256(combined)})
 
 
+def tail_lineage(item,execution_date,cutoff):
+    value={'ingest_kind':MODE,'execution_date':execution_date,
+           'historical_cutoff':cutoff,'history_outputsize':item['outputsize']}
+    if 'price_only_evidence' in item:
+        digest,raw=item['price_only_evidence']
+        import hashlib
+        if hashlib.sha256(raw).hexdigest()!=digest:
+            raise RecoveryError('candidate_invalid')
+        value.update(ingest_kind='collector_price_only_revision_v1',
+                     volume_policy='BLOCKED_UNRESOLVED',
+                     normalized_evidence_path=f'collector-state/{execution_date[:7]}/price-only-{digest}.json',
+                     normalized_evidence_sha256=digest)
+    return value
+
+
 def stage_tail(h, stage: Path, entries: list[dict], execution_date: str, cutoff: str) -> set[str]:
     """Use the normal append primitive, retaining old logical rows and sealed blobs."""
     outputs = set()
@@ -96,17 +138,27 @@ def stage_tail(h, stage: Path, entries: list[dict], execution_date: str, cutoff:
             if h.store.git_blob_sha_bytes(recovery.safe_path(stage, path).read_bytes()) != blob:
                 raise RecoveryError('object_drift')
         old = item['old_index']
+        lineage=tail_lineage(item,execution_date,cutoff)
+        if 'price_only_evidence' in item:
+            relative=recovery.PREFIX+lineage['normalized_evidence_path']
+            target=recovery.safe_path(stage,relative)
+            target.parent.mkdir(parents=True,exist_ok=True)
+            with target.open('xb') as handle:handle.write(item['price_only_evidence'][1])
+            outputs.add(relative)
         h.store.append_daily_bars(stage / recovery.PREFIX, provider=provider,
             symbol=item['symbol'], asset_class=old['asset_class'], bars=item['new_rows'],
             series_semantics=old['series_semantics'], adjustment_semantics=old['adjustment_semantics'],
             identity_effective_from=item['effective'], shard_record_limit=old['shard_record_limit'],
-            shard_byte_limit=old['shard_byte_limit'], lineage={
-                'ingest_kind': MODE, 'execution_date': execution_date,
-                'historical_cutoff': cutoff, 'history_outputsize': item['outputsize']})
+            shard_byte_limit=old['shard_byte_limit'], lineage=lineage)
     # Validate every target after all writes, so a late writer cannot corrupt an
     # earlier target after its check. No path is published until this completes.
     for item in entries:
         old = item['old_index']
+        if 'price_only_evidence' in item:
+            bound=tail_lineage(item,execution_date,cutoff)
+            evidence_path=recovery.PREFIX+bound['normalized_evidence_path']
+            if recovery.safe_path(stage,evidence_path).read_bytes()!=item['price_only_evidence'][1]:
+                raise RecoveryError('candidate_invalid')
         index = json.loads(recovery.safe_path(stage, item['index_relative']).read_text())
         paths = recovery.series_paths(stage, provider, item['symbol'], index)
         rows = h.store.read_daily_series(stage / recovery.PREFIX, provider=provider, symbol=item['symbol'])
@@ -119,9 +171,8 @@ def stage_tail(h, stage: Path, entries: list[dict], execution_date: str, cutoff:
             raise RecoveryError('candidate_invalid')
         expected_lineage = copy.deepcopy(old.get('lineage_segments', []))
         if item['new_rows']:
-            expected_lineage.append({'ingest_kind': MODE, 'execution_date': execution_date,
-                'historical_cutoff': cutoff, 'history_outputsize': item['outputsize'],
-                'start': len(item['existing']), 'end': len(rows)-1})
+            expected_lineage.append(dict(tail_lineage(item,execution_date,cutoff),
+                start=len(item['existing']),end=len(rows)-1))
         if (index['lineage_segments'] != expected_lineage or index['record_count'] != len(rows) or
             index['first_trade_date'] != rows[0]['trade_date'] or index['last_trade_date'] != rows[-1]['trade_date']):
             raise RecoveryError('candidate_invalid')
@@ -213,8 +264,13 @@ def publish_tail(h, writer, entries, report, *, compute, compute_sha, execution_
 
 
 def backfill(h, *, compute, compute_sha, repo, store_sha, execution_date, historical_cutoff,
-             request_id, config, universe, access, key, fixed_selector, clock=recovery.now_utc):
+             request_id, config, universe, access, key, fixed_selector, clock=recovery.now_utc,
+             symbol_transaction=None, overall_deadline=None):
     a = recovery.admission()
+    policy=config['collector']['twelve_data_daily'].get('bounded_overlap_revision_policy')
+    if policy not in (None,'price_only_volume_blocked_v1'):
+        raise RecoveryError('candidate_invalid')
+    price_only=policy=='price_only_volume_blocked_v1'
     maturity = config['collector']['twelve_data_daily']['settlement_maturity']['minimum_next_day_et']
     data_day = validate_dates(execution_date, historical_cutoff, maturity, clock())
     recovery.source_guard(compute, compute_sha)
@@ -224,7 +280,9 @@ def backfill(h, *, compute, compute_sha, repo, store_sha, execution_date, histor
     if not fixed_selector:
         raise RecoveryError('incomplete_targets')
     selected = resolve_fixed_targets(h, store_repo=repo, store_sha=store_sha, selector=fixed_selector, universe=universe)
-    writer = recovery.make_writer(repo, store_sha, execution_date, request_id, mode=MODE)
+    if symbol_transaction is not None and (len(selected)!=1 or selected[0]['symbol']!=symbol_transaction or not price_only):
+        raise RecoveryError('invalid_target')
+    writer = recovery.make_writer(repo, store_sha, execution_date, request_id, mode=MODE,symbol=symbol_transaction)
     originals = {}
     for item in selected:
         relative = f'{recovery.PREFIX}series/daily/{h.collectors.TWELVE_PROVIDER}/{item["symbol"]}/_index.json'
@@ -248,7 +306,7 @@ def backfill(h, *, compute, compute_sha, repo, store_sha, execution_date, histor
               'fixed_selection': fixed_selector, 'timing_diagnostics': []}
     try:
         writer.report(report)
-        deadline = time.monotonic() + 600
+        deadline = min(time.monotonic() + 600, overall_deadline) if overall_deadline is not None else time.monotonic()+600
         budget = config['collector']['budgets']['twelve_data_basic']
         for offset, item in enumerate(entries):
             recovery.source_guard(compute, compute_sha)
@@ -277,17 +335,24 @@ def backfill(h, *, compute, compute_sha, repo, store_sha, execution_date, histor
                 trade_date=data_day, effective=item['effective'], before_request=before_request)
             if not attempted:
                 raise RecoveryError('candidate_invalid')
+            if price_only:
+                # Durable private metadata commit retains the complete normalized
+                # response even when the subsequent pure qualification rejects it.
+                writer.report(dict(report,status='RESPONSE_RETAINED_UNQUALIFIED',
+                    retained_normalized_response={'symbol':item['symbol'],'records':fetched,
+                                                  'authority':'normalized_not_raw_http'}))
             try:
-                qualify_tail(h, item, fetched, historical_cutoff)
+                qualify_tail(h, item, fetched, historical_cutoff,price_only=price_only)
             except Exception as exc:
                 evidence = getattr(exc, 'rejection_evidence', None)
                 safe = RecoveryError('replacement_rejected')
                 safe.replacement_diagnostic = ReplacementDiagnostic(item['symbol'], tuple(targets), evidence)
+                safe.append_data_rejection = (price_only and isinstance(exc,RecoveryError) and exc.code in ('replacement_rejected','candidate_invalid'))
                 raise safe from None
         recovery.require_complete(targets, entries)
         if not any(x['new_rows'] for x in entries):
             writer.report(dict(report, status='NOOP', results=[x['summary'] for x in entries]))
-            return dict(report, status='NOOP', store_commit_sha=writer.head, verified_required_outputs=[])
+            return dict(report, status='NOOP', store_commit_sha=writer.head, result_state_path=writer.report_relative, verified_required_outputs=[])
         return publish_tail(h, writer, entries, report, compute=compute, compute_sha=compute_sha,
             execution_date=execution_date, historical_cutoff=historical_cutoff, maturity=maturity,
             deadline=deadline, clock=clock)
@@ -301,8 +366,10 @@ def backfill(h, *, compute, compute_sha, repo, store_sha, execution_date, histor
                     'terminal_report_outcome': 'NOT_ATTEMPTED'}
         if not getattr(exc, 'candidate_sha', None) and not getattr(exc, 'publication', None):
             try:
-                writer.report(dict(report, **failure_summary(exc)))
+                terminal_sha=writer.report(dict(report, **failure_summary(exc)))
                 progress['terminal_report_outcome'] = 'CONFIRMED'
+                if getattr(exc,'append_data_rejection',False):
+                    exc.confirmed_terminal=recovery.ConfirmedTerminalReceipt(terminal_sha,writer.report_relative,writer.budget_relative)
             except Exception as diagnostic_exc:
                 progress['terminal_report_outcome'] = 'UNCONFIRMED'
                 exc.terminal_report_failure = failure_summary(diagnostic_exc)
@@ -323,14 +390,22 @@ def main(argv=None):
             raise RecoveryError('wrong_execution_surface')
         root = Path(__file__).resolve().parents[1]
         h = recovery.admission().load_helpers()
-        result = backfill(h, compute=root, compute_sha=args.compute_sha, repo=Path(args.store_repo),
+        config=h.collectors.load_yaml(root/'config/market-data-store.yaml')
+        runner=backfill
+        if config['collector']['twelve_data_daily'].get('bounded_overlap_revision_policy')=='price_only_volume_blocked_v1':
+            if (os.environ.get('GITHUB_RUN_ATTEMPT')!='1' or os.environ.get('GITHUB_ACTOR')!='yuatom' or
+                os.environ.get('GITHUB_TRIGGERING_ACTOR')!='yuatom'):
+                raise RecoveryError('wrong_execution_surface')
+            from maintain_fixed_symbols import maintain_append
+            runner=maintain_append
+        result = runner(h, compute=root, compute_sha=args.compute_sha, repo=Path(args.store_repo),
             store_sha=args.store_sha, execution_date=args.execution_date, historical_cutoff=args.historical_cutoff,
-            request_id=args.request_id, config=h.collectors.load_yaml(root/'config/market-data-store.yaml'),
+            request_id=args.request_id, config=config,
             universe=h.collection.load_collection_universe(root/'config/collection-universe.json'),
             access=h.collectors.load_yaml(root/'config/market-data-collector-access.yaml'),
             key=os.environ.get('TWELVE_DATA_API_KEY', ''), fixed_selector=parse_fixed_selection(args.fixed_selection))
         public = {k: v for k, v in result.items() if k not in ('verified_required_outputs', 'timing_diagnostics', 'fixed_selection')}
-        public['verified_required_output_count'] = len(result['verified_required_outputs'])
+        public['verified_required_output_count'] = len(result.get('verified_required_outputs',[]))
         print(json.dumps(public, sort_keys=True))
         return 0
     except Exception as exc:

@@ -48,6 +48,12 @@ except ImportError:  # pragma: no cover
         write_snapshot,
     )
 
+try:
+    from scripts.eleven_symbol_append import classify_daily_overlap
+except ModuleNotFoundError as exc:
+    if exc.name != 'scripts': raise
+    from eleven_symbol_append import classify_daily_overlap
+
 ET = ZoneInfo("America/New_York")
 TWELVE_PROVIDER = "twelve_data_basic"
 NASDAQ_PROVIDER = "nasdaq_public_intraday"
@@ -467,6 +473,11 @@ def collect_previous_session_eod(
     config: Mapping[str, Any],
     access: Mapping[str, Any],
 ) -> dict[str, Any]:
+    # New behavior requires an explicitly deployed policy; absent preserves legacy.
+    revision_policy=config['collector']['twelve_data_daily'].get('overlap_revision_policy')
+    if revision_policy not in (None,'price_only_volume_blocked_v1'):
+        raise ValueError('unsupported daily revision policy')
+    price_only=revision_policy=='price_only_volume_blocked_v1'
     key = os.environ.get("TWELVE_DATA_API_KEY")
     if not key:
         return {
@@ -486,6 +497,8 @@ def collect_previous_session_eod(
     failures: list[dict[str, Any]] = []
     conflict_diagnostics: list[dict[str, Any]] = []
     conflict_record_count = 0
+    volume_revision_count = 0
+    representation_only_count = 0
     universe = _daily_universe(watchlist, completeness)
     daily_basis_owner = _load_daily_basis_owner(store_root, trade_date)
     delegated_daily_symbols = []
@@ -512,6 +525,19 @@ def collect_previous_session_eod(
             )
             phase = "provider_fetch"
             fetched = fetch_twelve_daily(symbol, key, access, outputsize=outputsize)
+            if price_only:
+                # Retain all normalized response rows BEFORE any comparison rejection.
+                # This is not original HTTP bytes and does not recover past responses.
+                retained=dict(schema_version=1,kind='normalized_daily_price_only_evidence',
+                              symbol=symbol,execution_day=trade_date,records=fetched,
+                              volume_policy='BLOCKED_UNRESOLVED')
+                payload=canonical_bytes(retained)
+                evidence_digest=hashlib.sha256(payload).hexdigest()
+                relative=Path('collector-state')/trade_date[:7]/('price-only-'+evidence_digest+'.json')
+                evidence_path=relative.as_posix()
+                target=store_root/relative
+                target.parent.mkdir(parents=True,exist_ok=True)
+                with target.open('xb') as handle: handle.write(payload)
             effective = _identity_effective_date(watchlist, symbol)
             eligible = [
                 bar
@@ -523,6 +549,11 @@ def collect_previous_session_eod(
                 failures.append({"symbol": symbol, "reason": "no_eligible_previous_session_daily_rows"})
                 continue
 
+            if price_only:
+                phase='price_only_quality_validation'
+                if any(not classify_daily_overlap(dict(row),dict(row))['price_eligible'] for row in eligible):
+                    raise MarketDataConflict('price-only daily response quality invalid')
+            overlap_classifications=[]
             index_path = _series_index_path(store_root, TWELVE_PROVIDER, symbol)
             existing: list[dict[str, Any]] = []
             if index_path.exists():
@@ -533,7 +564,16 @@ def collect_previous_session_eod(
                 has_conflict = False
                 for row in eligible:
                     old = existing_by_date.get(row["trade_date"])
-                    if old is not None and canonical_bytes(old) != canonical_bytes(row):
+                    if old is not None:
+                        classification=classify_daily_overlap(dict(old),dict(row))
+                        overlap_classifications.append(dict(trade_date=row['trade_date'],**classification))
+                        if price_only and classification['classification']=='VOLUME_ONLY':
+                            volume_revision_count += 1
+                        if price_only and classification['classification']=='EQUIVALENT' and canonical_bytes(old)!=canonical_bytes(row):
+                            representation_only_count += 1
+                    rejected=(old is not None and
+                              (not classification['price_eligible'] if price_only else canonical_bytes(old)!=canonical_bytes(row)))
+                    if rejected:
                         has_conflict = True
                         conflict_record_count += 1
                         if len(conflict_diagnostics) < MAX_CONFLICT_DIAGNOSTIC_RECORDS:
@@ -564,6 +604,13 @@ def collect_previous_session_eod(
             if not new_rows:
                 continue
 
+            lineage={"ingest_kind":"collector_previous_session_eod",
+                     "ingest_trade_date":trade_date,"history_outputsize":outputsize}
+            if price_only:
+                lineage.update(ingest_kind='collector_price_only_revision_v1',
+                               volume_policy='BLOCKED_UNRESOLVED',
+                               normalized_evidence_path=evidence_path,
+                               normalized_evidence_sha256=evidence_digest)
             phase = "immutable_append"
             result = append_daily_bars(
                 store_root,
@@ -574,11 +621,7 @@ def collect_previous_session_eod(
                 identity_effective_from=effective,
                 series_semantics="daily_regular_ohlcv",
                 adjustment_semantics="provider_reported",
-                lineage={
-                    "ingest_kind": "collector_previous_session_eod",
-                    "ingest_trade_date": trade_date,
-                    "history_outputsize": outputsize,
-                },
+                lineage=lineage,
             )
             if result.changed:
                 changed_series += 1
@@ -593,6 +636,7 @@ def collect_previous_session_eod(
                 # or a substring of an exception message. Do not relax append-only.
                 failure["reason_code"] = {
                     "stored_series_read": "stored_series_integrity_conflict",
+                    "price_only_quality_validation": "daily_price_quality_invalid",
                     "historical_overlap_comparison": "historical_provider_revision",
                     "immutable_append": "immutable_append_conflict",
                 }.get(phase, "unclassified_market_data_conflict")
@@ -606,6 +650,9 @@ def collect_previous_session_eod(
         "bootstrapped_series": bootstrapped_series,
         "failure_target_count": len(failures),
         "conflict_record_count": conflict_record_count,
+        **({"price_only_volume_revision_count":volume_revision_count,
+            "numeric_representation_only_count":representation_only_count,
+            "volume_policy":"BLOCKED_UNRESOLVED"} if price_only else {}),
         "conflict_diagnostic_record_count": len(conflict_diagnostics),
         "conflict_diagnostics_truncated": conflict_record_count > len(conflict_diagnostics),
         "conflict_diagnostics": conflict_diagnostics,

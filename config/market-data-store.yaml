@@ -218,6 +218,8 @@ collector:
     delayed_execution_may_fetch_exact_historical_target_window: true
     exact_trade_date_and_window_must_still_match: true
   twelve_data_daily:
+    # Bounded explicit fixed-selection only; ordinary scheduled policy stays absent.
+    bounded_overlap_revision_policy: price_only_volume_blocked_v1
     history_outputsize: 64
     bootstrap_minimum_records: 20
     provider_affine_history_enabled: true
