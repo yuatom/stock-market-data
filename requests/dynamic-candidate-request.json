@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
-  "request_id": "dyn-open30-20261113-100710-et-01",
-  "requested_at": "2026-11-13T10:07:10-05:00",
+  "request_id": "dyn-close-20261113-170926-et-01",
+  "requested_at": "2026-11-13T17:09:26-05:00",
   "trade_date": "2026-11-13",
-  "stage": "open_30m",
+  "stage": "close",
   "request_purpose": "opportunity_discovery",
   "research_repository": "yuatom/stock-dairy",
   "research_repository_commit_sha": "386a4f3dd7338532ee58d454e8f88e479a7f583a",
@@ -11,12 +11,13 @@
   "candidate_symbols": [
     "MOD",
     "CBRS",
-    "CADL",
-    "CSCO"
+    "NBIS",
+    "CSCO",
+    "ASTS"
   ],
-  "transaction_id": "open30-20261113-100222-et-01",
+  "transaction_id": "close-20261113-170623-et-01",
   "personal_state_proof": {
-    "dynamic_state_read_sha": "5c0e4d5b29d48db7a99b654607a16fda4937f93d",
+    "dynamic_state_read_sha": "b7d0734663f34c977f6548a10219c0bb76145f33",
     "blob_sha": "0392a34c368b90447732aa690ca807321adfcddb",
     "state_version": 5,
     "authority_state": "canonical",
