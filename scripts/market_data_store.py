@@ -315,6 +315,40 @@ def append_daily_bars(
     return WriteResult(True, tuple(changed_paths), len(all_records))
 
 
+def quarantine_daily_volume(root: str | Path, *, provider: str, symbol: str,
+                            evidence_path: str, evidence_sha256: str,
+                            observed_trade_date: str) -> bool:
+    """Append only a volume-policy annotation; never alter a market row/shard."""
+    root = Path(root)
+    sdir = _series_dir(root, provider, symbol)
+    index_path = sdir / "_index.json"
+    index = _load_json(index_path)
+    records = _read_all_records(sdir, index)
+    segments = index.get("lineage_segments", [])
+    if not records or not isinstance(segments, list) or any(not isinstance(s, dict) for s in segments):
+        raise MarketDataConflict("stored lineage schema invalid")
+    if any(s.get("volume_policy") == "BLOCKED_UNRESOLVED" or
+           s.get("ingest_kind") == "collector_price_only_revision_v1" for s in segments):
+        return False
+    evidence = root / evidence_path
+    if (not evidence.resolve().is_relative_to((root / "collector-state").resolve())
+            or evidence.is_symlink()):
+        raise MarketDataConflict("volume quarantine evidence invalid")
+    raw = evidence.read_bytes()
+    proof = json.loads(raw)
+    if (hashlib.sha256(raw).hexdigest() != evidence_sha256 or proof.get("symbol") != symbol
+            or proof.get("kind") != "normalized_daily_price_only_evidence"
+            or proof.get("volume_policy") != "BLOCKED_UNRESOLVED"):
+        raise MarketDataConflict("volume quarantine evidence invalid")
+    segments.append(dict(ingest_kind="volume_conflict_quarantine_v1",
+        start=0, end=len(records)-1, volume_policy="BLOCKED_UNRESOLVED",
+        policy_scope="entire_series", observed_trade_date=_date(observed_trade_date),
+        normalized_evidence_path=evidence_path, normalized_evidence_sha256=evidence_sha256))
+    index["lineage_segments"] = segments
+    _write_json(index_path, index)
+    return True
+
+
 def read_daily_series(root: str | Path, *, provider: str, symbol: str, last_sessions: int | None = None) -> list[dict[str, Any]]:
     sdir = _series_dir(Path(root), provider, symbol)
     index = _load_json(sdir / "_index.json")
