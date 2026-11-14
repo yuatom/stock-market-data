@@ -28,6 +28,7 @@ try:
         MarketDataConflict,
         canonical_bytes,
         append_daily_bars,
+        quarantine_daily_volume,
         assert_legacy_basis,
         git_blob_sha_bytes,
         json_sha256,
@@ -40,6 +41,7 @@ except ImportError:  # pragma: no cover
         MarketDataConflict,
         canonical_bytes,
         append_daily_bars,
+        quarantine_daily_volume,
         assert_legacy_basis,
         git_blob_sha_bytes,
         json_sha256,
@@ -498,6 +500,8 @@ def collect_previous_session_eod(
     conflict_diagnostics: list[dict[str, Any]] = []
     conflict_record_count = 0
     volume_revision_count = 0
+    volume_blocked_symbols: list[str] = []
+    volume_quarantined_series = 0
     representation_only_count = 0
     universe = _daily_universe(watchlist, completeness)
     daily_basis_owner = _load_daily_basis_owner(store_root, trade_date)
@@ -507,6 +511,7 @@ def collect_previous_session_eod(
         if symbol in daily_basis_owner:
             delegated_daily_symbols.append({"symbol": symbol, "status": daily_basis_owner[symbol]})
             continue
+        symbol_volume_blocked = False
         phase = "budget_check"
         try:
             assert_legacy_basis(store_root, provider=TWELVE_PROVIDER, symbol=symbol)
@@ -559,6 +564,15 @@ def collect_previous_session_eod(
             if index_path.exists():
                 phase = "stored_series_read"
                 existing = read_daily_series(store_root, provider=TWELVE_PROVIDER, symbol=symbol)
+                if price_only:
+                    segments = json.loads(index_path.read_text(encoding="utf-8")).get("lineage_segments", [])
+                    if not isinstance(segments, list) or any(not isinstance(segment, dict) for segment in segments):
+                        raise MarketDataConflict("stored lineage schema invalid")
+                    symbol_volume_blocked = any(
+                        segment.get("ingest_kind") == "collector_price_only_revision_v1"
+                        or segment.get("volume_policy") == "BLOCKED_UNRESOLVED"
+                        for segment in segments
+                    )
                 existing_by_date = {row["trade_date"]: row for row in existing}
                 phase = "historical_overlap_comparison"
                 has_conflict = False
@@ -567,7 +581,8 @@ def collect_previous_session_eod(
                     if old is not None:
                         classification=classify_daily_overlap(dict(old),dict(row))
                         overlap_classifications.append(dict(trade_date=row['trade_date'],**classification))
-                        if price_only and classification['classification']=='VOLUME_ONLY':
+                        if price_only and 'volume' in classification['changed_fields']:
+                            symbol_volume_blocked = True
                             volume_revision_count += 1
                         if price_only and classification['classification']=='EQUIVALENT' and canonical_bytes(old)!=canonical_bytes(row):
                             representation_only_count += 1
@@ -587,6 +602,12 @@ def collect_previous_session_eod(
                                 trade_date=trade_date,
                                 access=access,
                             ))
+                if symbol_volume_blocked:
+                    volume_blocked_symbols.append(symbol)
+                    if quarantine_daily_volume(store_root, provider=TWELVE_PROVIDER, symbol=symbol,
+                            evidence_path=evidence_path, evidence_sha256=evidence_digest,
+                            observed_trade_date=trade_date):
+                        volume_quarantined_series += 1
                 if has_conflict:
                     raise MarketDataConflict("provider historical revision detected")
             elif len(eligible) < bootstrap_minimum:
@@ -606,7 +627,7 @@ def collect_previous_session_eod(
 
             lineage={"ingest_kind":"collector_previous_session_eod",
                      "ingest_trade_date":trade_date,"history_outputsize":outputsize}
-            if price_only:
+            if price_only and symbol_volume_blocked:
                 lineage.update(ingest_kind='collector_price_only_revision_v1',
                                volume_policy='BLOCKED_UNRESOLVED',
                                normalized_evidence_path=evidence_path,
@@ -652,7 +673,9 @@ def collect_previous_session_eod(
         "conflict_record_count": conflict_record_count,
         **({"price_only_volume_revision_count":volume_revision_count,
             "numeric_representation_only_count":representation_only_count,
-            "volume_policy":"BLOCKED_UNRESOLVED"} if price_only else {}),
+            "volume_policy_scope":"per_symbol",
+            "volume_blocked_symbols":volume_blocked_symbols,
+            "volume_quarantined_series":volume_quarantined_series} if price_only else {}),
         "conflict_diagnostic_record_count": len(conflict_diagnostics),
         "conflict_diagnostics_truncated": conflict_record_count > len(conflict_diagnostics),
         "conflict_diagnostics": conflict_diagnostics,

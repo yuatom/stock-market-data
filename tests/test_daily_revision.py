@@ -47,6 +47,7 @@ class CollectorIntegrationTests(unittest.TestCase):
                     '_identity_effective_date':None, '_series_index_path':index,
                     'read_daily_series':[old], '_conflict_record':{},
                     '_write_private_eod_diagnostic':None,
+                    'quarantine_daily_volume':True,
                     'append_daily_bars':SimpleNamespace(changed=True)}
                 active={k:stack.enter_context(patch.object(c,k,return_value=v)) for k,v in mocks.items()}
                 result=c.collect_previous_session_eod(trade_date='2026-11-06',store_root=root,watchlist={},completeness={},config=config,access={})
