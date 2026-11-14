@@ -21,6 +21,7 @@ import yaml
 
 import market_data_collectors as collectors
 import market_data_store as store
+import dynamic_daily_response as daily_response
 from market_data_collection import collect_regular_window
 
 
@@ -169,7 +170,7 @@ def _append_price_only_history(*, symbol, eligible, store_root, trade_date, targ
 def _ensure_daily_history(*, symbols: Sequence[str], trade_date: str, store_root: Path, config: dict[str, Any], access: dict[str, Any], target_records: int, diagnostics=None) -> tuple[list[str], list[dict[str, str]]]:
     diagnostics=diagnostics if diagnostics is not None else {}
     diagnostics.update(requests_attempted=0,local_budget_debits=0,provider_charge_status='NOT_ESTABLISHED',
-        remote_predebit_established=False,response_retention='normalized_parser_output_not_raw_http',stopped=False,required_paths=[])
+        remote_predebit_established=False,response_retention='raw_bytes_before_strict_parse_and_normalized_evidence',stopped=False,required_paths=[])
     key = os.environ.get(str((access.get("twelve_data_basic") or {}).get("api_key_env") or "TWELVE_DATA_API_KEY"))
     policy=config['collector']['twelve_data_daily'].get('overlap_revision_policy')
     if policy not in (None,'price_only_volume_blocked_v1'):
@@ -187,7 +188,19 @@ def _ensure_daily_history(*, symbols: Sequence[str], trade_date: str, store_root
             store.assert_legacy_basis(store_root, provider=collectors.TWELVE_PROVIDER, symbol=symbol)
             collectors.wait_for_twelve_budget(store_root,trade_date,per_day=int(budget['hard_credits_per_day']),per_minute=int(budget['hard_credits_per_minute']))
             phase='provider_fetch';diagnostics['requests_attempted']+=1;diagnostics['provider_charge_status']='UNKNOWN'
-            fetched=collectors.fetch_twelve_daily(symbol,key,access,outputsize=target_records)
+            raw=daily_response.fetch_raw(symbol,key,access,outputsize=target_records)
+            phase='raw_response_retention'
+            raw_digest=hashlib.sha256(raw).hexdigest()
+            raw_path=f'collector-state/{trade_date[:7]}/dynamic-daily-{symbol}-{raw_digest}.raw'
+            destination=store_root/raw_path;destination.parent.mkdir(parents=True,exist_ok=True)
+            if destination.exists():
+                if destination.is_symlink() or destination.read_bytes()!=raw:raise store.MarketDataConflict('raw evidence identity mismatch')
+            else:
+                with destination.open('xb') as handle:handle.write(raw)
+            required.add(raw_path)
+            diagnostics.setdefault('raw_responses',[]).append(dict(symbol=symbol,path=raw_path,sha256=raw_digest,bytes=len(raw)))
+            phase='strict_daily_parse'
+            fetched=daily_response.parse(raw,symbol=symbol,outputsize=target_records)
             # Retention is normalized parser output, not original HTTP/metadata.
             if price_only:
                 phase='normalized_response_retention'
