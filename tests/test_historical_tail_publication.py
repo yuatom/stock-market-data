@@ -19,6 +19,8 @@ class HistoricalWorkflowTests(unittest.TestCase):
         self.assertIn('daily_history_tail_backfill', w[True]['workflow_dispatch']['inputs']['mode']['options'])
         self.assertIn('daily_history_tail_backfill', w['jobs']['run']['if'])
         job = w['jobs']['historical_tail']
+        self.assertEqual(job['timeout-minutes'], 35)
+        self.assertEqual(w['jobs']['recovery']['timeout-minutes'], 12)
         self.assertEqual(job['needs'], 'selector_guard')
         self.assertIn('workflow_dispatch', job['if'])
         self.assertEqual(job['concurrency'], w['jobs']['recovery']['concurrency'])

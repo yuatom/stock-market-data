@@ -653,7 +653,7 @@ def maintain_append(h,*,compute,compute_sha,repo,store_sha,execution_date,histor
     No replay, automatic resume, renewed deadline or selector refresh.
     """
     import backfill_market_data_tail as tail
-    deadline=time.monotonic()+600; head=store_sha; targets=[];touched=set();passed=set()
+    deadline=time.monotonic()+1800; head=store_sha; targets=[];touched=set();passed=set()
     out=dict(mode=tail.MODE,status='BLOCKED',compute_sha=compute_sha,store_start_sha=store_sha,
              execution_date=execution_date,historical_cutoff=historical_cutoff,request_id=request_id,
              transactions=[],requests_attempted=0,budget_debits_confirmed=0,budget_debits_unconfirmed=0,
@@ -672,7 +672,7 @@ def maintain_append(h,*,compute,compute_sha,repo,store_sha,execution_date,histor
         if len(targets)>200-budget['credits']:_fail('budget_exhausted')
         plan=dict(out,mode=MODE,trade_date=execution_date,kind='append_only_batch_plan',status='PLANNED',
                   fixed_selection={'schema_version':1,'targets':targets},maximum_provider_requests=len(targets),
-                  overall_timeout_seconds=600,volume_policy='BLOCKED_UNRESOLVED')
+                  overall_timeout_seconds=1800,volume_policy='BLOCKED_UNRESOLVED')
         head,plan_path=_publish_metadata(repo,head,execution_date,request_id,config,plan,deadline=deadline)
         out.update(batch_manifest_commit_sha=head,batch_manifest_path=plan_path,last_verified_commit_sha=head)
         for target in targets:
