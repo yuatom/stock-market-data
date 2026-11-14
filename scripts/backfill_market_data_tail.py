@@ -407,7 +407,7 @@ def main(argv=None):
         public = {k: v for k, v in result.items() if k not in ('verified_required_outputs', 'timing_diagnostics', 'fixed_selection')}
         public['verified_required_output_count'] = len(result.get('verified_required_outputs',[]))
         print(json.dumps(public, sort_keys=True))
-        return 0
+        return 0 if result.get('status') in ('PASS', 'NOOP') else 2
     except Exception as exc:
         print(json.dumps(failure_summary(exc), sort_keys=True))
         return 2

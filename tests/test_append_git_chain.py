@@ -68,3 +68,14 @@ class AppendGitChainTests(fixture.RecoveryIntegrationFixture,unittest.TestCase):
         self.assertEqual(self.http_count,2,result)
         self.assertEqual(result['not_attempted_symbols'],['CCC'])
         self.assertFalse(result['automatic_retry_allowed'])
+
+    def test_real_append_continues_after_minute_bucket_rolloff(self):
+        self.seed_budget(158, {f'{fixture.DAY}T10:{minute:02d}Z': 8 for minute in range(16)})
+        result=self.run_append()
+        self.assertEqual(result['status'],'PASS',result)
+        self.assertIsNone(result['stop'],result)
+        self.assertEqual(self.http_count,3)
+        self.assertEqual(self.current_budget()['credits'],161)
+        self.assertEqual(len(self.current_budget()['minutes']),16)
+        self.assertNotIn(f'{fixture.DAY}T10:00Z',self.current_budget()['minutes'])
+        self.assertEqual([row['status'] for row in result['transactions']],['PASS']*3)
