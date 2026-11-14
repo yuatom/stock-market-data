@@ -60,6 +60,47 @@ def validate_dates(execution_date: str, historical_cutoff: str, maturity: str,
     return next_day.isoformat()
 
 
+def volume_conflict_evidence(h, item, fetched, cutoff):
+    """Retained normalized evidence, only for a validated actual volume change."""
+    import hashlib
+    try:
+        rows = [h.rebaser._validated_replacement_bar(x) for x in fetched]
+        rows = sorted((x for x in rows if x['trade_date'] <= cutoff), key=lambda x:x['trade_date'])
+        if len({x['trade_date'] for x in rows}) != len(rows):
+            return None
+        by_date = {x['trade_date']:x for x in rows}
+        changes = [dict(trade_date=x['trade_date'], **classify_daily_overlap(x, by_date[x['trade_date']]))
+                   for x in item['existing'] if x['trade_date'] in by_date]
+        if not any('volume' in x['changed_fields'] for x in changes):
+            return None
+        value = dict(schema_version=1, kind='normalized_daily_price_only_evidence',
+                     symbol=item['symbol'], historical_cutoff=cutoff, records=rows,
+                     overlap=changes, volume_policy='BLOCKED_UNRESOLVED')
+        raw = h.store.canonical_bytes(value)
+        return (hashlib.sha256(raw).hexdigest(), raw)
+    except (KeyError, TypeError, ValueError, h.rebaser.ReplacementValidationError):
+        return None
+
+
+def stage_volume_quarantine(h, stage, item, evidence, day):
+    """Metadata-only annotation; its evidence never authorizes price replacement."""
+    digest, raw = evidence
+    relative = f'collector-state/{day[:7]}/price-only-{digest}.json'
+    root = stage / recovery.PREFIX
+    path = recovery.safe_path(stage, recovery.PREFIX+relative)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() and path.read_bytes() != raw:
+        raise RecoveryError('object_drift')
+    path.write_bytes(raw)
+    changed = h.store.quarantine_daily_volume(root, provider=h.collectors.TWELVE_PROVIDER,
+        symbol=item['symbol'], evidence_path=relative, evidence_sha256=digest, observed_trade_date=day)
+    marker = dict(evidence_path=relative, evidence_sha256=digest, symbol=item['symbol'], annotation_added=changed)
+    outputs = {recovery.PREFIX+relative, item['index_relative']}
+    if h.store.read_daily_series(root, provider=h.collectors.TWELVE_PROVIDER, symbol=item['symbol']) != item['existing']:
+        raise RecoveryError('candidate_invalid')
+    return outputs, marker
+
+
 def qualify_tail(h, item: dict, fetched: list[dict], cutoff: str, *, price_only=False) -> None:
     """Zero-revision full retained overlap; no prefix growth or internal inserts."""
     existing = item['existing']
@@ -200,7 +241,7 @@ def failure_summary(exc: Exception) -> dict:
 
 
 def publish_tail(h, writer, entries, report, *, compute, compute_sha, execution_date,
-                 historical_cutoff, maturity, deadline, clock):
+                 historical_cutoff, maturity, deadline, clock, quarantine=None):
     a = recovery.admission()
     writer.assert_current()
     parent = writer.head
@@ -208,12 +249,19 @@ def publish_tail(h, writer, entries, report, *, compute, compute_sha, execution_
         stage = Path(temp) / 'candidate'
         a.git(writer.repo, 'worktree', 'add', '--detach', str(stage), parent)
         try:
-            outputs = stage_tail(h, stage, entries, execution_date, historical_cutoff)
+            marker = None
+            if quarantine is None:
+                outputs = stage_tail(h, stage, entries, execution_date, historical_cutoff)
+            else:
+                outputs, marker = stage_volume_quarantine(h, stage, quarantine[0], quarantine[1], execution_date)
             inventory = importlib.import_module('build_market_data_inventory').build_inventory(stage / recovery.PREFIX)
             recovery.write_json(recovery.safe_path(stage, recovery.INVENTORY), inventory)
-            final = dict(report, status='CANDIDATE_VALIDATED', results=[x['summary'] for x in entries],
+            final = dict(report, status='CANDIDATE_VALIDATED' if marker is None else 'BLOCKED',
+                         results=[x['summary'] for x in entries] if marker is None else [],
                          finished_at=clock().isoformat(), budget_parent=parent,
                          publication_requires_terminal_receipt=True)
+            if marker is not None:
+                final.update(failure_code='replacement_rejected', failed_symbol=quarantine[0]['symbol'], volume_quarantine=marker)
             recovery.write_json(recovery.safe_path(stage, writer.report_relative), final)
             outputs.update((recovery.INVENTORY, writer.report_relative))
             required = [{'path': path, 'blob_sha': a.git(stage, 'hash-object', '--', str(recovery.safe_path(stage, path)))}
@@ -239,7 +287,7 @@ def publish_tail(h, writer, entries, report, *, compute, compute_sha, execution_
             if time.monotonic() > deadline:
                 raise RecoveryError('deadline_exceeded')
             publication = {'candidate_commit_sha': candidate, 'last_verified_commit_sha': writer.head,
-                           'publication_kind': 'market_facts', 'publication_phase': 'main_push',
+                           'publication_kind': 'market_facts' if marker is None else 'volume_policy_annotation', 'publication_phase': 'main_push',
                            'main_publication_outcome': 'UNCONFIRMED', 'durability_outcome': 'UNCONFIRMED'}
             try:
                 a.git(stage, 'push', 'origin', f'{candidate}:refs/heads/main')
@@ -250,9 +298,9 @@ def publish_tail(h, writer, entries, report, *, compute, compute_sha, execution_
                 raise RecoveryError('publication_unconfirmed', candidate_sha=candidate, publication=publication,
                     verifier_reason=getattr(exc, 'verifier_reason', None),
                     publication_failure_code=getattr(exc, 'code', 'internal_error')) from None
-            return {'mode': MODE, 'status': 'PASS', 'compute_sha': compute_sha, 'store_start_sha': writer.base,
+            return {'mode': MODE, 'status': 'PASS' if marker is None else 'BLOCKED', 'compute_sha': compute_sha, 'store_start_sha': writer.base,
                     'store_commit_sha': candidate, 'request_id': writer.request_id, 'execution_date': execution_date,
-                    'historical_cutoff': historical_cutoff, 'appended_count': sum(bool(x['new_rows']) for x in entries),
+                    'historical_cutoff': historical_cutoff, 'appended_count': sum(bool(x['new_rows']) for x in entries) if marker is None else 0,
                     'requests_attempted': report['requests_attempted'], 'budget_debits': report['budget_debits'],
                     'result_state_path': writer.report_relative, 'verified_required_outputs': receipt['verified_required_outputs'],
                     'exchange_calendar_completeness_established': False, 'production_recovery_accepted': False}
@@ -341,6 +389,7 @@ def backfill(h, *, compute, compute_sha, repo, store_sha, execution_date, histor
                 writer.report(dict(report,status='RESPONSE_RETAINED_UNQUALIFIED',
                     retained_normalized_response={'symbol':item['symbol'],'records':fetched,
                                                   'authority':'normalized_not_raw_http'}))
+            volume_evidence = volume_conflict_evidence(h, item, fetched, historical_cutoff) if price_only else None
             try:
                 qualify_tail(h, item, fetched, historical_cutoff,price_only=price_only)
             except Exception as exc:
@@ -348,6 +397,11 @@ def backfill(h, *, compute, compute_sha, repo, store_sha, execution_date, histor
                 safe = RecoveryError('replacement_rejected')
                 safe.replacement_diagnostic = ReplacementDiagnostic(item['symbol'], tuple(targets), evidence)
                 safe.append_data_rejection = (price_only and isinstance(exc,RecoveryError) and exc.code in ('replacement_rejected','candidate_invalid'))
+                if safe.append_data_rejection and volume_evidence is not None:
+                    terminal = publish_tail(h, writer, [], report, compute=compute, compute_sha=compute_sha,
+                        execution_date=execution_date, historical_cutoff=historical_cutoff, maturity=maturity,
+                        deadline=deadline, clock=clock, quarantine=(item, volume_evidence))
+                    safe.confirmed_terminal = recovery.ConfirmedTerminalReceipt(terminal['store_commit_sha'], writer.report_relative, writer.budget_relative)
                 raise safe from None
         recovery.require_complete(targets, entries)
         if not any(x['new_rows'] for x in entries):
@@ -364,7 +418,9 @@ def backfill(h, *, compute, compute_sha, repo, store_sha, execution_date, histor
                     'budget_debits_confirmed': report['budget_debits'], 'budget_debits_unconfirmed': unconfirmed,
                     'budget_debits_attempted': report['budget_debits'] + unconfirmed,
                     'terminal_report_outcome': 'NOT_ATTEMPTED'}
-        if not getattr(exc, 'candidate_sha', None) and not getattr(exc, 'publication', None):
+        if getattr(exc, 'confirmed_terminal', None):
+            progress['terminal_report_outcome'] = 'CONFIRMED'
+        elif not getattr(exc, 'candidate_sha', None) and not getattr(exc, 'publication', None):
             try:
                 terminal_sha=writer.report(dict(report, **failure_summary(exc)))
                 progress['terminal_report_outcome'] = 'CONFIRMED'
