@@ -160,6 +160,8 @@ jobs:
             --expected-contract-sha '${{ steps.request.outputs.contract_sha }}' | tee "$result_file"
           manifest_path="$(python -c 'import json,sys; from pathlib import Path; lines=[line for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines() if line.strip()]; value=json.loads(lines[-1]); manifest=value.get("publication_manifest_path"); isinstance(manifest,str) and manifest or (_ for _ in ()).throw(SystemExit("dynamic collector did not emit publication_manifest_path")); print(manifest)' "$result_file")"
           echo "publication_manifest_path=$manifest_path" >> "$GITHUB_OUTPUT"
+          stopped="$(python -c 'import json,sys; from pathlib import Path; value=json.loads([x for x in Path(sys.argv[1]).read_text().splitlines() if x.strip()][-1]); print("true" if value.get("status")=="STOPPED" else "false")' "$result_file")"
+          echo "business_stopped=$stopped" >> "$GITHUB_OUTPUT"
 
       - name: Rebuild private Store inventory
         working-directory: compute
@@ -183,15 +185,11 @@ jobs:
           git config user.name 'stock-market-data-bot'
           git config user.email 'stock-market-data-bot@users.noreply.github.com'
           git commit -m 'data: collect dynamic research objects'
-          for attempt in 1 2 3; do
-            git pull --rebase origin main
-            if git push origin HEAD:main; then
-              echo "{\"status\":\"store_persisted\",\"changed_paths\":$changed_count,\"store_commit_sha\":\"$(git rev-parse HEAD)\"}"
-              exit 0
-            fi
-            sleep $((attempt * 2))
-          done
-          exit 1
+          # A failed/unknown push is not permission to send another write.
+          git pull --rebase origin main
+          git push origin HEAD:main
+          echo "{\"status\":\"store_persisted\",\"changed_paths\":$changed_count,\"store_commit_sha\":\"$(git rev-parse HEAD)\"}"
+
 
       - name: Verify durable Store publication
         working-directory: store
@@ -203,3 +201,10 @@ jobs:
             --expected-commit "$(git rev-parse HEAD)" \
             --writer-status dynamic_candidate_persisted \
             --required-manifest "data/market-data/${{ steps.collect.outputs.publication_manifest_path }}"
+
+      - name: Report stopped business outcome only after durable retention
+        if: steps.collect.outputs.business_stopped == 'true'
+        shell: bash
+        run: |
+          echo '{"status":"STOPPED","retention":"durability_verified","automatic_retry_allowed":false}'
+          exit 2
