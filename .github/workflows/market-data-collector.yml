@@ -94,8 +94,8 @@ jobs:
               if dynamic or not fixed or os.environ.get('EXECUTION_DATE') or os.environ.get('HISTORICAL_CUTOFF'):
                   raise SystemExit('fixed symbol maintenance requires explicit fixed targets')
           elif mode == 'daily_history_tail_backfill':
-              if dynamic or not fixed or os.environ.get('TRADE_DATE') or not os.environ.get('EXECUTION_DATE') or not os.environ.get('HISTORICAL_CUTOFF'):
-                  raise SystemExit('historical tail requires explicit fixed targets and separate dates only')
+              if not (dynamic or fixed) or os.environ.get('TRADE_DATE') or not os.environ.get('EXECUTION_DATE') or not os.environ.get('HISTORICAL_CUTOFF'):
+                  raise SystemExit('historical tail requires one explicit target selector and separate dates only')
           elif os.environ.get('EXECUTION_DATE') or os.environ.get('HISTORICAL_CUTOFF'):
               raise SystemExit('historical dates cannot be ignored by another mode')
           if (dynamic or fixed) and mode not in ('daily_baseline_admission', 'daily_baseline_rebase', 'daily_history_tail_backfill', 'daily_symbol_maintenance'):
@@ -404,6 +404,14 @@ jobs:
           fetch-depth: 0
           path: store
 
+      - name: Checkout dynamic request authority for explicit target proof
+        if: inputs.dynamic_selection != ''
+        uses: actions/checkout@v4
+        with:
+          ref: discovery-requests
+          fetch-depth: 0
+          path: discovery
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -421,9 +429,14 @@ jobs:
           EXECUTION_DATE: ${{ inputs.execution_date }}
           HISTORICAL_CUTOFF: ${{ inputs.historical_cutoff }}
           FIXED_SELECTION: ${{ inputs.fixed_selection }}
+          DYNAMIC_SELECTION: ${{ inputs.dynamic_selection }}
         shell: bash
         run: |
           set -euo pipefail
+          selection=(--fixed-selection "$FIXED_SELECTION")
+          if [[ -n "$DYNAMIC_SELECTION" ]]; then
+            selection=(--dynamic-selection "$DYNAMIC_SELECTION" --discovery-repo ../discovery)
+          fi
           python scripts/backfill_market_data_tail.py \
             --execution-date "$EXECUTION_DATE" \
             --historical-cutoff "$HISTORICAL_CUTOFF" \
@@ -431,4 +444,4 @@ jobs:
             --store-sha "$EXPECTED_STORE_SHA" \
             --store-repo ../store \
             --request-id "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
-            --fixed-selection "$FIXED_SELECTION"
+            "${selection[@]}"

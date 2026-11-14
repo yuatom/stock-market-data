@@ -86,7 +86,7 @@ result:
 # History repair is a separately authorized maintenance operation, never membership.
 bounded_existing_history_recovery:
   entrypoint: .github/workflows/market-data-collector.yml
-  modes: [daily_baseline_admission, daily_baseline_rebase]
+  modes: [daily_baseline_admission, daily_baseline_rebase, daily_history_tail_backfill]
   selector_fields: [request_commit_sha, request_blob_sha, result_blob_sha, targets]
   target_fields: [symbol, index_blob_sha]
   request_authority_ref: refs/remotes/origin/discovery-requests
@@ -97,3 +97,10 @@ bounded_existing_history_recovery:
   require_provider_symbol_asset_class_session_interval_adjustment_and_identity: true
   explicit_invalid_or_empty_selection_never_falls_back_to_fixed_universe: true
   permanent_collection_or_personal_membership_write_forbidden: true
+
+  historical_tail_append:
+    maximum_targets: 1
+    maximum_requests_per_target: 1
+    existing_price_and_metadata_conflict: reject_without_overwrite
+    failure_or_unknown: stop_without_retry
+    changes_fixed_or_persistent_membership: false
