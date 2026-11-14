@@ -125,9 +125,19 @@ def qualify_tail(h, item: dict, fetched: list[dict], cutoff: str, *, price_only=
             if not result['price_eligible']:
                 raise RecoveryError('replacement_rejected')
             comparisons.append(dict(trade_date=prior['trade_date'],**result))
+        old_index=item.get('old_index')
+        if not isinstance(old_index,dict):
+            raise RecoveryError('invalid_target')
+        segments=old_index.get('lineage_segments',[])
+        if not isinstance(segments,list) or any(not isinstance(x,dict) for x in segments):
+            raise RecoveryError('invalid_target')
+        blocked=any(x.get('volume_policy')=='BLOCKED_UNRESOLVED' or
+                    x.get('ingest_kind')=='collector_price_only_revision_v1' for x in segments)
+        blocked=blocked or any('volume' in x['changed_fields'] for x in comparisons)
+        item['volume_policy']='BLOCKED_UNRESOLVED' if blocked else 'PRESERVED_PROVIDER_VOLUME'
         evidence=dict(schema_version=1,kind='normalized_daily_price_only_evidence',
                       symbol=item['symbol'],historical_cutoff=cutoff,records=rows,
-                      overlap=comparisons,volume_policy='BLOCKED_UNRESOLVED')
+                      overlap=comparisons,volume_policy=item['volume_policy'])
         raw=h.store.canonical_bytes(evidence)
         import hashlib
         digest=hashlib.sha256(raw).hexdigest()
@@ -153,6 +163,8 @@ def qualify_tail(h, item: dict, fetched: list[dict], cutoff: str, *, price_only=
         'exchange_calendar_completeness_established': False,
         'coverage_scope': 'provider_returned_tail_with_full_retained_overlap',
         'replacement_sha256': h.store.json_sha256(combined)})
+    if price_only:
+        item['summary']['volume_policy']=item['volume_policy']
 
 
 def tail_lineage(item,execution_date,cutoff):
@@ -163,8 +175,11 @@ def tail_lineage(item,execution_date,cutoff):
         import hashlib
         if hashlib.sha256(raw).hexdigest()!=digest:
             raise RecoveryError('candidate_invalid')
-        value.update(ingest_kind='collector_price_only_revision_v1',
-                     volume_policy='BLOCKED_UNRESOLVED',
+        policy=item['volume_policy']
+        if policy not in ('BLOCKED_UNRESOLVED','PRESERVED_PROVIDER_VOLUME') or json.loads(raw)['volume_policy']!=policy:
+            raise RecoveryError('candidate_invalid')
+        value.update(ingest_kind='collector_price_only_revision_v1' if policy=='BLOCKED_UNRESOLVED' else MODE,
+                     volume_policy=policy,
                      normalized_evidence_path=f'collector-state/{execution_date[:7]}/price-only-{digest}.json',
                      normalized_evidence_sha256=digest)
     return value
@@ -392,6 +407,8 @@ def backfill(h, *, compute, compute_sha, repo, store_sha, execution_date, histor
             volume_evidence = volume_conflict_evidence(h, item, fetched, historical_cutoff) if price_only else None
             try:
                 qualify_tail(h, item, fetched, historical_cutoff,price_only=price_only)
+                if not item['new_rows'] and volume_evidence is not None:
+                    raise RecoveryError('replacement_rejected')
             except Exception as exc:
                 evidence = getattr(exc, 'rejection_evidence', None)
                 safe = RecoveryError('replacement_rejected')

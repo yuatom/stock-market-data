@@ -611,8 +611,7 @@ def _verify_append_terminal(h,repo,*,start,sha,path,day,cutoff,request_id,symbol
         lineage=index.get('lineage_segments',[])
         if lineage[:-1]!=old_index.get('lineage_segments',[]) or len(lineage)!=len(old_index.get('lineage_segments',[]))+1:_fail()
         segment=lineage[-1]
-        if (segment.get('ingest_kind')!='collector_price_only_revision_v1' or
-            segment.get('volume_policy')!='BLOCKED_UNRESOLVED' or segment.get('start')!=len(old_rows) or segment.get('end')!=len(rows)-1):_fail()
+        if segment.get('start')!=len(old_rows) or segment.get('end')!=len(rows)-1:_fail()
         digest=segment.get('normalized_evidence_sha256')
         if type(digest) is not str or not re.fullmatch('[0-9a-f]{64}',digest):_fail()
         relative=f'collector-state/{day[:7]}/price-only-{digest}.json'
@@ -621,10 +620,10 @@ def _verify_append_terminal(h,repo,*,start,sha,path,day,cutoff,request_id,symbol
         # git show returns text; canonical evidence uses no trailing transformation.
         evidence=json.loads(a.git(repo,'show',f'{sha}:{evidence_path}'))
         if hashlib.sha256(h.store.canonical_bytes(evidence)).hexdigest()!=digest:_fail()
-        item=dict(symbol=symbol,existing=old_rows,effective=old_index.get('identity_effective_from'),
+        item=dict(symbol=symbol,existing=old_rows,old_index=old_index,effective=old_index.get('identity_effective_from'),
                   target_records=len(old_rows),outputsize=segment.get('history_outputsize'))
         tail.qualify_tail(h,item,evidence['records'],cutoff,price_only=True)
-        if (item['rows']!=rows or item['price_only_evidence'][0]!=digest or
+        if (report.get('results')!=[item['summary']] or item['rows']!=rows or item['price_only_evidence'][0]!=digest or
             tail.tail_lineage(item,day,cutoff)!={k:v for k,v in segment.items() if k not in ('start','end')}):_fail()
         required=[dict(path=p,blob_sha=_immutable_blob(repo,sha,p)) for p in sorted(paths|{path,r.INVENTORY,evidence_path})]
         if result.get('verified_required_outputs')!=required:_fail()
@@ -696,7 +695,7 @@ def maintain_append(h,*,compute,compute_sha,repo,store_sha,execution_date,histor
         if len(targets)>200-budget['credits']:_fail('budget_exhausted')
         plan=dict(out,mode=MODE,trade_date=execution_date,kind='append_only_batch_plan',status='PLANNED',
                   fixed_selection={'schema_version':1,'targets':targets},maximum_provider_requests=len(targets),
-                  overall_timeout_seconds=1800,volume_policy='BLOCKED_UNRESOLVED')
+                  overall_timeout_seconds=1800,volume_policy_scope='per_symbol')
         head,plan_path=_publish_metadata(repo,head,execution_date,request_id,config,plan,deadline=deadline)
         out.update(batch_manifest_commit_sha=head,batch_manifest_path=plan_path,last_verified_commit_sha=head)
         for target in targets:
@@ -735,11 +734,13 @@ def maintain_append(h,*,compute,compute_sha,repo,store_sha,execution_date,histor
                     out['published_count']+=1
                     # Preserve a real child publication even if our next verification fails.
                     out['transactions'].append(dict(symbol=symbol,status='PASS_UNRECONCILED',store_commit_sha=sha))
-            _verify_append_terminal(h,repo,start=head,sha=sha,path=path,day=execution_date,cutoff=historical_cutoff,
+            verified_report=_verify_append_terminal(h,repo,start=head,sha=sha,path=path,day=execution_date,cutoff=historical_cutoff,
                 request_id=request_id,symbol=symbol,selector=selector,before=before,remaining=targets,
                 passed=passed|({symbol} if status=='PASS' else set()),compute_sha=compute_sha,result=result)
             row=dict(symbol=symbol,status=status,store_start_sha=head,store_commit_sha=sha,result_state_path=path)
-            if status=='PASS':passed.add(symbol);out['transactions'][-1]=row
+            if status=='PASS':
+                row['volume_policy']=verified_report['results'][0]['volume_policy']
+                passed.add(symbol);out['transactions'][-1]=row
             else:out['transactions'].append(row)
             if status=='QUARANTINED':
                 out['quarantined_symbols'].append(symbol)
