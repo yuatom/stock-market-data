@@ -47,6 +47,20 @@ class AppendGitChainTests(fixture.RecoveryIntegrationFixture,unittest.TestCase):
         with patch.object(self.h.collectors,'datetime',Clock),patch.object(self.h.collectors,'_http_json',side_effect=http),patch.object(maintenance.a,'git',side_effect=git):
             return maintenance.maintain_append(self.h,compute=self.compute,compute_sha=self.compute_sha,repo=self.repo,store_sha=self.base,execution_date=fixture.DAY,historical_cutoff='2026-10-16',request_id='876-1',config=self.config,universe=self.universe,access=self.access,key='SYNTHETIC',fixed_selector=self.selector,clock=lambda:now)
 
+    def test_append_batch_continues_after_old_ten_minute_limit(self):
+        elapsed = [0.0]
+        original = tail.backfill
+        def slow_child(*args, **kwargs):
+            result = original(*args, **kwargs)
+            elapsed[0] += 400
+            return result
+        with patch.object(maintenance.time, 'monotonic', side_effect=lambda: elapsed[0]), patch.object(tail, 'backfill', side_effect=slow_child):
+            result = self.run_append()
+        self.assertEqual(result['status'], 'PASS', result)
+        self.assertEqual(self.http_count, 3)
+        plan = __import__('json').loads(fixture.git(self.repo, 'show', result['batch_manifest_commit_sha'] + ':' + result['batch_manifest_path']))
+        self.assertEqual(plan['overall_timeout_seconds'], 1800)
+
     def test_real_append_rejection_stops_before_next_provider_request(self):
         result=self.run_append(reject_middle=True)
         self.assertEqual(result['status'],'PARTIAL',result)

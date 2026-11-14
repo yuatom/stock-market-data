@@ -366,7 +366,7 @@ jobs:
     needs: selector_guard
     if: github.event_name == 'workflow_dispatch' && inputs.mode == 'daily_history_tail_backfill'
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 35
     concurrency:
       group: market-data-collector
       cancel-in-progress: false
