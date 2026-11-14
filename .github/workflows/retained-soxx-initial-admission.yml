@@ -1,0 +1,54 @@
+name: Retained SOXX Initial Price Admission
+on:
+  workflow_dispatch:
+    inputs:
+      expected_compute_sha:
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: market-data-collector
+  cancel-in-progress: false
+  queue: max
+jobs:
+  admit_retained:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Require exact authorized execution
+        env:
+          EXPECTED_COMPUTE_SHA: ${{ inputs.expected_compute_sha }}
+        shell: python
+        run: |
+          import os,re
+          assert os.environ['GITHUB_EVENT_NAME']=='workflow_dispatch'
+          assert os.environ['GITHUB_REPOSITORY']=='yuatom/stock-market-data'
+          assert os.environ['GITHUB_REF']=='refs/heads/main'
+          assert os.environ['GITHUB_RUN_ATTEMPT']=='1'
+          assert os.environ['GITHUB_ACTOR']==os.environ['GITHUB_TRIGGERING_ACTOR']=='yuatom'
+          assert re.fullmatch('[0-9a-f]{40}',os.environ['EXPECTED_COMPUTE_SHA'])
+          assert os.environ['GITHUB_SHA']==os.environ['EXPECTED_COMPUTE_SHA']
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.expected_compute_sha }}
+          path: compute
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: yuatom/stock-market-data-store
+          token: ${{ secrets.MARKET_DATA_STORE_TOKEN }}
+          ref: main
+          fetch-depth: 0
+          path: store
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check PyYAML==6.0.3
+      - name: Admit retained historical price basis and private receipt
+        working-directory: compute
+        env:
+          EXPECTED_COMPUTE_SHA: ${{ inputs.expected_compute_sha }}
+          MARKET_DATA_STORE_TOKEN: ${{ secrets.MARKET_DATA_STORE_TOKEN }}
+        run: python -B -m scripts.admit_retained_soxx_basis --store-repo ../store --compute-sha "$EXPECTED_COMPUTE_SHA"
