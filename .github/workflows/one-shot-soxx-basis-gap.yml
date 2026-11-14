@@ -1,0 +1,70 @@
+name: One-shot SOXX Basis Gap
+on:
+  workflow_dispatch:
+    inputs:
+      expected_compute_sha:
+        required: true
+        type: string
+      expected_store_sha:
+        required: true
+        type: string
+      scope_commit:
+        required: true
+        type: string
+      scope_sha:
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: market-data-collector
+  cancel-in-progress: false
+  queue: max
+jobs:
+  soxx_gap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Require exact first manual invocation
+        env:
+          COMPUTE: ${{ inputs.expected_compute_sha }}
+          STORE: ${{ inputs.expected_store_sha }}
+          SCOPE: ${{ inputs.scope_commit }}
+          DIGEST: ${{ inputs.scope_sha }}
+        shell: python
+        run: |
+          import os,re
+          assert os.environ['GITHUB_EVENT_NAME']=='workflow_dispatch'
+          assert os.environ['GITHUB_REF']=='refs/heads/main'
+          assert os.environ['GITHUB_RUN_ATTEMPT']=='1'
+          assert os.environ['GITHUB_ACTOR']==os.environ['GITHUB_TRIGGERING_ACTOR']=='yuatom'
+          for key in ('COMPUTE','STORE','SCOPE'):assert re.fullmatch('[0-9a-f]{40}',os.environ[key])
+          assert re.fullmatch('[0-9a-f]{64}',os.environ['DIGEST'])
+          assert os.environ['GITHUB_SHA']==os.environ['COMPUTE']
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.expected_compute_sha }}
+          path: compute
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: yuatom/stock-market-data-store
+          token: ${{ secrets.MARKET_DATA_STORE_TOKEN }}
+          ref: main
+          fetch-depth: 0
+          path: store
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check PyYAML==6.0.3
+      - name: Execute one reviewed finite SOXX slot
+        working-directory: compute
+        env:
+          COMPUTE: ${{ inputs.expected_compute_sha }}
+          STORE: ${{ inputs.expected_store_sha }}
+          SCOPE: ${{ inputs.scope_commit }}
+          DIGEST: ${{ inputs.scope_sha }}
+          MARKET_DATA_STORE_TOKEN: ${{ secrets.MARKET_DATA_STORE_TOKEN }}
+          TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
+        run: python -B -m scripts.run_one_shot_soxx_basis_gap --store ../store --compute-sha "$COMPUTE" --expected-store-sha "$STORE" --scope-commit "$SCOPE" --scope-sha "$DIGEST"

@@ -116,11 +116,11 @@ def synthetic_delivery(D,u,candidate,now,mutate=None):
     return D.verify_daily_delivery(data,repository,run,jobs,log,now=now.isoformat())
 
 
-@pytest.mark.parametrize('attack',['price','volume','missing','extra','identity','precision','reorder','maturity','window','source','grant_hash','calendar_hash','calendar_known_later','calendar_missing','calendar_extra','slot_skipped','quota','daily_budget','minute_budget','unlocked'])
+@pytest.mark.parametrize('attack',['price','invalid_volume','missing','extra','identity','precision','reorder','maturity','window','source','grant_hash','calendar_hash','calendar_known_later','calendar_missing','calendar_extra','slot_skipped','quota','daily_budget','minute_budget','unlocked'])
 def test_rejects_bad_input_without_catalog_change(tmp_path,attack):
     D,repo,g,c,paths,store,now,u=setup(tmp_path);calls=[];values=rows()[:5];slot='nov10';transport=capture(values,calls=calls)
     if attack=='price':values[0]['close']='10.000002';values[0]['high']='10.000002'
-    if attack=='volume':values[0]['volume']='301'
+    if attack=='invalid_volume':values[0]['volume']='-1'
     if attack=='missing':values.pop(2)
     if attack=='extra':values.insert(3,dict(values[2],datetime='2026-11-07'))
     if attack=='reorder':values.reverse()
@@ -148,7 +148,7 @@ def test_rejects_bad_input_without_catalog_change(tmp_path,attack):
                     store.publish(store.head(),{path:raw},replace=set())
                 u.run_slot(slot,'101-1',capture=transport)
     assert store.read(store.head(),B.catalog_path(B.PROVIDER,'SOXX'))==paths[B.catalog_path(B.PROVIDER,'SOXX')]
-    if attack not in ('price','volume','missing','extra','reorder','calendar_missing','calendar_extra'):assert calls==[]
+    if attack not in ('price','invalid_volume','missing','extra','reorder','calendar_missing','calendar_extra'):assert calls==[]
 
 
 def test_uncertain_request_consumes_one_slot_and_one_debit_without_retry(tmp_path):

@@ -62,6 +62,20 @@ class Candidate:
     receipt_until:str
 
 
+def require_price_only_overlap(old, snapshot):
+    """Literal immutable snapshots may revise quarantined volume, never prices."""
+    B._need(old['volume_policy']==snapshot['volume_policy']=='BLOCKED_UNRESOLVED')
+    for field in ('provider','symbol','basis_semantics','split_event','baseline_evidence_sha256'):
+        B._need(old[field]==snapshot[field])
+    B._need({k:v for k,v in old['request'].items() if k!='end_date'}==
+            {k:v for k,v in snapshot['request'].items() if k!='end_date'})
+    by_date={r['datetime']:r for r in snapshot['records']}
+    for row in old['records']:
+        B._need(row['datetime'] in by_date)
+        for field in B.PRICE_FIELDS:
+            B._need(Decimal(row[field])==Decimal(by_date[row['datetime']][field]))
+
+
 class DailyUpdater:
     @guarded
     def __init__(self,store,grant_raw,calendar_raw,authority,*,clock):
@@ -261,14 +275,9 @@ class DailyUpdater:
         now=self._fresh(slot);B._need(self.store.head()==head)
         B._need(B._stamp(verified['observed_at'])<=now and B._stamp(verified['observed_at'])>=B._stamp(slot['valid_from']) and B._stamp(old['observed_at'])<B._stamp(verified['observed_at']))
         B._need([r['datetime'] for r in verified['records']]==self._sessions(slot))
-        new_by={r['datetime']:r for r in verified['records']}
-        for row in old['records']:
-            B._need(row['datetime'] in new_by)
-            for field in (*B.PRICE_FIELDS,'volume'):
-                B._need(Decimal(row[field])==Decimal(new_by[row['datetime']][field]))
         ref=self.grant['baseline_ref'];baseline=B._blob(self.store.g,ref['commit'],ref['path'],ref['blob_sha'])
         snapshot=B.prepare_snapshot(envelope,B.sha(envelope),baseline,old['split_event'])
-        B._need(snapshot['unresolved_volume_dates']==old['unresolved_volume_dates'] and snapshot['volume_differences']==old['volume_differences'])
+        require_price_only_overlap(old,snapshot)
         admission=dict(schema_version=1,kind='provider_snapshot_price_admission',status='ADMITTED_PRICE_ONLY',basis_id=snapshot['basis_id'],allowed_fields=list(B.PRICE_FIELDS),volume_policy='BLOCKED_UNRESOLVED',admitted_at=now.isoformat(),proof_model='reviewed_workflow_receipt_not_provider_signature',envelope_ref=dict(path=prefix+'/envelope.json',blob_sha=B.blob_sha(envelope)),workflow_evidence=dict(compute_sha=self.grant['compute_sha'],request_id=request_id,terminal_ref=dict(path=prefix+'/terminal.json',blob_sha=B.blob_sha(B.encode(terminal)))),unresolved_volume_dates=snapshot['unresolved_volume_dates'])
         ar=B.encode(admission);sr=B.encode(snapshot)
         catalog=dict(schema_version=1,provider=B.PROVIDER,symbol='SOXX',basis_id=snapshot['basis_id'],snapshot_blob_sha=B.blob_sha(sr),admission_blob_sha=B.blob_sha(ar))
@@ -338,10 +347,8 @@ class DailyUpdater:
         B._need(B._stamp(slot['valid_from'])<=B._stamp(claim['claimed_at'])<=B._stamp(e['observed_at'])<B._stamp(slot['valid_until']))
         ref=self.grant['baseline_ref'];baseline=B._blob(self.store.g,ref['commit'],ref['path'],ref['blob_sha'])
         snapshot=B.prepare_snapshot(envelope,B.sha(envelope),baseline,old['split_event'])
-        B._need(self._snapshot(candidate.selector)==snapshot and snapshot['volume_differences']==old['volume_differences'])
-        by_date={r['datetime']:r for r in snapshot['records']}
-        for row in old['records']:
-            for field in (*B.PRICE_FIELDS,'volume'):B._need(Decimal(row[field])==Decimal(by_date[row['datetime']][field]))
+        B._need(self._snapshot(candidate.selector)==snapshot)
+        require_price_only_overlap(old,snapshot)
         catalog={k:v for k,v in candidate.selector.items() if k!='read_sha'}
         transition=B._parse(self.store.read(candidate.selector['read_sha'],self._transition_path(slot)))
         B._need(transition==dict(schema_version=1,kind='immutable_daily_basis_transition',grant_sha256=self.digest,slot_id=slot['slot_id'],previous_basis_id=old['basis_id'],previous_selector=claim['previous_selector'],catalog=catalog,calendar_sha256=self.authority.calendar_sha256,compute_sha=self.authority.compute_sha,consumer_sha=self.authority.consumer_sha,overlap_count=len(old['records']),new_count=len(snapshot['records'])-len(old['records']),price_comparison='EXACT_DECIMAL',volume_policy='BLOCKED_UNRESOLVED'))
