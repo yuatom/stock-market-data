@@ -65,17 +65,19 @@ def _budget(repo, day, config):
 
 def _one_debit(before, after):
     if (type(after.get('credits')) is not int or after['credits'] != before['credits'] + 1 or
-        type(after.get('minutes')) is not dict):
+        type(after.get('minutes')) is not dict or after['credits'] > 200):
         _fail('budget_state_invalid')
     old, new = before['minutes'], after['minutes']
-    if not set(old) <= set(new):
+    if any(type(v) is not int or not 0 <= v <= 8 for v in new.values()):
         _fail('budget_state_invalid')
-    deltas = []
-    for key, value in new.items():
-        if type(value) is not int or not 0 <= value <= 8:
-            _fail('budget_state_invalid')
-        deltas.append(value - old.get(key, 0))
-    if any(x not in (0, 1) for x in deltas) or sum(deltas) != 1 or after['credits'] > 200:
+    changed = [key for key, value in new.items() if value != old.get(key, 0)]
+    if len(changed) != 1 or new[changed[0]] != old.get(changed[0], 0) + 1:
+        _fail('budget_state_invalid')
+    # The authoritative writer keeps only the newest 16 minute buckets. Replay
+    # that exact transformation; arbitrary deletion or altered old counts still fail.
+    expected = dict(old)
+    expected[changed[0]] = new[changed[0]]
+    if new != dict(sorted(expected.items())[-16:]):
         _fail('budget_state_invalid')
 
 
