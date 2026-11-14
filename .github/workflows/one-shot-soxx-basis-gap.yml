@@ -44,6 +44,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.expected_compute_sha }}
+          fetch-depth: 0
           path: compute
           persist-credentials: false
       - uses: actions/checkout@v4
