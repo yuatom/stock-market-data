@@ -17,6 +17,14 @@ writer_scope:
     - .github/workflows/dynamic-candidate-runtime.yml
     - .github/workflows/extended-hours-readiness.yml
   guarded_manual_wrappers:
+    .github/workflows/retained-xlc-volume-quarantine.yml:
+      job: quarantine
+      entrypoint: scripts/quarantine_retained_xlc_volume.py
+      publication_helper: scripts/verify_store_publication.py
+      separate_request_specific_output_manifest: true
+      exact_fixed_base_required: true
+      provider_requests: 0
+      price_changes: 0
     .github/workflows/reconcile-retained-daily.yml:
       job: reconcile
       entrypoint: scripts/reconcile_retained_daily.py

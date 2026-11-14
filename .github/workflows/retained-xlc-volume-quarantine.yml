@@ -1,0 +1,48 @@
+name: Retained XLC Volume Quarantine
+on:
+  workflow_dispatch:
+    inputs:
+      expected_compute_sha:
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  quarantine:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    concurrency:
+      group: market-data-collector
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - name: Require exact authorized execution
+        env:
+          EXPECTED_COMPUTE_SHA: ${{ inputs.expected_compute_sha }}
+        shell: python
+        run: |
+          import os,re
+          assert os.environ['GITHUB_REF']=='refs/heads/main'
+          assert os.environ['GITHUB_RUN_ATTEMPT']=='1'
+          assert re.fullmatch('[0-9a-f]{40}',os.environ['EXPECTED_COMPUTE_SHA'])
+          assert os.environ['GITHUB_SHA']==os.environ['EXPECTED_COMPUTE_SHA']
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.expected_compute_sha }}
+          path: compute
+      - uses: actions/checkout@v4
+        with:
+          repository: yuatom/stock-market-data-store
+          token: ${{ secrets.MARKET_DATA_STORE_TOKEN }}
+          ref: 71cb9ea541bae007c0e2b03d35906d376b2b3c0a
+          fetch-depth: 0
+          path: store
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check PyYAML
+      - name: Apply retained evidence without provider access
+        working-directory: compute
+        env:
+          EXPECTED_COMPUTE_SHA: ${{ inputs.expected_compute_sha }}
+        run: python scripts/quarantine_retained_xlc_volume.py --store-repo ../store --compute-sha "$EXPECTED_COMPUTE_SHA" --request-id "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
