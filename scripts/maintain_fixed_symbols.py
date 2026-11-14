@@ -649,7 +649,7 @@ def maintain_append(h,*,compute,compute_sha,repo,store_sha,execution_date,histor
                     request_id,config,universe,access,key,fixed_selector,clock=r.now_utc):
     """Same fixed-target controller, append transactions only; never r.recover.
 
-    Confirmed data rejection can quarantine; unknown request/publication stops.
+    Confirmed data rejection is retained and stops; unknown request/publication stops.
     No replay, automatic resume, renewed deadline or selector refresh.
     """
     import backfill_market_data_tail as tail
@@ -717,11 +717,16 @@ def maintain_append(h,*,compute,compute_sha,repo,store_sha,execution_date,histor
             row=dict(symbol=symbol,status=status,store_start_sha=head,store_commit_sha=sha,result_state_path=path)
             if status=='PASS':passed.add(symbol);out['transactions'][-1]=row
             else:out['transactions'].append(row)
-            if status=='QUARANTINED':out['quarantined_symbols'].append(symbol)
+            if status=='QUARANTINED':
+                out['quarantined_symbols'].append(symbol)
+                out['stop']=dict(mode=tail.MODE,status='BLOCKED',
+                                 failure_code='replacement_rejected',failed_symbol=symbol)
             head=sha;out['last_verified_commit_sha']=head;_adopt(repo,head)
             checkpoint=dict(out,mode=MODE,trade_date=execution_date,kind='append_only_batch_checkpoint',status='PROGRESS_VALIDATED')
             head,cp=_publish_metadata(repo,head,execution_date,request_id,config,checkpoint,deadline=deadline,symbol=symbol)
             row.update(checkpoint_commit_sha=head,checkpoint_path=cp);out['last_verified_commit_sha']=head
+            if status=='QUARANTINED':
+                break
     except Exception as exc:
         out['stop']=r.failure_summary(exc)
     out['not_attempted_symbols']=[t['symbol'] for t in targets if t['symbol'] not in touched]
