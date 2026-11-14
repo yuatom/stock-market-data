@@ -8,6 +8,7 @@ Each completed fact publication remains real even if a later transaction fails.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import re
@@ -629,7 +630,30 @@ def _verify_append_terminal(h,repo,*,start,sha,path,day,cutoff,request_id,symbol
         if result.get('verified_required_outputs')!=required:_fail()
         allowed.update(p['path'] for p in required)
     else:
-        if index!=old_index or rows!=old_rows:_fail()
+        marker=report.get('volume_quarantine')
+        if rows!=old_rows:_fail()
+        if marker is None:
+            if index!=old_index:_fail()
+        else:
+            if result is not None or set(marker)!={'symbol','evidence_path','evidence_sha256','annotation_added'} or marker['symbol']!=symbol:_fail()
+            digest=marker['evidence_sha256'];relative=f'collector-state/{day[:7]}/price-only-{digest}.json'
+            if not isinstance(digest,str) or not re.fullmatch('[0-9a-f]{64}',digest) or marker['evidence_path']!=relative:_fail()
+            evidence_path=r.PREFIX+relative
+            evidence=json.loads(a.git(repo,'show',f'{sha}:{evidence_path}'))
+            if hashlib.sha256(h.store.canonical_bytes(evidence)).hexdigest()!=digest:_fail()
+            proof=tail.volume_conflict_evidence(h,dict(symbol=symbol,existing=old_rows),evidence['records'],cutoff)
+            if proof is None or proof!=(digest,h.store.canonical_bytes(evidence)):_fail()
+            old_segments=old_index.get('lineage_segments',[])
+            blocked=any(x.get('volume_policy')=='BLOCKED_UNRESOLVED' or x.get('ingest_kind')=='collector_price_only_revision_v1' for x in old_segments)
+            expected_index=copy.deepcopy(old_index)
+            if type(marker['annotation_added']) is not bool or marker['annotation_added']==blocked:_fail()
+            if not blocked:
+                expected_index['lineage_segments']=old_segments+[dict(ingest_kind='volume_conflict_quarantine_v1',start=0,end=len(old_rows)-1,
+                    volume_policy='BLOCKED_UNRESOLVED',policy_scope='entire_series',observed_trade_date=day,
+                    normalized_evidence_path=relative,normalized_evidence_sha256=digest)]
+            if index!=expected_index:_fail()
+            required=[dict(path=p,blob_sha=_immutable_blob(repo,sha,p)) for p in sorted({path,evidence_path,prefix+'_index.json',r.INVENTORY})]
+            allowed.update(p['path'] for p in required)
         if result is not None:
             if result.get('status')!='NOOP' or report.get('status')!='NOOP':_fail()
         elif report.get('status')!='BLOCKED' or report.get('failure_code')!='replacement_rejected':_fail()
@@ -638,7 +662,7 @@ def _verify_append_terminal(h,repo,*,start,sha,path,day,cutoff,request_id,symbol
         changed=set(filter(None,a.git(repo,'diff','--name-only','-z',parent,commit,'--').split('\0')))
         if not changed<=allowed:_fail('unexpected_change')
     for target in remaining:
-        if target['symbol'] not in passed:
+        if target['symbol'] not in passed and not (target['symbol']==symbol and report.get('volume_quarantine')):
             index_path=f"{r.PREFIX}series/daily/twelve_data_basic/{target['symbol']}/_index.json"
             if _immutable_blob(repo,sha,index_path)!=target['index_blob_sha']:_fail('object_drift')
     if a.git(repo,'ls-remote','origin',f'refs/tags/market-data-read/{sha}').split()!=[sha,f'refs/tags/market-data-read/{sha}']:_fail('durability_failed')
