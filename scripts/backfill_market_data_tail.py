@@ -23,6 +23,7 @@ import recover_market_data_baseline as recovery
 from recover_market_data_baseline import RecoveryError
 from fixed_baseline_targets import parse_fixed_selection, resolve_fixed_targets
 from replacement_diagnostics import ReplacementDiagnostic
+from dynamic_baseline_targets import parse_dynamic_selection, resolve_dynamic_targets
 
 try:
     from scripts.eleven_symbol_append import classify_daily_overlap
@@ -326,8 +327,25 @@ def publish_tail(h, writer, entries, report, *, compute, compute_sha, execution_
                 pass
 
 
+def resolve_tail_targets(h, *, repo, store_sha, universe, execution_date,
+                         fixed_selector=None, dynamic_selector=None, discovery_repo=None):
+    """No fallback; exact historical dynamic proof, exactly one temporary symbol per invocation."""
+    if (fixed_selector is None)==(dynamic_selector is None):
+        raise RecoveryError('incomplete_targets')
+    if dynamic_selector is not None:
+        if (not discovery_repo or not isinstance(dynamic_selector,dict) or
+            not isinstance(dynamic_selector.get('targets'),list) or
+            len(dynamic_selector['targets'])!=1):
+            raise RecoveryError('incomplete_targets')
+        return resolve_dynamic_targets(h,store_repo=repo,store_sha=store_sha,
+            discovery_repo=Path(discovery_repo),selector=dynamic_selector,
+            universe=universe,day=execution_date)
+    return resolve_fixed_targets(h,store_repo=repo,store_sha=store_sha,
+        selector=fixed_selector,universe=universe)
+
+
 def backfill(h, *, compute, compute_sha, repo, store_sha, execution_date, historical_cutoff,
-             request_id, config, universe, access, key, fixed_selector, clock=recovery.now_utc,
+             request_id, config, universe, access, key, fixed_selector=None, dynamic_selector=None, discovery_repo=None, clock=recovery.now_utc,
              symbol_transaction=None, overall_deadline=None):
     a = recovery.admission()
     policy=config['collector']['twelve_data_daily'].get('bounded_overlap_revision_policy')
@@ -339,10 +357,9 @@ def backfill(h, *, compute, compute_sha, repo, store_sha, execution_date, histor
     recovery.source_guard(compute, compute_sha)
     if not key:
         raise RecoveryError('credential_missing')
-    # There is intentionally no omitted-selector/all-universe or dynamic fallback.
-    if not fixed_selector:
-        raise RecoveryError('incomplete_targets')
-    selected = resolve_fixed_targets(h, store_repo=repo, store_sha=store_sha, selector=fixed_selector, universe=universe)
+    selected = resolve_tail_targets(h, repo=repo, store_sha=store_sha, universe=universe,
+        execution_date=execution_date, fixed_selector=fixed_selector,
+        dynamic_selector=dynamic_selector, discovery_repo=discovery_repo)
     if symbol_transaction is not None and (len(selected)!=1 or selected[0]['symbol']!=symbol_transaction or not price_only):
         raise RecoveryError('invalid_target')
     writer = recovery.make_writer(repo, store_sha, execution_date, request_id, mode=MODE,symbol=symbol_transaction)
@@ -367,6 +384,8 @@ def backfill(h, *, compute, compute_sha, repo, store_sha, execution_date, histor
               'requests_attempted': 0, 'budget_debits': 0, 'started_at': clock().isoformat(),
               'market_fact_authority': False, 'production_recovery_accepted': False,
               'fixed_selection': fixed_selector, 'timing_diagnostics': []}
+    if dynamic_selector is not None:
+        report.update(dynamic_selection=dynamic_selector, persistent_collection_membership=False)
     try:
         writer.report(report)
         deadline = min(time.monotonic() + 600, overall_deadline) if overall_deadline is not None else time.monotonic()+600
@@ -452,8 +471,11 @@ def backfill(h, *, compute, compute_sha, repo, store_sha, execution_date, histor
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
-    for flag in ('execution-date', 'historical-cutoff', 'compute-sha', 'store-sha', 'store-repo', 'request-id', 'fixed-selection'):
+    for flag in ('execution-date', 'historical-cutoff', 'compute-sha', 'store-sha', 'store-repo', 'request-id'):
         p.add_argument('--' + flag, required=True)
+    p.add_argument('--fixed-selection')
+    p.add_argument('--dynamic-selection')
+    p.add_argument('--discovery-repo')
     args = p.parse_args(argv)
     os.umask(0o077)
     try:
@@ -470,14 +492,18 @@ def main(argv=None):
                 os.environ.get('GITHUB_TRIGGERING_ACTOR')!='yuatom'):
                 raise RecoveryError('wrong_execution_surface')
             from maintain_fixed_symbols import maintain_append
-            runner=maintain_append
+            if args.dynamic_selection is None:
+                runner=maintain_append
+        extra={}
+        if args.dynamic_selection is not None:
+            extra=dict(dynamic_selector=parse_dynamic_selection(args.dynamic_selection),discovery_repo=args.discovery_repo)
         result = runner(h, compute=root, compute_sha=args.compute_sha, repo=Path(args.store_repo),
             store_sha=args.store_sha, execution_date=args.execution_date, historical_cutoff=args.historical_cutoff,
             request_id=args.request_id, config=config,
             universe=h.collection.load_collection_universe(root/'config/collection-universe.json'),
             access=h.collectors.load_yaml(root/'config/market-data-collector-access.yaml'),
-            key=os.environ.get('TWELVE_DATA_API_KEY', ''), fixed_selector=parse_fixed_selection(args.fixed_selection))
-        public = {k: v for k, v in result.items() if k not in ('verified_required_outputs', 'timing_diagnostics', 'fixed_selection')}
+            key=os.environ.get('TWELVE_DATA_API_KEY', ''), fixed_selector=parse_fixed_selection(args.fixed_selection),**extra)
+        public = {k: v for k, v in result.items() if k not in ('verified_required_outputs', 'timing_diagnostics', 'fixed_selection', 'dynamic_selection')}
         public['verified_required_output_count'] = len(result.get('verified_required_outputs',[]))
         print(json.dumps(public, sort_keys=True))
         return 0 if result.get('status') in ('PASS', 'NOOP') else 2
