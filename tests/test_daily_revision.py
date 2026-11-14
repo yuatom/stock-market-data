@@ -68,7 +68,7 @@ class FiniteTailTests(unittest.TestCase):
         h=importlib.import_module('admit_market_data_baseline').load_helpers()
         old=[dict(trade_date='2026-11-04',open=10.,high=12.,low=9.,close=11.,volume=100.)]
         fetched=[dict(old[0],volume=101.),dict(old[0],trade_date='2026-11-05')]
-        def item():return dict(symbol='AMD',existing=copy.deepcopy(old),target_records=1,effective=None,outputsize=2)
+        def item():return dict(symbol='AMD',existing=copy.deepcopy(old),target_records=1,effective=None,outputsize=2,old_index={'lineage_segments':[]})
         with self.assertRaises(Exception):tail.qualify_tail(h,item(),fetched,'2026-11-05')
         candidate=item();tail.qualify_tail(h,candidate,fetched,'2026-11-05',price_only=True)
         self.assertEqual(candidate['rows'][0],old[0])
@@ -91,7 +91,7 @@ class AppendControllerTests(unittest.TestCase):
         config={'collector':{'twelve_data_daily':{'bounded_overlap_revision_policy':'price_only_volume_blocked_v1','settlement_maturity':{'minimum_next_day_et':'07:00'}}}}
         success=dict(status='PASS',store_commit_sha='b'*40,result_state_path='synthetic',requests_attempted=1,budget_debits=1)
         with ExitStack() as stack:
-            for owner,name,value in [(m,'_clean',None),(m,'_remote_exact',None),(m,'_adopt',None),(m,'_budget',{'credits':0,'minutes':{}}),(m,'_publish_metadata',('c'*40,'synthetic')),(m,'_verify_append_terminal',{}),(m.r,'source_guard',None),(t,'validate_dates','2026-11-12')]:
+            for owner,name,value in [(m,'_clean',None),(m,'_remote_exact',None),(m,'_adopt',None),(m,'_budget',{'credits':0,'minutes':{}}),(m,'_publish_metadata',('c'*40,'synthetic')),(m,'_verify_append_terminal',{'results':[{'volume_policy':'BLOCKED_UNRESOLVED'}]}),(m.r,'source_guard',None),(t,'validate_dates','2026-11-12')]:
                 stack.enter_context(patch.object(owner,name,return_value=value))
             stack.enter_context(patch.object(m,'resolve_fixed_targets',side_effect=lambda *a,**k:k['selector']['targets']))
             legacy=stack.enter_context(patch.object(m.r,'recover',side_effect=AssertionError('rebase must never be called')))
