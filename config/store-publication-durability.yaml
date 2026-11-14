@@ -17,6 +17,14 @@ writer_scope:
     - .github/workflows/dynamic-candidate-runtime.yml
     - .github/workflows/extended-hours-readiness.yml
   guarded_manual_wrappers:
+    .github/workflows/one-shot-soxx-basis-gap.yml:
+      job: soxx_gap
+      entrypoint: scripts/run_one_shot_soxx_basis_gap.py
+      publication_helper: scripts/daily_basis_remote.py
+      finite_single_slot_only: true
+      provider_request_limit: 1
+      credit_limit: 1
+      private_verification_limit: 1
     .github/workflows/retained-soxx-initial-admission.yml:
       job: admit_retained
       entrypoint: scripts/admit_retained_soxx_basis.py
