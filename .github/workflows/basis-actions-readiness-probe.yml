@@ -1,0 +1,73 @@
+name: Isolated Basis Actions Readiness
+on:
+  workflow_dispatch:
+    inputs:
+      compute_sha:
+        type: string
+        required: true
+      receipt_commitment:
+        type: string
+        required: true
+      expected_runner_id:
+        type: string
+        required: true
+      expected_runner_name:
+        type: string
+        required: true
+      expires:
+        type: string
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: market-data-collector
+  cancel-in-progress: false
+  queue: max
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Exact owner manual invocation
+        env:
+          COMPUTE: ${{ inputs.compute_sha }}
+        shell: python
+        run: |
+          import os,re
+          assert os.environ['GITHUB_EVENT_NAME']=='workflow_dispatch'
+          assert os.environ['GITHUB_REF']=='refs/heads/main'
+          assert os.environ['GITHUB_RUN_ATTEMPT']=='1'
+          assert os.environ['GITHUB_ACTOR']==os.environ['GITHUB_TRIGGERING_ACTOR']=='yuatom'
+          assert re.fullmatch('[0-9a-f]{40}',os.environ['COMPUTE'])
+          assert os.environ['GITHUB_SHA']==os.environ['COMPUTE']
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.compute_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: compute
+      - uses: actions/checkout@v4
+        with:
+          repository: yuatom/stock-market-data-store
+          ref: main
+          token: ${{ secrets.MARKET_DATA_STORE_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: store
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check PyYAML==6.0.3
+      - name: One private verifier dispatch, zero provider
+        working-directory: compute
+        env:
+          MARKET_DATA_BASIS_ACTIONS_TOKEN: ${{ secrets.MARKET_DATA_BASIS_ACTIONS_TOKEN || secrets.MARKET_DATA_STORE_TOKEN }}
+          COMPUTE: ${{ inputs.compute_sha }}
+          RECEIPT: ${{ inputs.receipt_commitment }}
+          RUNNER_ID: ${{ inputs.expected_runner_id }}
+          RUNNER_NAME: ${{ inputs.expected_runner_name }}
+          EXPIRES: ${{ inputs.expires }}
+        run: >-
+          python -B -m scripts.run_basis_actions_readiness_probe
+          --store ../store --compute-sha "$COMPUTE" --receipt-commitment "$RECEIPT"
+          --expected-runner-id "$RUNNER_ID" --expected-runner-name "$RUNNER_NAME" --expires "$EXPIRES"
