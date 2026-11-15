@@ -225,6 +225,10 @@ def fetch_twelve_regular(
         per_day=int(budget["hard_credits_per_day"]),
         per_minute=int(budget["hard_credits_per_minute"]),
     )
+    return parse_twelve_regular(payload,symbol,asset_class,trade_date,start_et,end_et)
+
+
+def parse_twelve_regular(payload,symbol,asset_class,trade_date,start_et,end_et):
     if payload.get("status") == "error":
         raise RuntimeError(str(payload.get("message") or "Twelve Data error"))
     start, end = _window_bounds(trade_date, start_et, end_et)
@@ -630,6 +634,34 @@ def _coverage_observability(
     }
 
 
+def _write_regular_capture(store_root,trade_date,mode,symbol,provider,facts,collection_started_at,start_et,end_et,durable_owner=None):
+    feed_scope = (
+        "nasdaq_public_chart_last_sale_volume_v1"
+        if provider == NASDAQ
+        else "twelve_data_basic_us_equities_limited_realtime_coverage"
+    )
+    capture_id=f"{mode}-{symbol.lower()}-{datetime.now(ET).strftime('%H%M%S-et')}"
+    if durable_owner is not None:
+        window=f'{start_et}-{end_et}'.replace(':','')
+        relative=f'data/market-data/sessions/{trade_date[:7]}/{trade_date}/regular/{window}/{provider}/{capture_id}.json'
+        durable_owner.allowed.add(relative)
+        durable_owner.safe_path(relative) # Validate parents/target before writer touches bytes.
+    rel, blob = write_capture(
+        store_root,
+        trade_date=trade_date,
+        session="regular",
+        provider=provider,
+        capture_id=capture_id,
+        generated_at=collection_started_at,
+        actual_data_cutoff=facts[-1]["source_timestamp"],
+        window={"start": start_et, "end": end_et},
+        feed_scope=feed_scope,
+        qualified_facts=facts,
+        missing_symbols=[],
+    )
+    return rel,blob
+
+
 def collect_regular_window(
     *,
     mode: str,
@@ -643,6 +675,7 @@ def collect_regular_window(
     access: Mapping[str, Any],
     symbols_override: Sequence[str] | None = None,
     eligible_universe: Sequence[tuple[str, str]] | None = None,
+    durable_owner=None,
 ) -> dict[str, Any]:
     full_universe = list(eligible_universe) if eligible_universe is not None else collection.intraday_universe(universe_config)
     if mode == HISTORICAL_CONTEXT_REPAIR and eligible_universe is None:
@@ -663,7 +696,10 @@ def collect_regular_window(
             raise RuntimeError(f"symbols_override outside eligible collection universe: {unknown}")
         universe = [(symbol, by_symbol[symbol]) for symbol in requested]
 
+    if durable_owner is not None:durable_owner.begin_intraday(trade_date,stage or mode,start_et,end_et)
     collection_started_at = datetime.now(ET).isoformat()
+    durable_captures={}
+
     facts_by_symbol: dict[str, tuple[str, list[dict[str, Any]]]] = {}
     diagnostics: dict[str, list[dict[str, Any]]] = {}
     failures: dict[str, list[str]] = {}
@@ -722,8 +758,13 @@ def collect_regular_window(
             or _full_window_from_one_provider(primary[1], trade_date, start_et, end_et)
         ):
             continue
+        rejection=None
         try:
-            facts, diag = fetch_twelve_regular(
+            if durable_owner is not None:
+                from dynamic_intraday_response import fetch_guarded
+                fetch=lambda *args,**kwargs:fetch_guarded(*args,**kwargs,writer=durable_owner)
+            else:fetch=fetch_twelve_regular
+            facts, diag = fetch(
                 symbol,
                 asset,
                 trade_date,
@@ -752,8 +793,24 @@ def collect_regular_window(
             else:
                 failures.setdefault(symbol, []).append("twelve_no_qualified_target_window_facts")
         except Exception as exc:  # noqa: BLE001
+            if durable_owner is not None:
+                from dynamic_daily_owner import DynamicPublicationUnknown
+                from dynamic_intraday_response import KnownIntradayRejection
+                if not isinstance(exc,KnownIntradayRejection):durable_owner.abort()
+                rejection=exc
             failures.setdefault(symbol, []).append(f"twelve:{type(exc).__name__}:{exc}")
             record_reason(symbol, _reason_from_exception(exc), f"{TWELVE}:{type(exc).__name__}:{exc}")
+        if durable_owner is not None and durable_owner.active is not None:
+            try:
+                selected=facts_by_symbol.get(symbol)
+                ref=None
+                if selected:
+                    provider,chosen=selected
+                    ref=_write_regular_capture(store_root,trade_date,mode,symbol,provider,chosen,collection_started_at,start_et,end_et,durable_owner=durable_owner)
+                    durable_captures[symbol]=ref
+                durable_owner.close_intraday(ref[0] if ref else None,'REJECTED' if rejection else ('SELECTED_TWELVE' if selected and selected[0]==TWELVE else 'UNSELECTED_VALID'))
+            except Exception:durable_owner.abort()
+        if rejection is not None:raise rejection
 
     context_specs = collection.context_by_symbol(universe_config)
     sector_symbols = set(collection.sector_symbols(universe_config))
@@ -769,24 +826,10 @@ def collect_regular_window(
         successful.add(symbol)
         provider, facts = selected
         provider_counts[provider] = provider_counts.get(provider, 0) + 1
-        feed_scope = (
-            "nasdaq_public_chart_last_sale_volume_v1"
-            if provider == NASDAQ
-            else "twelve_data_basic_us_equities_limited_realtime_coverage"
-        )
-        rel, blob = write_capture(
-            store_root,
-            trade_date=trade_date,
-            session="regular",
-            provider=provider,
-            capture_id=f"{mode}-{symbol.lower()}-{datetime.now(ET).strftime('%H%M%S-et')}",
-            generated_at=collection_started_at,
-            actual_data_cutoff=facts[-1]["source_timestamp"],
-            window={"start": start_et, "end": end_et},
-            feed_scope=feed_scope,
-            qualified_facts=facts,
-            missing_symbols=[],
-        )
+        if symbol in durable_captures:
+            rel,blob=durable_captures[symbol]
+        else:
+            rel,blob=_write_regular_capture(store_root,trade_date,mode,symbol,provider,facts,collection_started_at,start_et,end_et)
         if symbol in context_specs:
             kind = "cross_asset_proxy_capture"
         elif symbol in sector_symbols:
