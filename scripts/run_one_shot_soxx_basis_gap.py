@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 from scripts import provider_basis_snapshot as B
 from scripts.daily_basis_updates import DailyUpdater,GrantAuthority,provider_capture
 from scripts.run_daily_basis_route import (GitHubAPI,check_private_readiness,dispatch_verify_once,
-    wait_for_daily_budget_window,_quiet,_source,_environment)
+    wait_for_daily_budget_window,_quiet,_source,_environment,ReadinessFailure,READINESS_STEPS)
 from scripts.daily_basis_remote import RemoteGitStore,RemoteStoreError,SAFE_PHASES
 
 COMPUTE='yuatom/stock-market-data';STORE='yuatom/stock-market-data-store'
@@ -27,6 +27,8 @@ STAGES=frozenset({'INITIALIZATION','SOURCE_GATE','PLATFORM_GATE','STORE_ADAPTER'
     'RUN_AUTHORITY','PRIVATE_READINESS','GRANT_BASELINE','BUDGET_WINDOW',
     'CAPTURE_AND_CANDIDATE','PRIVATE_VERIFICATION','PROMOTION','CONSUMER_READ','PRECLAIM_CHECK'})
 
+SAFE_DETAILS=SAFE_PHASES|READINESS_STEPS
+
 class OneShotFailure(RuntimeError):
     def __init__(self,stage,error):
         self.stage=stage if stage in STAGES else 'INITIALIZATION'
@@ -36,6 +38,11 @@ class OneShotFailure(RuntimeError):
                        'CONTRACT_OR_INPUT' if isinstance(error,(ValueError,KeyError,TypeError)) else
                        'GUARDED_OPERATION')
         self.detail=error.safe_phase if isinstance(error,RemoteStoreError) and error.safe_phase in SAFE_PHASES else 'UNSPECIFIED'
+        self.http_status=None
+        if isinstance(error,ReadinessFailure):
+            self.detail=error.safe_step if error.safe_step in READINESS_STEPS else 'UNSPECIFIED'
+            self.http_status=error.http_status if type(error.http_status) is int and 100<=error.http_status<=599 else None
+            self.category=error.safe_kind if error.safe_kind in {'HTTP_ERROR','TIMEOUT','NETWORK_ERROR','CONTRACT_OR_INPUT'} else 'GUARDED_OPERATION'
         super().__init__(STOP)
 
 def step(stage,fn,*args,**kwargs):
@@ -47,8 +54,9 @@ def failure_result(exc):
     safe=exc if isinstance(exc,OneShotFailure) else OneShotFailure('INITIALIZATION',exc)
     return dict(status=STOP,automatic_retry_allowed=False,
                 failure_stage=safe.stage if safe.stage in STAGES else 'INITIALIZATION',
-                failure_detail=safe.detail if safe.detail in SAFE_PHASES else 'UNSPECIFIED',
-                error_category=safe.category if safe.category in {'TIMEOUT','IO_OR_NETWORK','CONTRACT_OR_INPUT','GUARDED_OPERATION'} else 'GUARDED_OPERATION')
+                failure_detail=safe.detail if safe.detail in SAFE_DETAILS else 'UNSPECIFIED',
+                error_category=safe.category if safe.category in {'TIMEOUT','IO_OR_NETWORK','CONTRACT_OR_INPUT','GUARDED_OPERATION','HTTP_ERROR','NETWORK_ERROR'} else 'GUARDED_OPERATION',
+                http_status=safe.http_status if type(safe.http_status) is int and 100<=safe.http_status<=599 else None)
 
 
 def need(value):

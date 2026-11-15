@@ -39,6 +39,25 @@ class HostedDailyError(RuntimeError):pass
 class ScopeUnavailable(HostedDailyError):pass
 
 
+READINESS_STEPS=frozenset({'READINESS_REPOSITORY','READINESS_TOKEN_IDENTITY',
+    'READINESS_DISPATCH_CAPABILITY','READINESS_WORKFLOW','READINESS_SOURCE_REF',
+    'READINESS_SUCCESS_RUN','READINESS_CONSUMER_RELEASE'})
+
+class ReadinessFailure(HostedDailyError):
+    def __init__(self,step,error):
+        self.safe_step=step if step in READINESS_STEPS else 'UNSPECIFIED'
+        self.http_status=error.code if isinstance(error,urllib.error.HTTPError) and type(error.code) is int and 100<=error.code<=599 else None
+        self.safe_kind=('HTTP_ERROR' if self.http_status is not None else
+                        'TIMEOUT' if isinstance(error,TimeoutError) else
+                        'NETWORK_ERROR' if isinstance(error,urllib.error.URLError) else
+                        'CONTRACT_OR_INPUT')
+        super().__init__(STOP)
+
+def readiness_call(step,fn,*args,**kwargs):
+    try:return fn(*args,**kwargs)
+    except Exception as exc:raise ReadinessFailure(step,exc) from None
+
+
 def need(value):
     if not value:raise HostedDailyError(STOP)
 
@@ -157,23 +176,23 @@ def read_authority(store,commitment,compute_sha,*,now,allow_expired_hold=False):
 
 
 def check_private_readiness(api,store,authority,grant,*,now):
-    repository=api.request('GET','/repos/'+STORE)
+    repository=readiness_call('READINESS_REPOSITORY',api.request,'GET','/repos/'+STORE)
     need(repository.get('private') is True and repository.get('id')==grant['repository_id']==authority['repository_id'] and
          repository.get('full_name')==STORE and repository['owner']['id']==grant['owner_id']==authority['owner_id'])
     # The authenticated credential must already be the approved owner identity.
     # This does not expand scopes. A fine-grained token lacking dispatch access
     # remains a deployment blocker, not a reason to provision a new credential.
-    need(api.request('GET','/user')['id']==grant['owner_id'])
-    need(api.dispatch_capability(grant['workflow_id']))
-    workflow=api.request('GET','/repos/'+STORE+'/actions/workflows/'+str(grant['workflow_id']))
+    need(readiness_call('READINESS_TOKEN_IDENTITY',api.request,'GET','/user')['id']==grant['owner_id'])
+    need(readiness_call('READINESS_DISPATCH_CAPABILITY',api.dispatch_capability,grant['workflow_id']))
+    workflow=readiness_call('READINESS_WORKFLOW',api.request,'GET','/repos/'+STORE+'/actions/workflows/'+str(grant['workflow_id']))
     need(workflow.get('id')==grant['workflow_id'] and workflow.get('path')==VERIFIER and workflow.get('state')=='active')
-    need(store.remote_ref('refs/heads/basis-consumer-delivery/'+grant['workflow_source_sha'])==grant['workflow_source_sha'])
-    ready=api.request('GET','/repos/'+STORE+'/actions/runs/'+str(authority['readiness_run_id']))
+    need(readiness_call('READINESS_SOURCE_REF',store.remote_ref,'refs/heads/basis-consumer-delivery/'+grant['workflow_source_sha'])==grant['workflow_source_sha'])
+    ready=readiness_call('READINESS_SUCCESS_RUN',api.request,'GET','/repos/'+STORE+'/actions/runs/'+str(authority['readiness_run_id']))
     need(ready.get('workflow_id')==grant['workflow_id'] and ready.get('head_sha')==grant['workflow_source_sha'] and
          ready.get('path')==VERIFIER and ready.get('status')=='completed' and ready.get('conclusion')=='success' and
          ready.get('run_attempt')==1 and ready.get('event')=='workflow_dispatch' and
          ready['actor']['id']==ready['triggering_actor']['id']==grant['owner_id'])
-    release=api.request('GET','/repos/yuatom/stock-dairy/contents/state/runtime-release.json?ref=main')
+    release=readiness_call('READINESS_CONSUMER_RELEASE',api.request,'GET','/repos/yuatom/stock-dairy/contents/state/runtime-release.json?ref=main')
     need(release.get('type')=='file' and release.get('path')=='state/runtime-release.json' and release.get('encoding')=='base64')
     raw=base64.b64decode(release['content'].replace('\n',''),validate=True)
     need(B.blob_sha(raw)==release['sha'] and B._parse(raw,canonical=False)['repository_commit_sha']==grant['consumer_sha'])
