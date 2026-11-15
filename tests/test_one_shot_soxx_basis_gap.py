@@ -17,6 +17,18 @@ class OneShotScope(unittest.TestCase):
         for key,data in (('grant_ref',B.encode(grant)),('calendar_ref',B.encode(calendar))):scope[key]=dict(commit='d'*40,path='basis-authority/'+key+'.json',blob_sha=B.blob_sha(data),sha256=B.sha(data))
         raw=B.encode(scope);return M.validate_scope(raw,B.sha(raw),B.encode(grant),B.encode(calendar),compute_sha='a'*40,now=now)
     def test_bounded_manual_scope(self):self.validate(*self.fixture())
+    def test_authorized_nov15_execution_keeps_nov13_cutoff(self):
+        s,g,c,n=self.fixture();n=n+timedelta(days=1)
+        for obj,keys in ((s,('valid_from','valid_until','actions_free_until')),(g['slots'][0],('valid_from','receipt_until'))):
+            for key in keys:obj[key]=(datetime.fromisoformat(obj[key])+timedelta(days=1)).isoformat()
+        g['slots'][0]['execution_day']='2026-11-15'
+        self.validate(s,g,c,n)
+    def test_wrong_accounting_day_rejected(self):
+        s,g,c,n=self.fixture();g['slots'][0]['execution_day']='2026-11-15'
+        with self.assertRaises(ValueError):self.validate(s,g,c,n)
+    def test_future_day_not_implicitly_authorized(self):
+        s,g,c,n=self.fixture();g['slots'][0]['execution_day']='2026-11-16'
+        with self.assertRaises(ValueError):self.validate(s,g,c,n)
     def test_extra_request_rejected(self):
         s,g,c,n=self.fixture();g['request_limit']=2
         with self.assertRaises(ValueError):self.validate(s,g,c,n)
