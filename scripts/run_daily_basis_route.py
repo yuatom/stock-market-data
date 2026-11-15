@@ -83,11 +83,14 @@ class GitHubAPI:
     """Fixed GitHub API, bounded responses, no retries, no ambient proxy."""
     def __init__(self,token):
         need(type(token) is str and re.fullmatch('[A-Za-z0-9_.-]{8,4096}',token));self._token=token
+        self._dispatch_permission_proofs={}
         self.opener=urllib.request.build_opener(urllib.request.ProxyHandler({}),_NoRedirect())
 
     def request(self,method,path,payload=None,*,raw=False):
         need(method in ('GET','POST') and path.startswith('/repos/') or method=='GET' and path=='/user')
         need('..' not in path and '\\' not in path)
+        match=re.fullmatch('/repos/'+re.escape(STORE)+'/actions/workflows/([1-9][0-9]*)/dispatches',path)
+        if method=='POST' and match:self._dispatch_permission_proofs.pop(int(match.group(1)),None)
         url='https://api.github.com'+path
         req=urllib.request.Request(url,method=method,data=B.encode(payload) if payload is not None else None,
             headers={'Authorization':'Bearer '+self._token,'Accept':'application/vnd.github+json',
@@ -97,18 +100,30 @@ class GitHubAPI:
             self._last_oauth_scopes=response.headers.get('X-OAuth-Scopes','')
             data=response.read(1024*1024+1)
         need(len(data)<=1024*1024)
-        return data if raw else B._parse(data,canonical=False)
+        if raw:return data
+        result=B._parse(data,canonical=False)
+        if method=='POST' and match:
+            B._closed(result,('workflow_run_id','run_url','html_url'))
+            run_id=result['workflow_run_id'];need(type(run_id) is int and run_id>0)
+            need(result['run_url']==f'https://api.github.com/repos/{STORE}/actions/runs/{run_id}' and
+                 result['html_url']==f'https://github.com/{STORE}/actions/runs/{run_id}')
+            self._dispatch_permission_proofs[int(match.group(1))]=time.monotonic()
+        return result
 
     def dispatch_capability(self,workflow_id):
         """Actual current-token scope evidence; no inference from past actors.
 
         GitHub documents classic/OAuth `repo` for private workflow dispatch.
-        Fine-grained tokens need Actions(write), which this read API cannot
-        introspect reliably: absent classic scope stops BEFORE provider debit.
+        Fine-grained write access needs an actual successful target dispatch
+        by this API instance in the last five minutes. GET success, required-
+        permission headers and historical runs cannot create that proof. This
+        proves permission only, not job completion or capture authorization.
         """
         self.request('GET','/repos/'+STORE+'/actions/workflows/'+str(workflow_id))
         scopes=self._last_oauth_scopes
-        return type(scopes) is str and 'repo' in {part.strip() for part in scopes.split(',')}
+        if type(scopes) is str and 'repo' in {part.strip() for part in scopes.split(',')}:return True
+        issued=self._dispatch_permission_proofs.get(workflow_id)
+        return issued is not None and 0<=time.monotonic()-issued<=300
 
     def job_log(self,job_id):
         need(type(job_id) is int and job_id>0)
