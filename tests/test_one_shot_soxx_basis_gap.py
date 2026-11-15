@@ -64,15 +64,38 @@ class OneShotScope(unittest.TestCase):
         return args
     def test_readiness_failure_stops_before_debit(self):
         args=self.hosted_mocks()
-        with patch.object(M,'check_private_readiness',side_effect=ValueError('not ready')),patch.object(M,'DailyUpdater') as updater,self.assertRaises(ValueError):M.run_once(**args)
+        with patch.object(M,'check_private_readiness',side_effect=ValueError('not ready')),patch.object(M,'DailyUpdater') as updater,self.assertRaises(M.OneShotFailure) as failure:M.run_once(**args)
+        self.assertEqual(failure.exception.stage,'PRIVATE_READINESS')
         updater.assert_not_called();args['capture'].assert_not_called()
     def test_unknown_verification_does_not_promote_or_repeat(self):
         args=self.hosted_mocks();updater=Mock()
-        with patch.object(M,'check_private_readiness',return_value={}),patch.object(M,'DailyUpdater',return_value=updater),patch.object(M,'wait_for_daily_budget_window'),patch.object(M,'dispatch_verify_once',side_effect=TimeoutError()) as dispatch,self.assertRaises(TimeoutError):M.run_once(**args)
+        with patch.object(M,'check_private_readiness',return_value={}),patch.object(M,'DailyUpdater',return_value=updater),patch.object(M,'wait_for_daily_budget_window'),patch.object(M,'dispatch_verify_once',side_effect=TimeoutError()) as dispatch,self.assertRaises(M.OneShotFailure) as failure:M.run_once(**args)
+        self.assertEqual(failure.exception.stage,'PRIVATE_VERIFICATION');self.assertEqual(failure.exception.category,'TIMEOUT')
         updater.run_slot.assert_called_once();dispatch.assert_called_once();updater.promote.assert_not_called()
     def test_drift_rejected_before_scope_or_capture(self):
         store=Mock();store.lock.return_value=nullcontext();store.head.return_value='x'*40;capture=Mock()
-        with self.assertRaises(ValueError):M.run_once(store=store,api=Mock(),scope_commit='d'*40,scope_sha='e'*64,expected_store_sha='f'*40,compute_sha='a'*40,env={},clock=lambda:None,key='',access={},source_check=lambda:None,capture=capture)
+        with self.assertRaises(M.OneShotFailure) as failure:M.run_once(store=store,api=Mock(),scope_commit='d'*40,scope_sha='e'*64,expected_store_sha='f'*40,compute_sha='a'*40,env={},clock=lambda:None,key='',access={},source_check=lambda:None,capture=capture)
+        self.assertEqual(failure.exception.stage,'STORE_HEAD')
         store.materialize_ref.assert_not_called();capture.assert_not_called()
+
+class SafeDiagnosticTests(unittest.TestCase):
+    def test_no_secret_or_dynamic_class_name(self):
+        import json
+        class SECRET_TOKEN_123(Exception):pass
+        for error in [ValueError('secret url token=123'),TimeoutError('private nonce'),SECRET_TOKEN_123('secret payload')]:
+            result=M.failure_result(M.OneShotFailure('PRIVATE_READINESS',error))
+            text=json.dumps(result)
+            self.assertEqual(result['failure_stage'],'PRIVATE_READINESS')
+            self.assertFalse(result['automatic_retry_allowed'])
+            for secret in ['secret','nonce','payload','SECRET_TOKEN_123']:self.assertNotIn(secret,text)
+    def test_nested_stage_preserved(self):
+        def nested():M.step('SOURCE_GATE',lambda:(_ for _ in ()).throw(ValueError('private')))
+        with self.assertRaises(M.OneShotFailure) as result:M.step('STORE_ADAPTER',nested)
+        self.assertEqual(result.exception.stage,'SOURCE_GATE')
+    def test_stage_and_category_allowlist(self):
+        result=M.OneShotFailure('private secret',ValueError())
+        result.stage='private secret';result.category='private secret'
+        self.assertEqual(M.failure_result(result)['failure_stage'],'INITIALIZATION')
+        self.assertEqual(M.failure_result(result)['error_category'],'GUARDED_OPERATION')
 
 if __name__=='__main__':unittest.main()
