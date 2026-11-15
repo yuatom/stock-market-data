@@ -228,23 +228,29 @@ def check_private_readiness(api,store,authority,grant,*,now):
     return repository
 
 
-def fetch_delivery(api,updater,candidate,run_id,*,now,repository):
+def fetch_delivery(api,updater,candidate,run_id,*,now,repository,runner_expectation=None):
     run=api.request('GET','/repos/'+STORE+'/actions/runs/'+str(run_id))
     jobs=api.request('GET','/repos/'+STORE+'/actions/runs/'+str(run_id)+'/jobs?per_page=2')
     need(jobs.get('total_count')==1 and len(jobs.get('jobs',[]))==1)
+    if runner_expectation is not None:
+        B._closed(runner_expectation,('runner_id','runner_name','labels','expires'))
+        job=jobs['jobs'][0]
+        need(job['runner_id']==runner_expectation['runner_id'] and job['runner_name']==runner_expectation['runner_name'] and set(job['labels'])==set(runner_expectation['labels']) and B._stamp(now)<B._stamp(runner_expectation['expires']))
     log=api.job_log(jobs['jobs'][0]['id'])
     expectation=updater.delivery_expectation(candidate,run_id=run_id,for_read=True)
     return verify_daily_delivery(expectation,repository,run,jobs,log,now=now)
 
 
-def dispatch_verify_once(api,updater,candidate,*,repository,clock,sleep=time.sleep,monotonic=time.monotonic):
+def dispatch_verify_once(api,updater,candidate,*,repository,clock,sleep=time.sleep,monotonic=time.monotonic,runner_expectation=None):
     # Reserve BEFORE the POST. Expiry or an uncertain response never redispatches.
+    if runner_expectation is not None:need(clock()<B._stamp(runner_expectation['expires']))
     updater.reserve_verification(candidate)
     grant=updater.grant
     branch='basis-consumer-delivery/'+grant['workflow_source_sha']
     # Reservation round trips can consume the remaining slot. Authorize the
     # external POST now, and record its start rather than its delayed response.
     started=updater._fresh(updater._slot(candidate.slot_id));deadline=monotonic()+180
+    if runner_expectation is not None:need(clock()<B._stamp(runner_expectation['expires']))
     reply=api.request('POST','/repos/'+STORE+'/actions/workflows/'+str(grant['workflow_id'])+'/dispatches',
         {'ref':branch,'inputs':{'compute_sha':grant['compute_sha'],'receipt_commitment':candidate.receipt_commitment}})
     # Explicit GitHub REST 2026-03-10 response contract; never infer the run
@@ -262,7 +268,7 @@ def dispatch_verify_once(api,updater,candidate,*,repository,clock,sleep=time.sle
         need(run.get('id')==run_id and run.get('workflow_id')==grant['workflow_id'] and run.get('head_sha')==grant['workflow_source_sha'] and run.get('head_branch')==branch and run.get('event')=='workflow_dispatch' and run.get('run_attempt')==1)
         if run.get('status')=='completed':
             need(run.get('conclusion')=='success')
-            return fetch_delivery(api,updater,candidate,run_id,now=clock().isoformat(),repository=repository)
+            return fetch_delivery(api,updater,candidate,run_id,now=clock().isoformat(),repository=repository,**({'runner_expectation':runner_expectation} if runner_expectation else {}))
         sleep(5)
     raise HostedDailyError(STOP)
 

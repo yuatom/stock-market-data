@@ -9,6 +9,7 @@ from scripts.emit_basis_consumer_delivery import materialize_local_receipt_ref
 from scripts.daily_basis_delivery import DeliveryExpectation,_verify_private_delivery,WORKFLOW as PRIVATE_WORKFLOW
 COMPUTE='yuatom/stock-market-data';STORE='yuatom/stock-market-data-store'
 WORKFLOW='.github/workflows/basis-actions-readiness-probe.yml'
+CALLER_PROFILES={'isolated':(WORKFLOW,'probe'),'one_shot':('.github/workflows/one-shot-soxx-basis-gap.yml','soxx_gap')}
 OWNER=10399225;STORE_ID=1335101677;WORKFLOW_ID=415302427
 SOURCE='cb7c3302d131278f5564eb702ce29ba4ef8ee08d'
 BASIS='812eefd58ef3cc569af6fc53fb6c1c54364234f0f1fa21d5c806bc8e385c9433'
@@ -41,9 +42,10 @@ def check_run(run,run_id):
     expected=dict(id=run_id,workflow_id=WORKFLOW_ID,head_sha=SOURCE,path=PRIVATE_WORKFLOW,event='workflow_dispatch',run_attempt=1,head_branch='basis-consumer-delivery/'+SOURCE)
     need(all(run.get(k)==v for k,v in expected.items()))
     need(run['repository']['id']==run['head_repository']['id']==STORE_ID and run['actor']['id']==run['triggering_actor']['id']==OWNER)
-def probe(*,api,store,compute,commitment,runner_id,runner_name,expires,env,source_check,clock=lambda:datetime.now(timezone.utc),sleep=time.sleep,monotonic=time.monotonic):
+def probe(*,api,store,compute,commitment,runner_id,runner_name,expires,env,source_check,clock=lambda:datetime.now(timezone.utc),sleep=time.sleep,monotonic=time.monotonic,caller_profile='isolated'):
     stage='INPUT';run_id=None;detail='PIN_PARAMETERS'
     try:
+        need(caller_profile in CALLER_PROFILES);caller_workflow,caller_job=CALLER_PROFILES[caller_profile]
         B._hex(compute);B._hex(commitment,64)
         detail='TIME_WINDOW';until=B._stamp(expires);now=clock()
         need(now<until<=now+timedelta(minutes=10))
@@ -51,11 +53,11 @@ def probe(*,api,store,compute,commitment,runner_id,runner_name,expires,env,sourc
         need(type(runner_id) is int and runner_id>0 and type(runner_name) is str and re.fullmatch('[A-Za-z0-9_.-]{1,128}',runner_name))
         stage='SOURCE';source_check()
         stage='CALLER'
-        required=dict(GITHUB_ACTIONS='true',GITHUB_EVENT_NAME='workflow_dispatch',GITHUB_RUN_ATTEMPT='1',GITHUB_REPOSITORY=COMPUTE,GITHUB_REF='refs/heads/main',GITHUB_SHA=compute,GITHUB_ACTOR='yuatom',GITHUB_TRIGGERING_ACTOR='yuatom',GITHUB_JOB='probe',GITHUB_WORKFLOW_REF=COMPUTE+'/'+WORKFLOW+'@refs/heads/main')
+        required=dict(GITHUB_ACTIONS='true',GITHUB_EVENT_NAME='workflow_dispatch',GITHUB_RUN_ATTEMPT='1',GITHUB_REPOSITORY=COMPUTE,GITHUB_REF='refs/heads/main',GITHUB_SHA=compute,GITHUB_ACTOR='yuatom',GITHUB_TRIGGERING_ACTOR='yuatom',GITHUB_JOB=caller_job,GITHUB_WORKFLOW_REF=COMPUTE+'/'+caller_workflow+'@refs/heads/main')
         need(all(env.get(k)==v for k,v in required.items()) and re.fullmatch('[1-9][0-9]*',env.get('GITHUB_RUN_ID','')))
         repo=api.request('GET','/repos/'+COMPUTE);caller=api.request('GET','/repos/'+COMPUTE+'/actions/runs/'+env['GITHUB_RUN_ID'])
         need(repo['full_name']==COMPUTE and repo['owner']['id']==OWNER and caller['repository']['id']==caller['head_repository']['id']==repo['id'])
-        need(all(caller.get(k)==v for k,v in dict(id=int(env['GITHUB_RUN_ID']),head_sha=compute,path=WORKFLOW,event='workflow_dispatch',run_attempt=1,head_branch='main',status='in_progress').items()))
+        need(all(caller.get(k)==v for k,v in dict(id=int(env['GITHUB_RUN_ID']),head_sha=compute,path=caller_workflow,event='workflow_dispatch',run_attempt=1,head_branch='main',status='in_progress').items()))
         need(caller['actor']['id']==caller['triggering_actor']['id']==OWNER and api.request('GET','/user')['id']==OWNER)
         stage='RECEIPT';evidence=receipt_view(store,compute,commitment,clock());need(until<=B._stamp(evidence['valid_until']))
         stage='PRIVATE_TARGET';repository=api.request('GET','/repos/'+STORE)

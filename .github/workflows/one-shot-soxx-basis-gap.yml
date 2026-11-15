@@ -2,6 +2,22 @@ name: One-shot SOXX Basis Gap
 on:
   workflow_dispatch:
     inputs:
+      readiness_receipt_commitment:
+        type: string
+        required: false
+        default: ''
+      readiness_runner_id:
+        type: string
+        required: false
+        default: ''
+      readiness_runner_name:
+        type: string
+        required: false
+        default: ''
+      readiness_expires:
+        type: string
+        required: false
+        default: ''
       preflight_only:
         description: Read-only pre-claim diagnosis; no provider call or budget write
         type: boolean
@@ -73,7 +89,11 @@ jobs:
           STORE: ${{ inputs.expected_store_sha }}
           SCOPE: ${{ inputs.scope_commit }}
           DIGEST: ${{ inputs.scope_sha }}
+          READINESS_RECEIPT_COMMITMENT: ${{ inputs.readiness_receipt_commitment }}
+          READINESS_RUNNER_ID: ${{ inputs.readiness_runner_id }}
+          READINESS_RUNNER_NAME: ${{ inputs.readiness_runner_name }}
+          READINESS_EXPIRES: ${{ inputs.readiness_expires }}
           MARKET_DATA_BASIS_ACTIONS_TOKEN: ${{ secrets.MARKET_DATA_BASIS_ACTIONS_TOKEN }}
           MARKET_DATA_STORE_TOKEN: ${{ secrets.MARKET_DATA_STORE_TOKEN }}
           TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
-        run: python -B -m scripts.run_one_shot_soxx_basis_gap --store ../store --compute-sha "$COMPUTE" --expected-store-sha "$STORE" --scope-commit "$SCOPE" --scope-sha "$DIGEST" --preflight-only "$PREFLIGHT_ONLY"
+        run: python -B -m scripts.run_one_shot_soxx_basis_gap --store ../store --compute-sha "$COMPUTE" --expected-store-sha "$STORE" --scope-commit "$SCOPE" --scope-sha "$DIGEST" --preflight-only "$PREFLIGHT_ONLY" --readiness-receipt-commitment "$READINESS_RECEIPT_COMMITMENT" --readiness-runner-id "$READINESS_RUNNER_ID" --readiness-runner-name "$READINESS_RUNNER_NAME" --readiness-expires "$READINESS_EXPIRES"
