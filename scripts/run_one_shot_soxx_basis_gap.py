@@ -22,6 +22,33 @@ SCOPE_KEYS=('schema_version','kind','compute_sha','consumer_sha','workflow_sourc
     'runtime_workflow_id','readiness_run_id','valid_from','valid_until','actions_free_until','grant_ref','calendar_ref')
 
 
+STAGES=frozenset({'INITIALIZATION','SOURCE_GATE','PLATFORM_GATE','STORE_ADAPTER',
+    'STORE_LOCK','STORE_HEAD','AUTHORITY_FETCH','AUTHORITY_READ','SCOPE_CONTRACT',
+    'RUN_AUTHORITY','PRIVATE_READINESS','GRANT_BASELINE','BUDGET_WINDOW',
+    'CAPTURE_AND_CANDIDATE','PRIVATE_VERIFICATION','PROMOTION','CONSUMER_READ'})
+
+class OneShotFailure(RuntimeError):
+    def __init__(self,stage,error):
+        self.stage=stage if stage in STAGES else 'INITIALIZATION'
+        # Never serialize exception messages, arbitrary class names, URLs or values.
+        self.category=('TIMEOUT' if isinstance(error,TimeoutError) else
+                       'IO_OR_NETWORK' if isinstance(error,OSError) else
+                       'CONTRACT_OR_INPUT' if isinstance(error,(ValueError,KeyError,TypeError)) else
+                       'GUARDED_OPERATION')
+        super().__init__(STOP)
+
+def step(stage,fn,*args,**kwargs):
+    try:return fn(*args,**kwargs)
+    except OneShotFailure:raise
+    except Exception as exc:raise OneShotFailure(stage,exc) from None
+
+def failure_result(exc):
+    safe=exc if isinstance(exc,OneShotFailure) else OneShotFailure('INITIALIZATION',exc)
+    return dict(status=STOP,automatic_retry_allowed=False,
+                failure_stage=safe.stage if safe.stage in STAGES else 'INITIALIZATION',
+                error_category=safe.category if safe.category in {'TIMEOUT','IO_OR_NETWORK','CONTRACT_OR_INPUT','GUARDED_OPERATION'} else 'GUARDED_OPERATION')
+
+
 def need(value):
     if not value:raise ValueError(STOP)
 
@@ -62,25 +89,42 @@ def validate_scope(raw,expected_sha,grant_raw,calendar_raw,*,compute_sha,now):
 
 
 def run_once(*,store,api,scope_commit,scope_sha,expected_store_sha,compute_sha,env,clock,key,access,source_check,capture=None):
-    with store.lock():
-        source_check();need(store.head()==expected_store_sha)
-        ref=f'refs/heads/basis-daily-authority/{compute_sha}/{B._hex(scope_sha,64)}'
-        need(store.materialize_ref(ref)==B._hex(scope_commit))
-        raw=store.read(scope_commit,SCOPE_PATH);scope=B._parse(raw);loaded=[]
-        for key in ('grant_ref','calendar_ref'):
-            r=scope[key];need(store.g.text('merge-base',r['commit'],scope_commit)==r['commit']);loaded.append(store.read(r['commit'],r['path']))
-        scope,grant=validate_scope(raw,scope_sha,*loaded,compute_sha=compute_sha,now=clock())
-        repository=api.request('GET','/repos/'+COMPUTE);run=api.request('GET','/repos/'+COMPUTE+'/actions/runs/'+env['GITHUB_RUN_ID'])
-        validate_surface(env,run,repository,compute_sha)
-        need(run['workflow_id']==scope['runtime_workflow_id'] and repository['owner']['id']==scope['owner_id'])
-        private=check_private_readiness(api,store,scope,grant,now=clock().isoformat())
-        u=DailyUpdater(store,*loaded,GrantAuthority(B.sha(loaded[0]),compute_sha,scope['consumer_sha'],scope['workflow_source_sha'],B.sha(loaded[1])),clock=clock)
-        slot=grant['slots'][0];source_check();wait_for_daily_budget_window(u,slot,clock=clock)
-        candidate=u.run_slot(slot['slot_id'],env['GITHUB_RUN_ID']+'-1',capture=capture or provider_capture(key,access))
-        verified=dispatch_verify_once(api,u,candidate,repository=private,clock=clock)
-        source_check();u.promote(candidate,verified);view=u.read_current(verified,fields=B.PRICE_FIELDS)
-        need(view['record_count']==320 and view['last_trade_date']=='2026-11-13' and view['volume_status']=='BLOCKED_UNRESOLVED')
-        return dict(status='ONE_SHOT_SOXX_GAP_COMPLETE',requests_attempted=1,additional_credits=1,store_sha=store.head(),basis_id=candidate.selector['basis_id'],last_trade_date=view['last_trade_date'],volume_policy='BLOCKED_UNRESOLVED',verification_run_id=verified.run_id,receipt_commitment=candidate.receipt_commitment)
+    stage="STORE_LOCK"
+    try:
+        with store.lock():
+            stage="STORE_HEAD"
+            source_check();need(store.head()==expected_store_sha)
+            stage="AUTHORITY_FETCH"
+            ref=f'refs/heads/basis-daily-authority/{compute_sha}/{B._hex(scope_sha,64)}'
+            need(store.materialize_ref(ref)==B._hex(scope_commit))
+            stage="AUTHORITY_READ"
+            raw=store.read(scope_commit,SCOPE_PATH);scope=B._parse(raw);loaded=[]
+            for key in ('grant_ref','calendar_ref'):
+                r=scope[key];need(store.g.text('merge-base',r['commit'],scope_commit)==r['commit']);loaded.append(store.read(r['commit'],r['path']))
+            stage="SCOPE_CONTRACT"
+            scope,grant=validate_scope(raw,scope_sha,*loaded,compute_sha=compute_sha,now=clock())
+            stage="RUN_AUTHORITY"
+            repository=api.request('GET','/repos/'+COMPUTE);run=api.request('GET','/repos/'+COMPUTE+'/actions/runs/'+env['GITHUB_RUN_ID'])
+            validate_surface(env,run,repository,compute_sha)
+            need(run['workflow_id']==scope['runtime_workflow_id'] and repository['owner']['id']==scope['owner_id'])
+            stage="PRIVATE_READINESS"
+            private=check_private_readiness(api,store,scope,grant,now=clock().isoformat())
+            stage="GRANT_BASELINE"
+            u=DailyUpdater(store,*loaded,GrantAuthority(B.sha(loaded[0]),compute_sha,scope['consumer_sha'],scope['workflow_source_sha'],B.sha(loaded[1])),clock=clock)
+            stage="BUDGET_WINDOW"
+            slot=grant['slots'][0];source_check();wait_for_daily_budget_window(u,slot,clock=clock)
+            stage="CAPTURE_AND_CANDIDATE"
+            candidate=u.run_slot(slot['slot_id'],env['GITHUB_RUN_ID']+'-1',capture=capture or provider_capture(key,access))
+            stage="PRIVATE_VERIFICATION"
+            verified=dispatch_verify_once(api,u,candidate,repository=private,clock=clock)
+            stage="PROMOTION"
+            source_check();u.promote(candidate,verified)
+            stage="CONSUMER_READ"
+            view=u.read_current(verified,fields=B.PRICE_FIELDS)
+            need(view['record_count']==320 and view['last_trade_date']=='2026-11-13' and view['volume_status']=='BLOCKED_UNRESOLVED')
+            return dict(status='ONE_SHOT_SOXX_GAP_COMPLETE',requests_attempted=1,additional_credits=1,store_sha=store.head(),basis_id=candidate.selector['basis_id'],last_trade_date=view['last_trade_date'],volume_policy='BLOCKED_UNRESOLVED',verification_run_id=verified.run_id,receipt_commitment=candidate.receipt_commitment)
+    except OneShotFailure:raise
+    except Exception as exc:raise OneShotFailure(stage,exc) from None
 
 
 def main():
@@ -92,15 +136,15 @@ def main():
         compute=Path(__file__).resolve().parents[1];token=os.environ.get('MARKET_DATA_STORE_TOKEN','');key=os.environ.get('TWELVE_DATA_API_KEY','')
         with _quiet():
             def source_check():
-                with _environment():_source(compute,args.compute_sha)
-            api=GitHubAPI(token)
+                with _environment():step('SOURCE_GATE',_source,compute,args.compute_sha)
+            api=step('INITIALIZATION',GitHubAPI,token)
             def platform_guard():
                 repo=api.request('GET','/repos/'+COMPUTE);run=api.request('GET','/repos/'+COMPUTE+'/actions/runs/'+os.environ['GITHUB_RUN_ID'])
                 validate_surface(dict(os.environ),run,repo,args.compute_sha)
-            source_check();platform_guard()
-            store=RemoteGitStore(Path(args.store),token,source_recheck=source_check,platform_guard=platform_guard)
+            source_check();step('PLATFORM_GATE',platform_guard)
+            store=step('STORE_ADAPTER',RemoteGitStore,Path(args.store),token,source_recheck=source_check,platform_guard=platform_guard)
             result=run_once(store=store,api=api,scope_commit=args.scope_commit,scope_sha=args.scope_sha,expected_store_sha=args.expected_store_sha,compute_sha=args.compute_sha,env=dict(os.environ),clock=lambda:datetime.now(timezone.utc),key=key,access=yaml.safe_load((compute/'config/market-data-collector-access.yaml').read_text()),source_check=source_check)
         print(json.dumps(result));return 0
-    except Exception:print(json.dumps(dict(status=STOP,automatic_retry_allowed=False)));return 2
+    except Exception as exc:print(json.dumps(failure_result(exc)));return 2
 
 if __name__=='__main__':raise SystemExit(main())
