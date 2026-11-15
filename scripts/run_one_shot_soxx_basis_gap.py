@@ -10,7 +10,7 @@ from scripts import provider_basis_snapshot as B
 from scripts.daily_basis_updates import DailyUpdater,GrantAuthority,provider_capture
 from scripts.run_daily_basis_route import (GitHubAPI,check_private_readiness,dispatch_verify_once,
     wait_for_daily_budget_window,_quiet,_source,_environment)
-from scripts.daily_basis_remote import RemoteGitStore
+from scripts.daily_basis_remote import RemoteGitStore,RemoteStoreError,SAFE_PHASES
 
 COMPUTE='yuatom/stock-market-data';STORE='yuatom/stock-market-data-store'
 WORKFLOW='.github/workflows/one-shot-soxx-basis-gap.yml'
@@ -35,6 +35,7 @@ class OneShotFailure(RuntimeError):
                        'IO_OR_NETWORK' if isinstance(error,OSError) else
                        'CONTRACT_OR_INPUT' if isinstance(error,(ValueError,KeyError,TypeError)) else
                        'GUARDED_OPERATION')
+        self.detail=error.safe_phase if isinstance(error,RemoteStoreError) and error.safe_phase in SAFE_PHASES else 'UNSPECIFIED'
         super().__init__(STOP)
 
 def step(stage,fn,*args,**kwargs):
@@ -46,6 +47,7 @@ def failure_result(exc):
     safe=exc if isinstance(exc,OneShotFailure) else OneShotFailure('INITIALIZATION',exc)
     return dict(status=STOP,automatic_retry_allowed=False,
                 failure_stage=safe.stage if safe.stage in STAGES else 'INITIALIZATION',
+                failure_detail=safe.detail if safe.detail in SAFE_PHASES else 'UNSPECIFIED',
                 error_category=safe.category if safe.category in {'TIMEOUT','IO_OR_NETWORK','CONTRACT_OR_INPUT','GUARDED_OPERATION'} else 'GUARDED_OPERATION')
 
 

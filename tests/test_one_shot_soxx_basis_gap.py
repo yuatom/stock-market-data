@@ -88,6 +88,19 @@ class SafeDiagnosticTests(unittest.TestCase):
             self.assertEqual(result['failure_stage'],'PRIVATE_READINESS')
             self.assertFalse(result['automatic_retry_allowed'])
             for secret in ['secret','nonce','payload','SECRET_TOKEN_123']:self.assertNotIn(secret,text)
+    def test_remote_safe_detail_survives_public_failure_result(self):
+        import json
+        from scripts.daily_basis_remote import RemoteStoreError
+        error=RemoteStoreError('secret url',safe_phase='PRIVATE_METADATA')
+        result=M.failure_result(M.OneShotFailure('STORE_ADAPTER',error))
+        self.assertEqual(result['failure_stage'],'STORE_ADAPTER')
+        self.assertEqual(result['failure_detail'],'PRIVATE_METADATA')
+        self.assertNotIn('secret',json.dumps(result))
+    def test_remote_detail_remains_allowlisted(self):
+        from scripts.daily_basis_remote import RemoteStoreError
+        error=RemoteStoreError('secret',safe_phase='PRIVATE_METADATA');error.safe_phase='secret value'
+        result=M.failure_result(M.OneShotFailure('STORE_ADAPTER',error))
+        self.assertEqual(result['failure_detail'],'UNSPECIFIED')
     def test_nested_stage_preserved(self):
         def nested():M.step('SOURCE_GATE',lambda:(_ for _ in ()).throw(ValueError('private')))
         with self.assertRaises(M.OneShotFailure) as result:M.step('STORE_ADAPTER',nested)

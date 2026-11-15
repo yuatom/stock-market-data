@@ -554,3 +554,19 @@ def test_verifier_source_namespace_is_read_only(setup):
         with pytest.raises(R.RemoteStoreError):store.cas(ref,child,head)
     assert git(remote,'rev-parse',ref)==head
     assert not tr.pushes
+
+@pytest.mark.parametrize('phase,detail', [('source','SOURCE_RECHECK'),('platform','PLATFORM_RECHECK'),('metadata','PRIVATE_METADATA'),('identity','PRIVATE_IDENTITY'),('local','LOCAL_STORE')])
+def test_safe_failure_phase_survives_nested_adapter(setup,phase,detail):
+    R,store,repo,remote,tr,state,create=setup
+    before=local_head(remote)
+    if phase in ('source','platform'):state[phase]=False
+    elif phase=='metadata':
+        def broken():raise TimeoutError(TOKEN+' private-url')
+        tr.metadata=broken
+    elif phase=='identity':tr.record['owner']['login']='private-wrong-owner'
+    else:git(repo,'config','local.unsafe','private-value')
+    with pytest.raises(R.RemoteStoreError) as failure:create()
+    assert getattr(failure.value,'safe_phase',None)==detail
+    assert str(failure.value)==R.STOP
+    assert TOKEN not in ''.join(traceback.format_exception(failure.value))
+    assert local_head(remote)==before and tr.pushes==[]
