@@ -33,6 +33,8 @@ on:
         default: ''
         type: string
     secrets:
+      MARKET_DATA_BASIS_ACTIONS_TOKEN:
+        required: false
       MARKET_DATA_STORE_TOKEN:
         required: true
       TWELVE_DATA_API_KEY:
@@ -415,6 +417,7 @@ jobs:
         working-directory: compute
         env:
           PYTHONDONTWRITEBYTECODE: '1'
+          MARKET_DATA_BASIS_ACTIONS_TOKEN: ${{ secrets.MARKET_DATA_BASIS_ACTIONS_TOKEN }}
           MARKET_DATA_STORE_TOKEN: ${{ secrets.MARKET_DATA_STORE_TOKEN }}
           TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
           DAILY_BASIS_GRANT_COMMITMENT: ${{ vars.DAILY_BASIS_GRANT_COMMITMENT }}
