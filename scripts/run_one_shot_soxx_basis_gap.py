@@ -25,7 +25,7 @@ SCOPE_KEYS=('schema_version','kind','compute_sha','consumer_sha','workflow_sourc
 STAGES=frozenset({'INITIALIZATION','SOURCE_GATE','PLATFORM_GATE','STORE_ADAPTER',
     'STORE_LOCK','STORE_HEAD','AUTHORITY_FETCH','AUTHORITY_READ','SCOPE_CONTRACT',
     'RUN_AUTHORITY','PRIVATE_READINESS','GRANT_BASELINE','BUDGET_WINDOW',
-    'CAPTURE_AND_CANDIDATE','PRIVATE_VERIFICATION','PROMOTION','CONSUMER_READ'})
+    'CAPTURE_AND_CANDIDATE','PRIVATE_VERIFICATION','PROMOTION','CONSUMER_READ','PRECLAIM_CHECK'})
 
 class OneShotFailure(RuntimeError):
     def __init__(self,stage,error):
@@ -90,9 +90,11 @@ def validate_scope(raw,expected_sha,grant_raw,calendar_raw,*,compute_sha,now):
     return scope,grant
 
 
-def run_once(*,store,api,scope_commit,scope_sha,expected_store_sha,compute_sha,env,clock,key,access,source_check,capture=None):
-    stage="STORE_LOCK"
+def run_once(*,store,api,scope_commit,scope_sha,expected_store_sha,compute_sha,env,clock,key,access,source_check,capture=None,preflight_only=False):
+    stage="INITIALIZATION"
     try:
+        need(type(preflight_only) is bool)
+        stage="STORE_LOCK"
         with store.lock():
             stage="STORE_HEAD"
             source_check();need(store.head()==expected_store_sha)
@@ -115,6 +117,13 @@ def run_once(*,store,api,scope_commit,scope_sha,expected_store_sha,compute_sha,e
             u=DailyUpdater(store,*loaded,GrantAuthority(B.sha(loaded[0]),compute_sha,scope['consumer_sha'],scope['workflow_source_sha'],B.sha(loaded[1])),clock=clock)
             stage="BUDGET_WINDOW"
             slot=grant['slots'][0];source_check();wait_for_daily_budget_window(u,slot,clock=clock)
+            if preflight_only:
+                stage="PRECLAIM_CHECK"
+                u.preflight_slot(slot['slot_id'],env['GITHUB_RUN_ID']+'-1')
+                source_check();need(store.head()==expected_store_sha)
+                return dict(status='ONE_SHOT_SOXX_PREFLIGHT_COMPLETE',provider_requests=0,
+                            credits_reserved=0,production_data_writes=0,
+                            execution_performed=False,automatic_retry_allowed=False)
             stage="CAPTURE_AND_CANDIDATE"
             candidate=u.run_slot(slot['slot_id'],env['GITHUB_RUN_ID']+'-1',capture=capture or provider_capture(key,access))
             stage="PRIVATE_VERIFICATION"
@@ -132,6 +141,7 @@ def run_once(*,store,api,scope_commit,scope_sha,expected_store_sha,compute_sha,e
 def main():
     p=argparse.ArgumentParser()
     for name in ('store','compute-sha','expected-store-sha','scope-commit','scope-sha'):p.add_argument('--'+name,required=True)
+    p.add_argument('--preflight-only',choices=('true','false'),required=True)
     args=p.parse_args();os.umask(0o077)
     try:
         import yaml
@@ -145,7 +155,7 @@ def main():
                 validate_surface(dict(os.environ),run,repo,args.compute_sha)
             source_check();step('PLATFORM_GATE',platform_guard)
             store=step('STORE_ADAPTER',RemoteGitStore,Path(args.store),token,source_recheck=source_check,platform_guard=platform_guard)
-            result=run_once(store=store,api=api,scope_commit=args.scope_commit,scope_sha=args.scope_sha,expected_store_sha=args.expected_store_sha,compute_sha=args.compute_sha,env=dict(os.environ),clock=lambda:datetime.now(timezone.utc),key=key,access=yaml.safe_load((compute/'config/market-data-collector-access.yaml').read_text()),source_check=source_check)
+            result=run_once(store=store,api=api,scope_commit=args.scope_commit,scope_sha=args.scope_sha,expected_store_sha=args.expected_store_sha,compute_sha=args.compute_sha,env=dict(os.environ),clock=lambda:datetime.now(timezone.utc),key=key,access=yaml.safe_load((compute/'config/market-data-collector-access.yaml').read_text()),source_check=source_check,preflight_only=args.preflight_only=='true')
         print(json.dumps(result));return 0
     except Exception as exc:print(json.dumps(failure_result(exc)));return 2
 

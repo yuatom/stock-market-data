@@ -223,13 +223,19 @@ class DailyUpdater:
         return newhead,minute,path,B.blob_sha(B.encode(new))
 
     @guarded
-    def run_slot(self,slot_id,request_id,*,capture):
+    def preflight_slot(self,slot_id,request_id):
+        """Same pre-claim checks as execution; no debit, provider or publication."""
         slot=self._slot(slot_id);self._fresh(slot)
         B._need(type(request_id) is str and re.fullmatch('[1-9][0-9]*-1',request_id))
         head=self.store.head();prefix=self._prefix(slot)
         B._need(not self.store.exists(head,prefix+'/claim.json') and self.store.ref(self._candidate_ref(slot)) is None)
         B._need(self.store.ref(self._attempt_ref(slot)) is None)
         previous,old=self._previous(slot,head)
+        return slot,head,prefix,previous,old
+
+    @guarded
+    def run_slot(self,slot_id,request_id,*,capture):
+        slot,head,prefix,previous,old=self.preflight_slot(slot_id,request_id)
         head,minute,budget_path,budget_blob=self._debit(slot,request_id,head,previous)
         evidence_head=head
         evidence_ref_expected='0'*40

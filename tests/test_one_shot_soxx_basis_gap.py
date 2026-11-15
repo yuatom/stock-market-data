@@ -67,6 +67,20 @@ class OneShotScope(unittest.TestCase):
         with patch.object(M,'check_private_readiness',side_effect=ValueError('not ready')),patch.object(M,'DailyUpdater') as updater,self.assertRaises(M.OneShotFailure) as failure:M.run_once(**args)
         self.assertEqual(failure.exception.stage,'PRIVATE_READINESS')
         updater.assert_not_called();args['capture'].assert_not_called()
+    def test_preflight_never_debits_captures_or_verifies(self):
+        args=self.hosted_mocks();updater=Mock()
+        with patch.object(M,'check_private_readiness',return_value={}),patch.object(M,'DailyUpdater',return_value=updater),patch.object(M,'wait_for_daily_budget_window'),patch.object(M,'dispatch_verify_once') as dispatch,patch.object(M,'provider_capture') as provider:
+            result=M.run_once(**args,preflight_only=True)
+        self.assertEqual(result['status'],'ONE_SHOT_SOXX_PREFLIGHT_COMPLETE')
+        self.assertEqual(result['provider_requests'],0)
+        updater.preflight_slot.assert_called_once();updater.run_slot.assert_not_called()
+        updater.promote.assert_not_called();dispatch.assert_not_called();provider.assert_not_called();args['capture'].assert_not_called()
+    def test_failed_preclaim_diagnosis_never_executes(self):
+        args=self.hosted_mocks();updater=Mock();updater.preflight_slot.side_effect=ValueError('synthetic conflict')
+        with patch.object(M,'check_private_readiness',return_value={}),patch.object(M,'DailyUpdater',return_value=updater),patch.object(M,'wait_for_daily_budget_window'),patch.object(M,'dispatch_verify_once') as dispatch,self.assertRaises(M.OneShotFailure) as failure:
+            M.run_once(**args,preflight_only=True)
+        self.assertEqual(failure.exception.stage,'PRECLAIM_CHECK')
+        updater.run_slot.assert_not_called();dispatch.assert_not_called()
     def test_unknown_verification_does_not_promote_or_repeat(self):
         args=self.hosted_mocks();updater=Mock()
         with patch.object(M,'check_private_readiness',return_value={}),patch.object(M,'DailyUpdater',return_value=updater),patch.object(M,'wait_for_daily_budget_window'),patch.object(M,'dispatch_verify_once',side_effect=TimeoutError()) as dispatch,self.assertRaises(M.OneShotFailure) as failure:M.run_once(**args)

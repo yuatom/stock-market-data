@@ -271,3 +271,14 @@ def test_verification_intent_must_be_exact_child_of_candidate(tmp_path):
         root=git(repo,'commit-tree',tree,'-m','forged unrelated root')
         git(repo,'update-ref',ref,root,reservation)
         with pytest.raises(D.DailyBasisError):u.delivery_expectation(candidate,run_id=555)
+
+
+def test_preflight_shared_with_execution_is_zero_publication(tmp_path):
+    from unittest.mock import patch
+    D,repo,g,c,paths,store,current,u=setup(tmp_path)
+    head=store.head();refs=git(repo,'show-ref')
+    with store.lock(),patch.object(store,'publish',side_effect=AssertionError('no writes')),patch.object(store,'commit',side_effect=AssertionError('no objects')),patch.object(u,'_debit',side_effect=AssertionError('no debit')):
+        slot,before,prefix,previous,old=u.preflight_slot(g['slots'][0]['slot_id'],'999-1')
+        assert before==head and old['last_trade_date']=='2026-11-06'
+    assert store.head()==head and git(repo,'show-ref')==refs
+    assert not store.exists(head,prefix+'/claim.json')

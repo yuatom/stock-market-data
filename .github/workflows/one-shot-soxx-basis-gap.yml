@@ -2,6 +2,11 @@ name: One-shot SOXX Basis Gap
 on:
   workflow_dispatch:
     inputs:
+      preflight_only:
+        description: Read-only pre-claim diagnosis; no provider call or budget write
+        type: boolean
+        required: true
+        default: true
       expected_compute_sha:
         required: true
         type: string
@@ -27,6 +32,7 @@ jobs:
     steps:
       - name: Require exact first manual invocation
         env:
+          PREFLIGHT_ONLY: ${{ inputs.preflight_only }}
           COMPUTE: ${{ inputs.expected_compute_sha }}
           STORE: ${{ inputs.expected_store_sha }}
           SCOPE: ${{ inputs.scope_commit }}
@@ -62,10 +68,11 @@ jobs:
       - name: Execute one reviewed finite SOXX slot
         working-directory: compute
         env:
+          PREFLIGHT_ONLY: ${{ inputs.preflight_only }}
           COMPUTE: ${{ inputs.expected_compute_sha }}
           STORE: ${{ inputs.expected_store_sha }}
           SCOPE: ${{ inputs.scope_commit }}
           DIGEST: ${{ inputs.scope_sha }}
           MARKET_DATA_STORE_TOKEN: ${{ secrets.MARKET_DATA_STORE_TOKEN }}
           TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
-        run: python -B -m scripts.run_one_shot_soxx_basis_gap --store ../store --compute-sha "$COMPUTE" --expected-store-sha "$STORE" --scope-commit "$SCOPE" --scope-sha "$DIGEST"
+        run: python -B -m scripts.run_one_shot_soxx_basis_gap --store ../store --compute-sha "$COMPUTE" --expected-store-sha "$STORE" --scope-commit "$SCOPE" --scope-sha "$DIGEST" --preflight-only "$PREFLIGHT_ONLY"
