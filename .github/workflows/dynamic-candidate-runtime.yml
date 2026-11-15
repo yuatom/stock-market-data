@@ -19,6 +19,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   # Dynamic candidate writes and core stage collector writes both mutate the same
@@ -37,14 +38,14 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.control_ref }}
-          fetch-depth: 1
+          fetch-depth: 0
           path: control
 
       - name: Checkout current public compute contract
         uses: actions/checkout@v4
         with:
           ref: main
-          fetch-depth: 1
+          fetch-depth: 0
           path: compute
 
       - name: Checkout private Market Data Store
@@ -142,69 +143,18 @@ jobs:
               fh.write(f'contract_sha={compute_sha}\n')
           print(json.dumps({'request_id':request.get('request_id'),'stage':stage,'request_purpose':purpose,'candidate_count':len(symbols),'contract_sha':compute_sha}, sort_keys=True))
 
-      - name: Collect qualified dynamic facts
+      - name: Collect and durably close guarded dynamic facts
         id: collect
         working-directory: compute
         env:
           TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
+          MARKET_DATA_STORE_TOKEN: ${{ secrets.MARKET_DATA_STORE_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          CONTROL_REF: ${{ inputs.control_ref }}
         shell: bash
         run: |
           set -euo pipefail
-          result_file="$(mktemp)"
-          python scripts/collect_dynamic_candidates.py \
-            --request ../control/requests/dynamic-candidate-request.json \
-            --store-root ../store/data/market-data \
-            --store-config config/market-data-store.yaml \
-            --access-config config/market-data-collector-access.yaml \
-            --dynamic-config config/dynamic-candidate-collection.yaml \
-            --expected-contract-sha '${{ steps.request.outputs.contract_sha }}' | tee "$result_file"
-          manifest_path="$(python -c 'import json,sys; from pathlib import Path; lines=[line for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines() if line.strip()]; value=json.loads(lines[-1]); manifest=value.get("publication_manifest_path"); isinstance(manifest,str) and manifest or (_ for _ in ()).throw(SystemExit("dynamic collector did not emit publication_manifest_path")); print(manifest)' "$result_file")"
-          echo "publication_manifest_path=$manifest_path" >> "$GITHUB_OUTPUT"
-          stopped="$(python -c 'import json,sys; from pathlib import Path; value=json.loads([x for x in Path(sys.argv[1]).read_text().splitlines() if x.strip()][-1]); print("true" if value.get("status")=="STOPPED" else "false")' "$result_file")"
-          echo "business_stopped=$stopped" >> "$GITHUB_OUTPUT"
-
-      - name: Rebuild private Store inventory
-        working-directory: compute
-        run: >-
-          python scripts/build_market_data_inventory.py
-          --store-root ../store/data/market-data
-          --output ../store/data/market-data/collector-state/market-data-inventory.json
-          >/dev/null
-
-      - name: Persist private Store only
-        working-directory: store
-        shell: bash
-        run: |
-          set -euo pipefail
-          git add -- data/market-data
-          if git diff --cached --quiet; then
-            echo '{"status":"no_store_change","changed_paths":0}'
-            exit 0
-          fi
-          changed_count="$(git diff --cached --name-only -- data/market-data | wc -l | tr -d ' ')"
-          git config user.name 'stock-market-data-bot'
-          git config user.email 'stock-market-data-bot@users.noreply.github.com'
-          git commit -m 'data: collect dynamic research objects'
-          # A failed/unknown push is not permission to send another write.
-          git pull --rebase origin main
-          git push origin HEAD:main
-          echo "{\"status\":\"store_persisted\",\"changed_paths\":$changed_count,\"store_commit_sha\":\"$(git rev-parse HEAD)\"}"
-
-
-      - name: Verify durable Store publication
-        working-directory: store
-        shell: bash
-        run: |
-          set -euo pipefail
-          python ../compute/scripts/verify_store_publication.py \
-            --store-root . \
-            --expected-commit "$(git rev-parse HEAD)" \
-            --writer-status dynamic_candidate_persisted \
-            --required-manifest "data/market-data/${{ steps.collect.outputs.publication_manifest_path }}"
-
-      - name: Report stopped business outcome only after durable retention
-        if: steps.collect.outputs.business_stopped == 'true'
-        shell: bash
-        run: |
-          echo '{"status":"STOPPED","retention":"durability_verified","automatic_retry_allowed":false}'
-          exit 2
+          python -B scripts/run_dynamic_guarded.py \
+            --control ../control --control-ref "$CONTROL_REF" --store ../store
+          # No outer git add/pull/rebase/push or fallback. The CLI closes inventory
+          # and verifies the final manifest; unknown outcomes terminate here.

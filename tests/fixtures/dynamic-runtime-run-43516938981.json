@@ -1,0 +1,43 @@
+{
+  "source_run_id": 43516938981,
+  "source_file_sha256": "311df739ab5a96c83aa43b7890083c8b9906188d705d5e000f60319bf7ee51ee",
+  "note": "Selected real public API fields; original completed status retained. No credentials.",
+  "run": {
+    "id": 43516938981,
+    "status": "completed",
+    "run_attempt": 1,
+    "event": "push",
+    "head_sha": "c95cd262de02520330bd2cc43a2efbf0f3f9a781",
+    "head_branch": "discovery-requests",
+    "workflow_id": 335202210,
+    "path": ".github/workflows/market-data-collector.yml",
+    "referenced_workflows": [
+      {
+        "path": "yuatom/stock-market-data/.github/workflows/market-data-collector-runtime.yml@main",
+        "sha": "0d887d93f4ff89b3bf2ea2eb87dda69c6a217012",
+        "ref": "refs/heads/main"
+      },
+      {
+        "path": "yuatom/stock-market-data/.github/workflows/dynamic-candidate-runtime.yml@main",
+        "sha": "0d887d93f4ff89b3bf2ea2eb87dda69c6a217012",
+        "ref": "refs/heads/main"
+      }
+    ],
+    "actor": {
+      "id": 10399225,
+      "login": "yuatom"
+    },
+    "triggering_actor": {
+      "id": 10399225,
+      "login": "yuatom"
+    },
+    "repository": {
+      "id": 1335059162,
+      "full_name": "yuatom/stock-market-data"
+    },
+    "head_repository": {
+      "id": 1335059162,
+      "full_name": "yuatom/stock-market-data"
+    }
+  }
+}

@@ -165,7 +165,8 @@ Historical routes must recheck this separately immediately before provider I/O.
 class StorePublisher:
     """Exact fast-forward budget/diagnostic writer under the collector's job lock."""
     def __init__(self, repo: Path, expected: str, day: str, request_id: str,
-                 *, verify: Callable[..., dict] = verify_durability):
+                 *, verify: Callable[..., dict] = verify_durability,
+                 report_namespace: str = 'daily-baseline-admission'):
         self.repo = repo.resolve()
         if not re.fullmatch(r'[0-9a-f]{40}', expected):
             raise AdmissionError('object_drift')
@@ -176,7 +177,9 @@ class StorePublisher:
         self.verify = verify
         prefix = f'data/market-data/collector-state/{day[:7]}/{day}'
         self.budget_relative = f'{prefix}-twelve-data-budget.json'
-        self.report_relative = f'{prefix}-daily-baseline-admission-{request_id}.json'
+        if report_namespace not in ('daily-baseline-admission','dynamic-daily-attempt'):
+            raise AdmissionError('invalid_target')
+        self.report_relative = f'{prefix}-{report_namespace}-{request_id}.json'
         self.allowed = {self.budget_relative, self.report_relative}
         if git(self.repo, 'rev-parse', 'HEAD') != expected or self.remote_head() != expected:
             raise AdmissionError('object_drift')

@@ -145,7 +145,7 @@ def _read_capture_chunked(response: Any, maximum_bytes: int) -> bytes:
             incomplete()
 
 
-def _http_raw(url: str, *, timeout: int, user_agent: str, maximum_bytes: int) -> bytes:
+def _http_raw(url: str, *, timeout: int, user_agent: str, maximum_bytes: int, before_request=None) -> bytes:
     """Bounded capture transport; never follow a redirect carrying credentials.
 
     Existing JSON transport is unchanged. Caller owns authorization, budget,
@@ -158,6 +158,7 @@ def _http_raw(url: str, *, timeout: int, user_agent: str, maximum_bytes: int) ->
         raise RuntimeError("invalid raw transport bounds")
     request = urllib.request.Request(url, headers={"User-Agent": user_agent, "Accept": "application/json"})
     opener = urllib.request.build_opener(_NoCaptureRedirect())
+    if before_request is not None:before_request()
     with opener.open(request, timeout=timeout) as response:
         if response.status != 200:
             raise RuntimeError("raw transport HTTP status rejected")

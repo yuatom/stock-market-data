@@ -11,12 +11,13 @@ import raw_response_evidence as evidence
 FIELDS=('open','high','low','close','volume')
 
 
-def fetch_raw(symbol,api_key,access,*,outputsize):
+def fetch_raw(symbol,api_key,access,*,outputsize,before_request=None):
     spec=access['twelve_data_basic']
     evidence._require(spec['interval_daily']=='1day' and type(outputsize) is int and 1<=outputsize<=5000,'invalid dynamic daily request')
     params=urllib.parse.urlencode(dict(symbol=symbol,interval='1day',outputsize=outputsize,apikey=api_key,format='JSON'))
+    guard={} if before_request is None else {'before_request':before_request}
     return collectors._http_raw(f"{spec['base_url']}{spec['time_series_path']}?{params}",
-        timeout=int(access['http']['timeout_seconds']),user_agent=str(access['http']['user_agent']),maximum_bytes=evidence.MAX_RAW_BYTES)
+        timeout=int(access['http']['timeout_seconds']),user_agent=str(access['http']['user_agent']),maximum_bytes=evidence.MAX_RAW_BYTES,**guard)
 
 
 def parse(raw,*,symbol,outputsize):
