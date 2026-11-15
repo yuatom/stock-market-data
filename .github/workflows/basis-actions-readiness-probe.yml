@@ -64,10 +64,10 @@ jobs:
           MARKET_DATA_BASIS_ACTIONS_TOKEN: ${{ secrets.MARKET_DATA_BASIS_ACTIONS_TOKEN || secrets.MARKET_DATA_STORE_TOKEN }}
           COMPUTE: ${{ inputs.compute_sha }}
           RECEIPT: ${{ inputs.receipt_commitment }}
-          RUNNER_ID: ${{ inputs.expected_runner_id }}
-          RUNNER_NAME: ${{ inputs.expected_runner_name }}
+          EXPECTED_RUNNER_ID: ${{ inputs.expected_runner_id }}
+          EXPECTED_RUNNER_NAME: ${{ inputs.expected_runner_name }}
           EXPIRES: ${{ inputs.expires }}
         run: >-
           python -B -m scripts.run_basis_actions_readiness_probe
           --store ../store --compute-sha "$COMPUTE" --receipt-commitment "$RECEIPT"
-          --expected-runner-id "$RUNNER_ID" --expected-runner-name "$RUNNER_NAME" --expires "$EXPIRES"
+          --expected-runner-id "$EXPECTED_RUNNER_ID" --expected-runner-name "$EXPECTED_RUNNER_NAME" --expires "$EXPIRES"

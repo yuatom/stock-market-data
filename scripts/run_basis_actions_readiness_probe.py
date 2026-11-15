@@ -14,10 +14,12 @@ SOURCE='cb7c3302d131278f5564eb702ce29ba4ef8ee08d'
 BASIS='812eefd58ef3cc569af6fc53fb6c1c54364234f0f1fa21d5c806bc8e385c9433'
 LABELS={'self-hosted','macOS','ARM64','soxx-private-once-20261114'}
 STAGES={'INPUT','SOURCE','CALLER','RECEIPT','PRIVATE_TARGET','DISPATCH','POLL','DELIVERY'}
+INPUT_DETAILS={'UNSPECIFIED','PIN_PARAMETERS','TIME_WINDOW','RUNNER_PARAMETERS','CREDENTIAL_SELECTION'}
 STOP='BASIS_ACTIONS_READINESS_STOPPED_NO_RETRY'
 class ProbeFailure(RuntimeError):
-    def __init__(self,stage,error,run_id=None):
+    def __init__(self,stage,error,run_id=None,detail='UNSPECIFIED'):
         self.stage=stage if stage in STAGES else 'INPUT'
+        self.detail=detail if detail in INPUT_DETAILS else 'UNSPECIFIED'
         self.http_status=error.code if isinstance(error,urllib.error.HTTPError) and type(error.code) is int and 100<=error.code<=599 else None
         self.run_id=run_id if type(run_id) is int and run_id>0 else None
         super().__init__(STOP)
@@ -40,10 +42,12 @@ def check_run(run,run_id):
     need(all(run.get(k)==v for k,v in expected.items()))
     need(run['repository']['id']==run['head_repository']['id']==STORE_ID and run['actor']['id']==run['triggering_actor']['id']==OWNER)
 def probe(*,api,store,compute,commitment,runner_id,runner_name,expires,env,source_check,clock=lambda:datetime.now(timezone.utc),sleep=time.sleep,monotonic=time.monotonic):
-    stage='INPUT';run_id=None
+    stage='INPUT';run_id=None;detail='PIN_PARAMETERS'
     try:
-        B._hex(compute);B._hex(commitment,64);until=B._stamp(expires);now=clock()
+        B._hex(compute);B._hex(commitment,64)
+        detail='TIME_WINDOW';until=B._stamp(expires);now=clock()
         need(now<until<=now+timedelta(minutes=10))
+        detail='RUNNER_PARAMETERS'
         need(type(runner_id) is int and runner_id>0 and type(runner_name) is str and re.fullmatch('[A-Za-z0-9_.-]{1,128}',runner_name))
         stage='SOURCE';source_check()
         stage='CALLER'
@@ -85,7 +89,7 @@ def probe(*,api,store,compute,commitment,runner_id,runner_name,expires,env,sourc
         value=_verify_private_delivery(DeliveryExpectation(STORE_ID,OWNER,WORKFLOW_ID,SOURCE,compute,commitment,run_id),repository,run,jobs,log,now=clock().isoformat(),calendar_authority={'readiness_probe':True})
         need(clock()<until and all(value[k]==v for k,v in evidence.items()))
         return dict(status='BASIS_ACTIONS_READINESS_VERIFIED',run_id=run_id,provider_requests=0,execution_performed=False,automatic_retry_allowed=False)
-    except Exception as exc:raise ProbeFailure(stage,exc,run_id) from None
+    except Exception as exc:raise ProbeFailure(stage,exc,run_id,detail if stage=='INPUT' else 'UNSPECIFIED') from None
 
 def main():
     p=argparse.ArgumentParser()
@@ -96,9 +100,11 @@ def main():
         with _quiet():
             def source_check():
                 with _environment():_source(compute,a.compute_sha)
-            result=probe(api=GitHubAPI(basis_actions_token(os.environ)),store=Path(a.store),compute=a.compute_sha,commitment=a.receipt_commitment,runner_id=a.expected_runner_id,runner_name=a.expected_runner_name,expires=a.expires,env=dict(os.environ),source_check=source_check)
+            try:api=GitHubAPI(basis_actions_token(os.environ))
+            except Exception as exc:raise ProbeFailure('INPUT',exc,detail='CREDENTIAL_SELECTION') from None
+            result=probe(api=api,store=Path(a.store),compute=a.compute_sha,commitment=a.receipt_commitment,runner_id=a.expected_runner_id,runner_name=a.expected_runner_name,expires=a.expires,env=dict(os.environ),source_check=source_check)
         print(json.dumps(result));return 0
     except Exception as exc:
         safe=exc if isinstance(exc,ProbeFailure) else ProbeFailure('INPUT',exc)
-        print(json.dumps(dict(status=STOP,failure_stage=safe.stage,http_status=safe.http_status,run_id=safe.run_id,provider_requests=0,automatic_retry_allowed=False)));return 2
+        print(json.dumps(dict(status=STOP,failure_stage=safe.stage,failure_detail=safe.detail if safe.detail in INPUT_DETAILS else 'UNSPECIFIED',http_status=safe.http_status,run_id=safe.run_id,provider_requests=0,automatic_retry_allowed=False)));return 2
 if __name__=='__main__':raise SystemExit(main())
