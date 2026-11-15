@@ -62,6 +62,19 @@ def need(value):
     if not value:raise HostedDailyError(STOP)
 
 
+def basis_actions_token(env):
+    """Optional basis-only API credential; never replace the Store transport.
+
+    Unset/empty GitHub secret preserves the legacy configuration. An explicit
+    malformed credential fails closed rather than falling back. This selection
+    does not establish identity, Actions permissions, or execution authority.
+    """
+    selected=env.get('MARKET_DATA_BASIS_ACTIONS_TOKEN','')
+    if selected=='':selected=env.get('MARKET_DATA_STORE_TOKEN','')
+    need(type(selected) is str and re.fullmatch('[A-Za-z0-9_.-]{8,4096}',selected))
+    return selected
+
+
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self,*args,**kwargs):return None
 
@@ -375,7 +388,7 @@ def main(argv=None):
             def source_check():
                 with _environment():_source(compute,args.compute_sha)
             source_check()
-            api=GitHubAPI(token)
+            api=GitHubAPI(basis_actions_token(os.environ))
             def platform_guard():
                 env=dict(os.environ)
                 need(env.get('GITHUB_ACTIONS')=='true' and env.get('GITHUB_EVENT_NAME')=='schedule' and env.get('GITHUB_RUN_ATTEMPT')=='1' and env.get('GITHUB_REPOSITORY')==COMPUTE and env.get('GITHUB_SHA')==args.compute_sha and env.get('GITHUB_JOB')=='collect')

@@ -8,7 +8,7 @@ import re
 from zoneinfo import ZoneInfo
 from scripts import provider_basis_snapshot as B
 from scripts.daily_basis_updates import DailyUpdater,GrantAuthority,provider_capture
-from scripts.run_daily_basis_route import (GitHubAPI,check_private_readiness,dispatch_verify_once,
+from scripts.run_daily_basis_route import (GitHubAPI,basis_actions_token,check_private_readiness,dispatch_verify_once,
     wait_for_daily_budget_window,_quiet,_source,_environment,ReadinessFailure,READINESS_STEPS)
 from scripts.daily_basis_remote import RemoteGitStore,RemoteStoreError,SAFE_PHASES
 
@@ -157,7 +157,7 @@ def main():
         with _quiet():
             def source_check():
                 with _environment():step('SOURCE_GATE',_source,compute,args.compute_sha)
-            api=step('INITIALIZATION',GitHubAPI,token)
+            api=step('INITIALIZATION',lambda:GitHubAPI(basis_actions_token(os.environ)))
             def platform_guard():
                 repo=api.request('GET','/repos/'+COMPUTE);run=api.request('GET','/repos/'+COMPUTE+'/actions/runs/'+os.environ['GITHUB_RUN_ID'])
                 validate_surface(dict(os.environ),run,repo,args.compute_sha)
