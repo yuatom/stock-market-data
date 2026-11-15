@@ -6,6 +6,12 @@ from unittest.mock import patch
 import collect_dynamic_candidates as d
 import test_dynamic_candidates as existing
 
+def raw_adapter(fetch):
+    def response(symbol,*args,**kwargs):
+        rows=fetch(symbol,*args,**kwargs)
+        return json.dumps(dict(status='ok',meta=dict(symbol=symbol,interval='1day'),values=[dict(datetime=r['trade_date'],**{k:str(v) for k,v in r.items() if k!='trade_date'}) for r in rows])).encode()
+    return response
+
 class DynamicDailyTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup);self.root=Path(self.tmp.name)
@@ -18,7 +24,7 @@ class DynamicDailyTests(unittest.TestCase):
         self.access={'twelve_data_basic':{'api_key_env':'TWELVE_DATA_API_KEY'}}
     def invoke(self,fetch,**kwargs):
         info={}
-        with patch.dict(os.environ,{'TWELVE_DATA_API_KEY':'SYNTHETIC'}),patch.object(d.collectors,'fetch_twelve_daily',side_effect=fetch) as call:
+        with patch.dict(os.environ,{'TWELVE_DATA_API_KEY':'SYNTHETIC'}),patch.object(d.daily_response,'fetch_raw',side_effect=raw_adapter(fetch)) as call:
             result=d._ensure_daily_history(symbols=self.symbols,trade_date='2026-11-14',store_root=self.root,config=self.config,access=self.access,target_records=256,diagnostics=info,**kwargs)
         return result,info,call.call_count
     def index(self,symbol):return json.loads(d.collectors._series_index_path(self.root,d.collectors.TWELVE_PROVIDER,symbol).read_text())
@@ -83,8 +89,10 @@ class DynamicDailyTests(unittest.TestCase):
         self.assertNotIn('private token',json.dumps(failures));self.assertEqual(info['provider_charge_status'],'UNKNOWN')
     def test_stop_manifest_binds_retained_response_quarantine_shards_and_actual_budget(self):
         request=existing.DynamicCandidateRequestTests()._request();request.update(trade_date='2026-11-14',candidate_symbols=self.symbols)
-        def fetch(*a,**k):return [dict(self.old,high=12.1,volume=101,source_timestamp='changed'),self.new]
-        with patch.dict(os.environ,{'TWELVE_DATA_API_KEY':'SYNTHETIC'}),patch.object(d.collectors,'fetch_twelve_daily',side_effect=fetch),patch.object(d,'collect_regular_window') as intraday:
+        def fetch(symbol,*a,**k):
+            if symbol=='BBB':raise TimeoutError('synthetic transport unknown')
+            return [dict(self.old,high=12.1,volume=101),self.new]
+        with patch.dict(os.environ,{'TWELVE_DATA_API_KEY':'SYNTHETIC'}),patch.object(d.daily_response,'fetch_raw',side_effect=raw_adapter(fetch)),patch.object(d,'collect_regular_window') as intraday:
             result=d.collect_request(request=request,store_root=self.root,store_config_path=existing.ROOT/'config/market-data-store.yaml',access_path=existing.ROOT/'config/market-data-collector-access.yaml',dynamic_config_path=existing.ROOT/'config/dynamic-candidate-collection.yaml')
         intraday.assert_not_called();self.assertEqual(result['status'],'STOPPED');self.assertFalse(result['market_fact_authority'])
         manifest=json.loads((self.root/result['publication_manifest_path']).read_text());paths=[x['path'] for x in manifest['required_outputs']]
@@ -104,7 +112,7 @@ class DynamicDailyTests(unittest.TestCase):
     def test_known_price_rejection_allows_other_daily_and_independent_intraday_partial(self):
         request=existing.DynamicCandidateRequestTests()._request();request.update(trade_date='2026-11-14',candidate_symbols=self.symbols)
         def fetch(symbol,*a,**kw):return [dict(self.old,high=12.1) if symbol=='AAA' else self.old,self.new]
-        with patch.dict(os.environ,{'TWELVE_DATA_API_KEY':'SYNTHETIC'}),patch.object(d.collectors,'fetch_twelve_daily',side_effect=fetch) as capture,patch.object(d,'collect_regular_window',return_value={'status':'ok','snapshot_written':False}) as intraday:
+        with patch.dict(os.environ,{'TWELVE_DATA_API_KEY':'SYNTHETIC'}),patch.object(d.daily_response,'fetch_raw',side_effect=raw_adapter(fetch)) as capture,patch.object(d,'collect_regular_window',return_value={'status':'ok','snapshot_written':False}) as intraday:
             result=d.collect_request(request=request,store_root=self.root,store_config_path=existing.ROOT/'config/market-data-store.yaml',access_path=existing.ROOT/'config/market-data-collector-access.yaml',dynamic_config_path=existing.ROOT/'config/dynamic-candidate-collection.yaml')
         self.assertEqual(capture.call_count,2);intraday.assert_called_once()
         self.assertEqual(result['status'],'partial');self.assertEqual(result['daily_history_available'],['BBB'])

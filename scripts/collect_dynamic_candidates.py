@@ -16,11 +16,14 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
+from types import SimpleNamespace
+from dynamic_daily_owner import DynamicPublicationUnknown
 
 import yaml
 
 import market_data_collectors as collectors
 import market_data_store as store
+import dynamic_daily_response as daily_response
 from market_data_collection import collect_regular_window
 
 
@@ -166,10 +169,14 @@ def _append_price_only_history(*, symbol, eligible, store_root, trade_date, targ
         identity_effective_from=None,series_semantics='daily_regular_ohlcv',adjustment_semantics='provider_reported',lineage=lineage)
 
 
-def _ensure_daily_history(*, symbols: Sequence[str], trade_date: str, store_root: Path, config: dict[str, Any], access: dict[str, Any], target_records: int, diagnostics=None) -> tuple[list[str], list[dict[str, str]]]:
+def _ensure_daily_history(*, symbols: Sequence[str], trade_date: str, store_root: Path, config: dict[str, Any], access: dict[str, Any], target_records: int, diagnostics=None, durable_owner=None) -> tuple[list[str], list[dict[str, str]]]:
     diagnostics=diagnostics if diagnostics is not None else {}
     diagnostics.update(requests_attempted=0,local_budget_debits=0,provider_charge_status='NOT_ESTABLISHED',
-        remote_predebit_established=False,response_retention='normalized_parser_output_not_raw_http',stopped=False,required_paths=[])
+        remote_predebit_established=False,response_retention='raw_bytes_before_strict_parse_and_normalized_evidence',stopped=False,required_paths=[])
+    if durable_owner is not None:
+        if symbols!=durable_owner.request['candidate_symbols'] or trade_date!=durable_owner.day:
+            raise ValueError('guarded daily scope mismatch')
+        durable_owner.bind(durable_owner.request,store_root)
     key = os.environ.get(str((access.get("twelve_data_basic") or {}).get("api_key_env") or "TWELVE_DATA_API_KEY"))
     policy=config['collector']['twelve_data_daily'].get('overlap_revision_policy')
     if policy not in (None,'price_only_volume_blocked_v1'):
@@ -182,12 +189,34 @@ def _ensure_daily_history(*, symbols: Sequence[str], trade_date: str, store_root
     budget = config["collector"]["budgets"]["twelve_data_basic"]
     available=[];failures=[];required=set()
     for symbol_index,symbol in enumerate(symbols):
-        phase='budget_check'
+        phase='budget_check';item_required=set();item_status='COLLECTED';reservation_accounted=False
         try:
             store.assert_legacy_basis(store_root, provider=collectors.TWELVE_PROVIDER, symbol=symbol)
-            collectors.wait_for_twelve_budget(store_root,trade_date,per_day=int(budget['hard_credits_per_day']),per_minute=int(budget['hard_credits_per_minute']))
-            phase='provider_fetch';diagnostics['requests_attempted']+=1;diagnostics['provider_charge_status']='UNKNOWN'
-            fetched=collectors.fetch_twelve_daily(symbol,key,access,outputsize=target_records)
+            guard={}
+            if durable_owner is None:
+                collectors.wait_for_twelve_budget(store_root,trade_date,per_day=int(budget['hard_credits_per_day']),per_minute=int(budget['hard_credits_per_minute']))
+                diagnostics['requests_attempted']+=1
+            else:
+                durable_owner.reserve(symbol,SimpleNamespace(collectors=collectors),budget)
+                diagnostics['local_budget_debits']+=1;diagnostics['remote_predebit_established']=True;reservation_accounted=True
+                def before_request():
+                    durable_owner.before_request();diagnostics['requests_attempted']+=1
+                guard={'before_request':before_request}
+            phase='provider_fetch';diagnostics['provider_charge_status']='UNKNOWN'
+            raw=daily_response.fetch_raw(symbol,key,access,outputsize=target_records,**guard)
+            phase='raw_response_retention'
+            raw_digest=hashlib.sha256(raw).hexdigest()
+            raw_path=f'collector-state/{trade_date[:7]}/dynamic-daily-{symbol}-{raw_digest}.raw'
+            destination=store_root/raw_path;destination.parent.mkdir(parents=True,exist_ok=True)
+            if destination.exists():
+                if destination.is_symlink() or destination.read_bytes()!=raw:raise store.MarketDataConflict('raw evidence identity mismatch')
+            else:
+                with destination.open('xb') as handle:handle.write(raw)
+            required.add(raw_path);item_required.add(raw_path)
+            if durable_owner is not None:durable_owner.retain_raw(raw_path)
+            diagnostics.setdefault('raw_responses',[]).append(dict(symbol=symbol,path=raw_path,sha256=raw_digest,bytes=len(raw)))
+            phase='strict_daily_parse'
+            fetched=daily_response.parse(raw,symbol=symbol,outputsize=target_records)
             # Retention is normalized parser output, not original HTTP/metadata.
             if price_only:
                 phase='normalized_response_retention'
@@ -200,12 +229,13 @@ def _ensure_daily_history(*, symbols: Sequence[str], trade_date: str, store_root
                     if target.is_symlink() or target.read_bytes()!=payload:raise store.MarketDataConflict('evidence identity mismatch')
                 else:
                     with target.open('xb') as handle:handle.write(payload)
-                required.add(evidence_path)
-            # Existing success-fetch accounting order retained. This is local only;
-            # outer publication, not this function, establishes remote durability.
+                required.add(evidence_path);item_required.add(evidence_path)
+            # Unguarded legacy calls retain success-fetch local accounting; guarded
+            # calls already reserved durably and must never double-debit here.
             phase='local_budget_debit'
-            collectors.consume_twelve_credit(store_root,trade_date,amount=1,per_day=int(budget['hard_credits_per_day']),per_minute=int(budget['hard_credits_per_minute']))
-            diagnostics['local_budget_debits']+=1
+            if durable_owner is None:
+                collectors.consume_twelve_credit(store_root,trade_date,amount=1,per_day=int(budget['hard_credits_per_day']),per_minute=int(budget['hard_credits_per_minute']))
+                diagnostics['local_budget_debits']+=1
             diagnostics['provider_charge_status']='LOCAL_REQUESTS_ACCOUNTED_PROVIDER_BILLING_NOT_VERIFIED'
             eligible=[r for r in fetched if str(r.get('trade_date') or '')<trade_date]
             if not eligible:raise store.MarketDataConflict('no_cutoff_valid_daily_history')
@@ -218,7 +248,19 @@ def _ensure_daily_history(*, symbols: Sequence[str], trade_date: str, store_root
                     identity_effective_from=None,series_semantics='daily_regular_ohlcv',adjustment_semantics='provider_reported',
                     lineage=dict(ingest_kind='dynamic_research_object_history',ingest_trade_date=trade_date,history_outputsize=target_records))
             available.append(symbol)
+        except DynamicPublicationUnknown:
+            raise
         except Exception as exc:
+            if durable_owner is not None:
+                known_parse=(phase=='strict_daily_parse' and isinstance(exc,daily_response.evidence.EvidenceError))
+                known_price=type(exc) is DynamicDailyOverlapConflict
+                # Unknown storage/half-written market data is never a diagnostic
+                # publication opportunity. Preserve only already durable commits.
+                if (isinstance(exc,OSError) or phase in ('raw_response_retention','normalized_response_retention') or
+                    (phase=='immutable_history_qualification' and not known_price) or
+                    (phase=='strict_daily_parse' and not known_parse)):
+                    durable_owner.abort()
+            item_status='PRICE_REJECTED' if type(exc) is DynamicDailyOverlapConflict else 'STOPPED'
             reason=type(exc).__name__
             if not price_only and type(exc) is store.MarketDataConflict and phase=='immutable_history_qualification':
                 match=re.fullmatch(rf'conflicting bar for {re.escape(symbol)} (\d{{4}}-\d{{2}}-\d{{2}})',str(exc))
@@ -237,14 +279,23 @@ def _ensure_daily_history(*, symbols: Sequence[str], trade_date: str, store_root
             # Bind actual bytes (including a quarantine written before rejection).
             directory=collectors._series_index_path(store_root,collectors.TWELVE_PROVIDER,symbol).parent
             if directory.exists():
-                required.update(str(p.relative_to(store_root)) for p in directory.glob('*.json') if p.is_file())
+                item_required.update(str(p.relative_to(store_root)) for p in directory.glob('*.json') if p.is_file())
+                required.update(item_required)
             ledger=collectors._budget_path(store_root,trade_date)
             if ledger.is_file():required.add(str(ledger.relative_to(store_root)))
+            if durable_owner is not None:
+                reservation=durable_owner.reservation
+                diagnostics.setdefault('budget_reservations',{})[symbol]=reservation
+                if reservation in ('DEBIT_CONFIRMED','DEBIT_CONFIRMED_NO_HTTP') and not reservation_accounted:
+                    diagnostics['local_budget_debits']+=1;diagnostics['remote_predebit_established']=True
+            if durable_owner is not None and not durable_owner.failed:
+                required.update(durable_owner.finish(item_required,item_status))
             diagnostics['required_paths']=sorted(required)
     return available,failures
 
 
-def collect_request(*, request: dict[str, Any], store_root: Path, store_config_path: Path, access_path: Path, dynamic_config_path: Path) -> dict[str, Any]:
+def collect_request(*, request: dict[str, Any], store_root: Path, store_config_path: Path, access_path: Path, dynamic_config_path: Path, durable_owner=None) -> dict[str, Any]:
+    if durable_owner is not None:durable_owner.bind(request,store_root)
     config = collectors.load_yaml(store_config_path)
     access = collectors.load_yaml(access_path)
     dynamic = _load_yaml(dynamic_config_path)
@@ -255,9 +306,10 @@ def collect_request(*, request: dict[str, Any], store_root: Path, store_config_p
 
     daily_diagnostics={}
     daily_available, daily_failures = _ensure_daily_history(
-        symbols=symbols, trade_date=trade_date, store_root=store_root, config=config, access=access, target_records=target_records, diagnostics=daily_diagnostics
+        symbols=symbols, trade_date=trade_date, store_root=store_root, config=config, access=access, target_records=target_records, diagnostics=daily_diagnostics, durable_owner=durable_owner
     )
 
+    if durable_owner is not None:durable_owner.assert_current()
     windows = {
         "open_15m": ("09:30", "09:45"),
         "open_30m": ("09:30", "10:00"),
@@ -283,6 +335,8 @@ def collect_request(*, request: dict[str, Any], store_root: Path, store_config_p
                 access=access,
                 eligible_universe=[(symbol, "stocks") for symbol in symbols],
             )
+        except DynamicPublicationUnknown:
+            raise
         except Exception as exc:
             result=dict(mode=f'discovery_{stage}',status='STOPPED',snapshot_written=False,market_fact_authority=False,
                         automatic_retry_allowed=False,intraday_failure=type(exc).__name__,provider_charge_status='UNKNOWN')

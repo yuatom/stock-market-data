@@ -1,0 +1,12 @@
+--- a/.github/workflows/market-data-collector.yml
++++ b/.github/workflows/market-data-collector.yml
+@@ -22,6 +22,9 @@
+     secrets: inherit
+ 
+   dispatch-discovery:
++    permissions:
++      contents: read
++      actions: read
+     if: github.ref_name == 'discovery-requests'
+     uses: yuatom/stock-market-data/.github/workflows/dynamic-candidate-runtime.yml@main
+     with:
