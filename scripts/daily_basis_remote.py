@@ -11,6 +11,7 @@ all other writable references are create-only. One atomic push couples each
 publication to its exact lightweight market-data-read retention tag.
 """
 from functools import wraps
+from contextlib import contextmanager
 import base64
 import os
 from pathlib import Path
@@ -36,8 +37,19 @@ SAFETY = ('-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false',
     '-c', 'gc.auto=0')
 
 
+SAFE_PHASES=frozenset({'LOCAL_STORE','SOURCE_RECHECK','PLATFORM_RECHECK',
+                      'PRIVATE_METADATA','PRIVATE_IDENTITY','UNSPECIFIED'})
+
 class RemoteStoreError(RuntimeError):
     """Value-free diagnostic, including for uncertain writes."""
+    def __init__(self,message=STOP,*,safe_phase='UNSPECIFIED'):
+        self.safe_phase=safe_phase if safe_phase in SAFE_PHASES else 'UNSPECIFIED'
+        super().__init__(STOP)
+
+@contextmanager
+def _phase(name):
+    try:yield
+    except Exception:raise RemoteStoreError(safe_phase=name) from None
 
 
 def _need(value):
@@ -50,6 +62,8 @@ def _safe(fn):
     def wrapped(*args, **kwargs):
         try:
             return fn(*args, **kwargs)
+        except RemoteStoreError as exc:
+            raise RemoteStoreError(safe_phase=exc.safe_phase) from None
         except Exception:
             raise RemoteStoreError(STOP) from None
     return wrapped
@@ -142,9 +156,10 @@ class RemoteGitStore(LocalGitStore):
         _need(not any(p.is_symlink() for p in (path, *path.parents)))
         # _LiteralGit retains _LocalGit's ambient-override rejection, while
         # isolating even its initial validation subprocesses from credentials.
-        self.g = _LiteralGit(path)
-        self.repo, self._lock = self.g.repo, None
-        self._validate_local()
+        with _phase('LOCAL_STORE'):
+            self.g = _LiteralGit(path)
+            self.repo, self._lock = self.g.repo, None
+            self._validate_local()
         self._transport = transport if transport is not None else GitHubGitTransport(self.repo, token)
         self._check()
 
@@ -174,21 +189,22 @@ class RemoteGitStore(LocalGitStore):
         _need('remote.origin.url' in seen)
 
     def _check(self):
-        self._validate_local()
-        self._source_recheck()
-        self._platform_guard()
-        value = self._transport.metadata()
-        _need(type(value) is dict and value.get('private') is True and
-            type(value.get('id')) is int and value['id'] == self._repository_id and
-            value.get('full_name') == STORE_REPOSITORY and value.get('default_branch') == 'main')
-        owner, permissions = value.get('owner'), value.get('permissions')
-        _need(type(owner) is dict and owner.get('login') == 'yuatom' and
-            type(owner.get('id')) is int and owner['id'] > 0 and
-            (self._owner_id is None or owner['id'] == self._owner_id))
-        _need(type(permissions) is dict and permissions.get('push') is True)
-        # Pin the numeric owner on the first authenticated metadata result.
-        if self._owner_id is None:
-            self._owner_id = owner['id']
+        with _phase('LOCAL_STORE'):self._validate_local()
+        with _phase('SOURCE_RECHECK'):self._source_recheck()
+        with _phase('PLATFORM_RECHECK'):self._platform_guard()
+        with _phase('PRIVATE_METADATA'):value = self._transport.metadata()
+        with _phase('PRIVATE_IDENTITY'):
+            _need(type(value) is dict and value.get('private') is True and
+                type(value.get('id')) is int and value['id'] == self._repository_id and
+                value.get('full_name') == STORE_REPOSITORY and value.get('default_branch') == 'main')
+            owner, permissions = value.get('owner'), value.get('permissions')
+            _need(type(owner) is dict and owner.get('login') == 'yuatom' and
+                type(owner.get('id')) is int and owner['id'] > 0 and
+                (self._owner_id is None or owner['id'] == self._owner_id))
+            _need(type(permissions) is dict and permissions.get('push') is True)
+            # Pin the numeric owner on the first authenticated metadata result.
+            if self._owner_id is None:
+                self._owner_id = owner['id']
 
     def _ref_scope(self, ref, *, write=False):
         _need(type(ref) is str)
