@@ -90,3 +90,37 @@ def test_workflow_no_provider_no_store_writer():
     step=w['jobs']['probe']['steps'][-1]
     assert 'MARKET_DATA_STORE_TOKEN' not in step['env']
     assert 'MARKET_DATA_BASIS_ACTIONS_TOKEN' in step['env'] and 'python -B' in step['run']
+
+def test_actual_shell_arguments_use_nonreserved_expected_runner_inputs():
+    # GitHub's real hosted name from run 43717196211; no secret or network.
+    import os,shlex,subprocess,sys
+    workflow=Path(__file__).resolve().parents[1]/'.github/workflows/basis-actions-readiness-probe.yml'
+    step=yaml.load(workflow.read_text(),Loader=yaml.BaseLoader)['jobs']['probe']['steps'][-1]
+    inputs={'compute_sha':'a'*40,'receipt_commitment':'b'*64,'expected_runner_id':'26','expected_runner_name':'soxx-home-probe-26','expires':'2026-11-15T14:00:00Z'}
+    env={'PATH':os.environ['PATH'],'RUNNER_NAME':'GitHub Actions 1000006253','RUNNER_ID':'1000006253'}
+    for key,value in step['env'].items():
+        if key.startswith(('RUNNER_','GITHUB_')):continue # Default GitHub vars cannot be overridden.
+        for name,expected in inputs.items():
+            if value=='${{ inputs.'+name+' }}':env[key]=expected
+    # Run the actual workflow shell expansion, replacing only Python with an argv observer.
+    observer=shlex.quote(sys.executable)+' -c '+shlex.quote('import json,sys; print(json.dumps(sys.argv[1:]))')
+    argv=json.loads(subprocess.check_output(['/bin/bash','-e','-c',step['run'].replace('python ',observer+' ',1)],env=env,text=True))
+    assert argv[argv.index('--expected-runner-id')+1]=='26'
+    assert argv[argv.index('--expected-runner-name')+1]=='soxx-home-probe-26'
+    assert not any(k.startswith(('RUNNER_','GITHUB_')) for k in step['env'])
+
+def test_hosted_name_reproduces_parameter_rejection_no_api(case):
+    args,calls,_,_=case;args['runner_name']='GitHub Actions 1000006253'
+    with pytest.raises(P.ProbeFailure) as err:P.probe(**args)
+    assert err.value.stage=='INPUT' and err.value.detail=='RUNNER_PARAMETERS'
+    assert calls==[]
+
+def test_invalid_credential_diagnostic_does_not_leak(monkeypatch,capsys):
+    import sys
+    monkeypatch.setenv('MARKET_DATA_BASIS_ACTIONS_TOKEN','private invalid token')
+    monkeypatch.setattr(sys,'argv',['probe','--store','unused','--compute-sha','a'*40,'--receipt-commitment','b'*64,'--expected-runner-id','26','--expected-runner-name','home','--expires','2026-11-15T14:00:00Z'])
+    assert P.main()==2
+    output=capsys.readouterr().out
+    value=json.loads(output)
+    assert value['failure_stage']=='INPUT' and value['failure_detail']=='CREDENTIAL_SELECTION'
+    assert 'private' not in output and 'token' not in output
