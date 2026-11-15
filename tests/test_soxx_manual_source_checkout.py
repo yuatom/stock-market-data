@@ -36,6 +36,15 @@ class ManualSourceCheckoutTests(unittest.TestCase):
                 manual._source(full,sha)
                 remote.assert_called_once_with(full)
 
+    def test_workflow_defaults_to_zero_request_diagnosis(self):
+        workflow=yaml.safe_load((ROOT/'.github/workflows/one-shot-soxx-basis-gap.yml').read_text())
+        trigger=workflow.get('on',workflow.get(True))
+        field=trigger['workflow_dispatch']['inputs']['preflight_only']
+        self.assertEqual(field['type'],'boolean');self.assertIs(field['default'],True)
+        step=next(x for x in workflow['jobs']['soxx_gap']['steps'] if x.get('name')=='Execute one reviewed finite SOXX slot')
+        self.assertEqual(step['env']['PREFLIGHT_ONLY'],'${{ inputs.preflight_only }}')
+        self.assertIn('--preflight-only "$PREFLIGHT_ONLY"',step['run'])
+
     def test_workflow_compute_exact_pin_and_full_history(self):
         workflow=yaml.safe_load((ROOT/'.github/workflows/one-shot-soxx-basis-gap.yml').read_text())
         checkouts=[x['with'] for x in workflow['jobs']['soxx_gap']['steps'] if x.get('uses')=='actions/checkout@v4']
