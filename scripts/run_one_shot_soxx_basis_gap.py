@@ -10,6 +10,7 @@ from scripts import provider_basis_snapshot as B
 from scripts.daily_basis_updates import DailyUpdater,GrantAuthority,provider_capture
 from scripts.run_daily_basis_route import (GitHubAPI,basis_actions_token,check_private_readiness,dispatch_verify_once,
     wait_for_daily_budget_window,_quiet,_source,_environment,ReadinessFailure,READINESS_STEPS)
+from scripts import run_basis_actions_readiness_probe as readiness_probe
 from scripts.daily_basis_remote import RemoteGitStore,RemoteStoreError,SAFE_PHASES
 
 COMPUTE='yuatom/stock-market-data';STORE='yuatom/stock-market-data-store'
@@ -25,7 +26,7 @@ SCOPE_KEYS=('schema_version','kind','compute_sha','consumer_sha','workflow_sourc
 STAGES=frozenset({'INITIALIZATION','SOURCE_GATE','PLATFORM_GATE','STORE_ADAPTER',
     'STORE_LOCK','STORE_HEAD','AUTHORITY_FETCH','AUTHORITY_READ','SCOPE_CONTRACT',
     'RUN_AUTHORITY','PRIVATE_READINESS','GRANT_BASELINE','BUDGET_WINDOW',
-    'CAPTURE_AND_CANDIDATE','PRIVATE_VERIFICATION','PROMOTION','CONSUMER_READ','PRECLAIM_CHECK'})
+    'CAPTURE_AND_CANDIDATE','PRIVATE_VERIFICATION','PROMOTION','CONSUMER_READ','PRECLAIM_CHECK','SAME_PROCESS_READINESS'})
 
 SAFE_DETAILS=SAFE_PHASES|READINESS_STEPS
 
@@ -77,7 +78,10 @@ def validate_surface(env,run,repository,compute_sha):
 
 
 def validate_scope(raw,expected_sha,grant_raw,calendar_raw,*,compute_sha,now):
-    need(B.sha(raw)==B._hex(expected_sha,64));scope=B._parse(raw);B._closed(scope,SCOPE_KEYS)
+    need(B.sha(raw)==B._hex(expected_sha,64));scope=B._parse(raw);B._closed(scope,SCOPE_KEYS+(('readiness',) if 'readiness' in scope else ()))
+    if 'readiness' in scope:
+        validate_readiness(scope['readiness'])
+        need(now<B._stamp(scope['readiness']['expires'])<=B._stamp(scope['valid_until']))
     need(scope['schema_version']==1 and scope['kind']=='one_shot_soxx_gap_authority' and scope['compute_sha']==compute_sha)
     for key in ('consumer_sha','workflow_source_sha'):B._hex(scope[key])
     for key in ('repository_id','owner_id','runtime_workflow_id','readiness_run_id'):need(type(scope[key]) is int and scope[key]>0)
@@ -98,10 +102,28 @@ def validate_scope(raw,expected_sha,grant_raw,calendar_raw,*,compute_sha,now):
     return scope,grant
 
 
-def run_once(*,store,api,scope_commit,scope_sha,expected_store_sha,compute_sha,env,clock,key,access,source_check,capture=None,preflight_only=False):
+def validate_readiness(value):
+    need(type(value) is dict);B._closed(value,('commitment','runner_id','runner_name','expires'))
+    B._hex(value['commitment'],64)
+    need(type(value['runner_id']) is int and value['runner_id']>0)
+    need(type(value['runner_name']) is str and re.fullmatch('[A-Za-z0-9_.-]{1,128}',value['runner_name']))
+    B._stamp(value['expires'])
+    return value
+
+
+def readiness_arguments(commitment,runner_id,runner_name,expires,preflight_only):
+    values=(commitment,runner_id,runner_name,expires)
+    if all(v in (None,'') for v in values):return None
+    need(not preflight_only and all(v not in (None,'') for v in values))
+    return validate_readiness(dict(commitment=commitment,runner_id=int(runner_id),runner_name=runner_name,expires=expires))
+
+
+def run_once(*,store,api,scope_commit,scope_sha,expected_store_sha,compute_sha,env,clock,key,access,source_check,capture=None,preflight_only=False,readiness=None):
     stage="INITIALIZATION"
     try:
         need(type(preflight_only) is bool)
+        need(not(preflight_only and readiness is not None))
+        if readiness is not None:validate_readiness(readiness)
         stage="STORE_LOCK"
         with store.lock():
             stage="STORE_HEAD"
@@ -115,12 +137,13 @@ def run_once(*,store,api,scope_commit,scope_sha,expected_store_sha,compute_sha,e
                 r=scope[key];need(store.g.text('merge-base',r['commit'],scope_commit)==r['commit']);loaded.append(store.read(r['commit'],r['path']))
             stage="SCOPE_CONTRACT"
             scope,grant=validate_scope(raw,scope_sha,*loaded,compute_sha=compute_sha,now=clock())
+            need(scope.get('readiness')==readiness)
             stage="RUN_AUTHORITY"
             repository=api.request('GET','/repos/'+COMPUTE);run=api.request('GET','/repos/'+COMPUTE+'/actions/runs/'+env['GITHUB_RUN_ID'])
             validate_surface(env,run,repository,compute_sha)
             need(run['workflow_id']==scope['runtime_workflow_id'] and repository['owner']['id']==scope['owner_id'])
             stage="PRIVATE_READINESS"
-            private=check_private_readiness(api,store,scope,grant,now=clock().isoformat())
+            if readiness is None:private=check_private_readiness(api,store,scope,grant,now=clock().isoformat())
             stage="GRANT_BASELINE"
             u=DailyUpdater(store,*loaded,GrantAuthority(B.sha(loaded[0]),compute_sha,scope['consumer_sha'],scope['workflow_source_sha'],B.sha(loaded[1])),clock=clock)
             stage="BUDGET_WINDOW"
@@ -132,16 +155,36 @@ def run_once(*,store,api,scope_commit,scope_sha,expected_store_sha,compute_sha,e
                 return dict(status='ONE_SHOT_SOXX_PREFLIGHT_COMPLETE',provider_requests=0,
                             credits_reserved=0,production_data_writes=0,
                             execution_performed=False,automatic_retry_allowed=False)
+            runner_expectation=None
+            if readiness is not None:
+                stage="PRECLAIM_CHECK"
+                u.preflight_slot(slot['slot_id'],env['GITHUB_RUN_ID']+'-1')
+                need(grant['workflow_id']==readiness_probe.WORKFLOW_ID and grant['workflow_source_sha']==readiness_probe.SOURCE)
+                source_check();need(store.head()==expected_store_sha)
+                stage="SAME_PROCESS_READINESS"
+                proof=readiness_probe.probe(api=api,store=store.repo,compute=compute_sha,
+                    commitment=readiness['commitment'],runner_id=readiness['runner_id'],runner_name=readiness['runner_name'],
+                    expires=readiness['expires'],env=env,source_check=source_check,clock=clock,caller_profile='one_shot')
+                need(proof['status']=='BASIS_ACTIONS_READINESS_VERIFIED' and proof['provider_requests']==0)
+                stage="BUDGET_WINDOW"
+                source_check();need(store.head()==expected_store_sha and clock()<B._stamp(readiness['expires']))
+                wait_for_daily_budget_window(u,slot,clock=clock)
+                need(clock()<B._stamp(readiness['expires']))
+                stage="PRIVATE_READINESS"
+                private=check_private_readiness(api,store,{**scope,'readiness_run_id':proof['run_id']},grant,now=clock().isoformat())
+                source_check();need(store.head()==expected_store_sha and clock()<B._stamp(readiness['expires']))
+                runner_expectation=dict(runner_id=readiness['runner_id'],runner_name=readiness['runner_name'],labels=sorted(readiness_probe.LABELS),expires=readiness['expires'])
             stage="CAPTURE_AND_CANDIDATE"
             candidate=u.run_slot(slot['slot_id'],env['GITHUB_RUN_ID']+'-1',capture=capture or provider_capture(key,access))
             stage="PRIVATE_VERIFICATION"
-            verified=dispatch_verify_once(api,u,candidate,repository=private,clock=clock)
+            verified=dispatch_verify_once(api,u,candidate,repository=private,clock=clock,**({'runner_expectation':runner_expectation} if runner_expectation else {}))
             stage="PROMOTION"
+            if readiness is not None:need(clock()<B._stamp(readiness['expires']))
             source_check();u.promote(candidate,verified)
             stage="CONSUMER_READ"
             view=u.read_current(verified,fields=B.PRICE_FIELDS)
             need(view['record_count']==320 and view['last_trade_date']=='2026-11-13' and view['volume_status']=='BLOCKED_UNRESOLVED')
-            return dict(status='ONE_SHOT_SOXX_GAP_COMPLETE',requests_attempted=1,additional_credits=1,store_sha=store.head(),basis_id=candidate.selector['basis_id'],last_trade_date=view['last_trade_date'],volume_policy='BLOCKED_UNRESOLVED',verification_run_id=verified.run_id,receipt_commitment=candidate.receipt_commitment)
+            return dict(status='ONE_SHOT_SOXX_GAP_COMPLETE',requests_attempted=1,additional_credits=1,store_sha=store.head(),basis_id=candidate.selector['basis_id'],last_trade_date=view['last_trade_date'],volume_policy='BLOCKED_UNRESOLVED',verification_run_id=verified.run_id,receipt_commitment=candidate.receipt_commitment,**({'readiness_run_id':proof['run_id']} if readiness is not None else {}))
     except OneShotFailure:raise
     except Exception as exc:raise OneShotFailure(stage,exc) from None
 
@@ -150,9 +193,11 @@ def main():
     p=argparse.ArgumentParser()
     for name in ('store','compute-sha','expected-store-sha','scope-commit','scope-sha'):p.add_argument('--'+name,required=True)
     p.add_argument('--preflight-only',choices=('true','false'),required=True)
+    for name in ('readiness-receipt-commitment','readiness-runner-id','readiness-runner-name','readiness-expires'):p.add_argument('--'+name)
     args=p.parse_args();os.umask(0o077)
     try:
         import yaml
+        readiness=readiness_arguments(args.readiness_receipt_commitment,args.readiness_runner_id,args.readiness_runner_name,args.readiness_expires,args.preflight_only=='true')
         compute=Path(__file__).resolve().parents[1];token=os.environ.get('MARKET_DATA_STORE_TOKEN','');key=os.environ.get('TWELVE_DATA_API_KEY','')
         with _quiet():
             def source_check():
@@ -163,7 +208,7 @@ def main():
                 validate_surface(dict(os.environ),run,repo,args.compute_sha)
             source_check();step('PLATFORM_GATE',platform_guard)
             store=step('STORE_ADAPTER',RemoteGitStore,Path(args.store),token,source_recheck=source_check,platform_guard=platform_guard)
-            result=run_once(store=store,api=api,scope_commit=args.scope_commit,scope_sha=args.scope_sha,expected_store_sha=args.expected_store_sha,compute_sha=args.compute_sha,env=dict(os.environ),clock=lambda:datetime.now(timezone.utc),key=key,access=yaml.safe_load((compute/'config/market-data-collector-access.yaml').read_text()),source_check=source_check,preflight_only=args.preflight_only=='true')
+            result=run_once(store=store,api=api,scope_commit=args.scope_commit,scope_sha=args.scope_sha,expected_store_sha=args.expected_store_sha,compute_sha=args.compute_sha,env=dict(os.environ),clock=lambda:datetime.now(timezone.utc),key=key,access=yaml.safe_load((compute/'config/market-data-collector-access.yaml').read_text()),source_check=source_check,preflight_only=args.preflight_only=='true',readiness=readiness)
         print(json.dumps(result));return 0
     except Exception as exc:print(json.dumps(failure_result(exc)));return 2
 

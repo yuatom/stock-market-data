@@ -124,3 +124,16 @@ def test_invalid_credential_diagnostic_does_not_leak(monkeypatch,capsys):
     value=json.loads(output)
     assert value['failure_stage']=='INPUT' and value['failure_detail']=='CREDENTIAL_SELECTION'
     assert 'private' not in output and 'token' not in output
+
+def test_closed_one_shot_caller_profile(case):
+    args,calls,replies,_=case
+    workflow,job=P.CALLER_PROFILES['one_shot']
+    args['caller_profile']='one_shot';args['env']['GITHUB_JOB']=job
+    args['env']['GITHUB_WORKFLOW_REF']=P.COMPUTE+'/'+workflow+'@refs/heads/main'
+    replies['/repos/'+P.COMPUTE+'/actions/runs/123']['path']=workflow
+    assert P.probe(**args)['run_id']==456
+
+def test_caller_cannot_invent_workflow_profile(case):
+    args,calls,_,_=case;args['caller_profile']='.github/workflows/arbitrary.yml'
+    with pytest.raises(P.ProbeFailure):P.probe(**args)
+    assert calls==[]
