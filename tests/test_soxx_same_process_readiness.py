@@ -80,7 +80,7 @@ def test_cli_group_reaches_run_once_without_reconstructing_api(monkeypatch,capsy
     from contextlib import nullcontext
     expected=dict(commitment='9'*64,runner_id=26,runner_name='home',expires='2026-11-15T16:05:00Z')
     monkeypatch.setattr(sys,'argv',['offline','--store','unused','--compute-sha','a'*40,'--expected-store-sha','b'*40,'--scope-commit','c'*40,'--scope-sha','d'*64,'--preflight-only','false','--readiness-receipt-commitment',expected['commitment'],'--readiness-runner-id','26','--readiness-runner-name','home','--readiness-expires',expected['expires']])
-    monkeypatch.setenv('GITHUB_RUN_ID','123');monkeypatch.setenv('MARKET_DATA_STORE_TOKEN','synthetic-store');monkeypatch.setattr(M,'_quiet',nullcontext);monkeypatch.setattr(M,'_environment',nullcontext)
+    monkeypatch.setenv('MARKET_DATA_SOURCE_TOKEN','synthetic-source');monkeypatch.setenv('GITHUB_RUN_ID','123');monkeypatch.setenv('MARKET_DATA_STORE_TOKEN','synthetic-store');monkeypatch.setattr(M,'_quiet',nullcontext);monkeypatch.setattr(M,'_environment',nullcontext)
     monkeypatch.setattr(M,'_source',lambda *a:None);monkeypatch.setattr(M,'validate_surface',lambda *a:None)
     api=Mock();monkeypatch.setattr(M,'GitHubAPI',lambda token:api);monkeypatch.setattr(M,'RemoteGitStore',Mock())
     def run(**kw):

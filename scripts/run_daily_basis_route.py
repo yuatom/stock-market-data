@@ -203,7 +203,24 @@ def read_authority(store,commitment,compute_sha,*,now,allow_expired_hold=False):
     return authority,loaded[0],loaded[1],dict(ref=ref,commit=commit,blob_sha=blob,commitment=commitment)
 
 
-def check_private_readiness(api,store,authority,grant,*,now):
+REPORT_RELEASE_PATH='/repos/yuatom/stock-dairy/contents/state/runtime-release.json?ref=main'
+
+class ReportReleaseReader:
+    """Dedicated source credential; only the fixed report release GET is exposed."""
+    def __init__(self,token):
+        need(type(token) is str and re.fullmatch('[A-Za-z0-9_.-]{8,4096}',token))
+        self._api=GitHubAPI(token)
+    def request(self,method,path):
+        need(method=='GET' and path==REPORT_RELEASE_PATH)
+        return self._api.request('GET',REPORT_RELEASE_PATH)
+
+def report_release_reader(env):
+    # One-shot wiring requires the existing source credential. Missing/invalid
+    # values stop; an API failure is never retried with the Actions/Store token.
+    return ReportReleaseReader(env.get('MARKET_DATA_SOURCE_TOKEN',''))
+
+
+def check_private_readiness(api,store,authority,grant,*,now,release_api=None):
     repository=readiness_call('READINESS_REPOSITORY',api.request,'GET','/repos/'+STORE)
     need(repository.get('private') is True and repository.get('id')==grant['repository_id']==authority['repository_id'] and
          repository.get('full_name')==STORE and repository['owner']['id']==grant['owner_id']==authority['owner_id'])
@@ -220,7 +237,7 @@ def check_private_readiness(api,store,authority,grant,*,now):
          ready.get('path')==VERIFIER and ready.get('status')=='completed' and ready.get('conclusion')=='success' and
          ready.get('run_attempt')==1 and ready.get('event')=='workflow_dispatch' and
          ready['actor']['id']==ready['triggering_actor']['id']==grant['owner_id'])
-    release=readiness_call('READINESS_CONSUMER_RELEASE',api.request,'GET','/repos/yuatom/stock-dairy/contents/state/runtime-release.json?ref=main')
+    release=readiness_call('READINESS_CONSUMER_RELEASE',(api if release_api is None else release_api).request,'GET',REPORT_RELEASE_PATH)
     need(release.get('type')=='file' and release.get('path')=='state/runtime-release.json' and release.get('encoding')=='base64')
     raw=base64.b64decode(release['content'].replace('\n',''),validate=True)
     need(B.blob_sha(raw)==release['sha'] and B._parse(raw,canonical=False)['repository_commit_sha']==grant['consumer_sha'])

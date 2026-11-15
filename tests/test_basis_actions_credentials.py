@@ -19,7 +19,7 @@ def test_invalid_explicit_actions_token_never_falls_back(invalid):
 @pytest.mark.parametrize('dedicated',[False,True])
 def test_cli_uses_actions_for_api_and_original_for_store(monkeypatch,capsys,module,dedicated):
     sha='a'*40;seen={}
-    env={'MARKET_DATA_STORE_TOKEN':'synthetic-store','DAILY_BASIS_GRANT_COMMITMENT':'b'*64,'GITHUB_RUN_ID':'1','GITHUB_ACTIONS':'true','GITHUB_EVENT_NAME':'schedule','GITHUB_RUN_ATTEMPT':'1','GITHUB_REPOSITORY':H.COMPUTE,'GITHUB_SHA':sha,'GITHUB_JOB':'collect'}
+    env={'MARKET_DATA_SOURCE_TOKEN':'synthetic-source','MARKET_DATA_STORE_TOKEN':'synthetic-store','DAILY_BASIS_GRANT_COMMITMENT':'b'*64,'GITHUB_RUN_ID':'1','GITHUB_ACTIONS':'true','GITHUB_EVENT_NAME':'schedule','GITHUB_RUN_ATTEMPT':'1','GITHUB_REPOSITORY':H.COMPUTE,'GITHUB_SHA':sha,'GITHUB_JOB':'collect'}
     if dedicated:env['MARKET_DATA_BASIS_ACTIONS_TOKEN']='synthetic-actions'
     monkeypatch.setattr(module.os,'environ',env)
     monkeypatch.setattr(module,'_quiet',contextlib.nullcontext)

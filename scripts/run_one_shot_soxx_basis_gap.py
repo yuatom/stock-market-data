@@ -8,7 +8,7 @@ import re
 from zoneinfo import ZoneInfo
 from scripts import provider_basis_snapshot as B
 from scripts.daily_basis_updates import DailyUpdater,GrantAuthority,provider_capture
-from scripts.run_daily_basis_route import (GitHubAPI,basis_actions_token,check_private_readiness,dispatch_verify_once,
+from scripts.run_daily_basis_route import (GitHubAPI,basis_actions_token,report_release_reader,check_private_readiness,dispatch_verify_once,
     wait_for_daily_budget_window,_quiet,_source,_environment,ReadinessFailure,READINESS_STEPS)
 from scripts import run_basis_actions_readiness_probe as readiness_probe
 from scripts.daily_basis_remote import RemoteGitStore,RemoteStoreError,SAFE_PHASES
@@ -118,7 +118,7 @@ def readiness_arguments(commitment,runner_id,runner_name,expires,preflight_only)
     return validate_readiness(dict(commitment=commitment,runner_id=int(runner_id),runner_name=runner_name,expires=expires))
 
 
-def run_once(*,store,api,scope_commit,scope_sha,expected_store_sha,compute_sha,env,clock,key,access,source_check,capture=None,preflight_only=False,readiness=None):
+def run_once(*,store,api,scope_commit,scope_sha,expected_store_sha,compute_sha,env,clock,key,access,source_check,capture=None,preflight_only=False,readiness=None,release_api=None):
     stage="INITIALIZATION"
     try:
         need(type(preflight_only) is bool)
@@ -143,7 +143,7 @@ def run_once(*,store,api,scope_commit,scope_sha,expected_store_sha,compute_sha,e
             validate_surface(env,run,repository,compute_sha)
             need(run['workflow_id']==scope['runtime_workflow_id'] and repository['owner']['id']==scope['owner_id'])
             stage="PRIVATE_READINESS"
-            if readiness is None:private=check_private_readiness(api,store,scope,grant,now=clock().isoformat())
+            if readiness is None:private=check_private_readiness(api,store,scope,grant,now=clock().isoformat(),**({'release_api':release_api} if release_api is not None else {}))
             stage="GRANT_BASELINE"
             u=DailyUpdater(store,*loaded,GrantAuthority(B.sha(loaded[0]),compute_sha,scope['consumer_sha'],scope['workflow_source_sha'],B.sha(loaded[1])),clock=clock)
             stage="BUDGET_WINDOW"
@@ -171,7 +171,7 @@ def run_once(*,store,api,scope_commit,scope_sha,expected_store_sha,compute_sha,e
                 wait_for_daily_budget_window(u,slot,clock=clock)
                 need(clock()<B._stamp(readiness['expires']))
                 stage="PRIVATE_READINESS"
-                private=check_private_readiness(api,store,{**scope,'readiness_run_id':proof['run_id']},grant,now=clock().isoformat())
+                private=check_private_readiness(api,store,{**scope,'readiness_run_id':proof['run_id']},grant,now=clock().isoformat(),**({'release_api':release_api} if release_api is not None else {}))
                 source_check();need(store.head()==expected_store_sha and clock()<B._stamp(readiness['expires']))
                 runner_expectation=dict(runner_id=readiness['runner_id'],runner_name=readiness['runner_name'],labels=sorted(readiness_probe.LABELS),expires=readiness['expires'])
             stage="CAPTURE_AND_CANDIDATE"
@@ -203,12 +203,13 @@ def main():
             def source_check():
                 with _environment():step('SOURCE_GATE',_source,compute,args.compute_sha)
             api=step('INITIALIZATION',lambda:GitHubAPI(basis_actions_token(os.environ)))
+            release_api=step('INITIALIZATION',report_release_reader,os.environ)
             def platform_guard():
                 repo=api.request('GET','/repos/'+COMPUTE);run=api.request('GET','/repos/'+COMPUTE+'/actions/runs/'+os.environ['GITHUB_RUN_ID'])
                 validate_surface(dict(os.environ),run,repo,args.compute_sha)
             source_check();step('PLATFORM_GATE',platform_guard)
             store=step('STORE_ADAPTER',RemoteGitStore,Path(args.store),token,source_recheck=source_check,platform_guard=platform_guard)
-            result=run_once(store=store,api=api,scope_commit=args.scope_commit,scope_sha=args.scope_sha,expected_store_sha=args.expected_store_sha,compute_sha=args.compute_sha,env=dict(os.environ),clock=lambda:datetime.now(timezone.utc),key=key,access=yaml.safe_load((compute/'config/market-data-collector-access.yaml').read_text()),source_check=source_check,preflight_only=args.preflight_only=='true',readiness=readiness)
+            result=run_once(store=store,api=api,scope_commit=args.scope_commit,scope_sha=args.scope_sha,expected_store_sha=args.expected_store_sha,compute_sha=args.compute_sha,env=dict(os.environ),clock=lambda:datetime.now(timezone.utc),key=key,access=yaml.safe_load((compute/'config/market-data-collector-access.yaml').read_text()),source_check=source_check,preflight_only=args.preflight_only=='true',readiness=readiness,release_api=release_api)
         print(json.dumps(result));return 0
     except Exception as exc:print(json.dumps(failure_result(exc)));return 2
 
