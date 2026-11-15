@@ -93,6 +93,7 @@ jobs:
           READINESS_RUNNER_ID: ${{ inputs.readiness_runner_id }}
           READINESS_RUNNER_NAME: ${{ inputs.readiness_runner_name }}
           READINESS_EXPIRES: ${{ inputs.readiness_expires }}
+          MARKET_DATA_SOURCE_TOKEN: ${{ secrets.MARKET_DATA_SOURCE_TOKEN }}
           MARKET_DATA_BASIS_ACTIONS_TOKEN: ${{ secrets.MARKET_DATA_BASIS_ACTIONS_TOKEN }}
           MARKET_DATA_STORE_TOKEN: ${{ secrets.MARKET_DATA_STORE_TOKEN }}
           TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
