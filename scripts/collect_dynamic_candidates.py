@@ -334,12 +334,16 @@ def collect_request(*, request: dict[str, Any], store_root: Path, store_config_p
                 config=config,
                 access=access,
                 eligible_universe=[(symbol, "stocks") for symbol in symbols],
+                **({'durable_owner':durable_owner} if durable_owner is not None else {}),
             )
         except DynamicPublicationUnknown:
             raise
         except Exception as exc:
             result=dict(mode=f'discovery_{stage}',status='STOPPED',snapshot_written=False,market_fact_authority=False,
                         automatic_retry_allowed=False,intraday_failure=type(exc).__name__,provider_charge_status='UNKNOWN')
+    if durable_owner is not None and durable_owner.intraday_scope:
+        outcomes=durable_owner.intraday_outcomes
+        result['intraday_execution']=dict(attempts=outcomes,conservative_reserved_credits=sum(x['reservation'] in ('DEBIT_CONFIRMED','DEBIT_CONFIRMED_NO_HTTP') for x in outcomes),provider_charge_status='NOT_VERIFIED',snapshot_complete=bool(result.get('snapshot_written')))
     if daily_failures and result.get('status')=='ok':
         result['status']='partial'
     result.update(
