@@ -1,0 +1,50 @@
+name: Source Release Readiness
+on:
+  workflow_dispatch:
+    inputs:
+      expected_compute_sha:
+        type: string
+        required: true
+      expected_consumer_sha:
+        type: string
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: source-release-readiness
+  cancel-in-progress: false
+jobs:
+  source_readiness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Exact manual source invocation
+        env:
+          EXPECTED_COMPUTE_SHA: ${{ inputs.expected_compute_sha }}
+          EXPECTED_CONSUMER_SHA: ${{ inputs.expected_consumer_sha }}
+        shell: python
+        run: |
+          import os,re
+          assert os.environ['GITHUB_EVENT_NAME']=='workflow_dispatch'
+          assert os.environ['GITHUB_REF']=='refs/heads/main'
+          assert os.environ['GITHUB_RUN_ATTEMPT']=='1'
+          assert os.environ['GITHUB_REPOSITORY']=='yuatom/stock-market-data'
+          assert os.environ['GITHUB_ACTOR']==os.environ['GITHUB_TRIGGERING_ACTOR']=='yuatom'
+          for name in ('EXPECTED_COMPUTE_SHA','EXPECTED_CONSUMER_SHA'):
+              assert re.fullmatch('[0-9a-f]{40}',os.environ[name])
+          assert os.environ['GITHUB_SHA']==os.environ['EXPECTED_COMPUTE_SHA']
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.expected_compute_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check PyYAML==6.0.3
+      - name: Read fixed report release once
+        env:
+          MARKET_DATA_SOURCE_TOKEN: ${{ secrets.MARKET_DATA_SOURCE_TOKEN }}
+          EXPECTED_COMPUTE_SHA: ${{ inputs.expected_compute_sha }}
+          EXPECTED_CONSUMER_SHA: ${{ inputs.expected_consumer_sha }}
+        run: python -B -m scripts.run_source_release_readiness --expected-compute-sha "$EXPECTED_COMPUTE_SHA" --expected-consumer-sha "$EXPECTED_CONSUMER_SHA"
