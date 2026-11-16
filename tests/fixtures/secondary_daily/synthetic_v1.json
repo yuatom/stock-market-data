@@ -1,0 +1,20 @@
+{
+  "fixture_kind": "synthetic_only_not_market_evidence",
+  "symbol": "TEST",
+  "as_of_date": "2020-01-04",
+  "sina_text": "/*<script>location.href='//sina.com';</script>*/\nvar([{\"d\":\"2020-01-02\",\"o\":\"100.1234567890123456789\",\"h\":\"101\",\"l\":\"99\",\"c\":\"100\",\"v\":null},{\"d\":\"2020-01-03\",\"o\":\"25\",\"h\":\"26\",\"l\":\"24\",\"c\":\"25\",\"v\":\"9007199254740993\"}]);",
+  "yahoo_payload": {
+    "chart": {
+      "error": null,
+      "result": [{
+        "meta": {"symbol": "TEST", "currency": "USD", "exchangeTimezoneName": "America/New_York", "dataGranularity": "1d"},
+        "timestamp": [1577975400, 1578061800],
+        "indicators": {
+          "quote": [{"open": ["100.1234567890123456789", "25"], "high": ["101", "26"], "low": ["99", "24"], "close": ["100", "25"], "volume": [null, 9007199254740993]}],
+          "adjclose": [{"adjclose": ["25", "25"]}]
+        },
+        "events": {"splits": {"1578061800": {"date": 1578061800, "numerator": 4, "denominator": 1, "splitRatio": "4:1"}}}
+      }]
+    }
+  }
+}
