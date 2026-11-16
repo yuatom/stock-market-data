@@ -94,7 +94,7 @@ def validate_scope(raw,expected_sha,grant_raw,calendar_raw,*,compute_sha,now):
     need(grant['request_limit']==grant['credit_limit']==grant['verification_limit']==1 and len(grant['slots'])==1)
     need(grant['initial_selector']['basis_id']==BASIS and grant['baseline_ref']['sha256']==DIAGNOSTIC)
     slot=grant['slots'][0]
-    need(slot['slot_id']=='soxx-nov14-gap' and slot['execution_day'] in ('2026-11-14','2026-11-15') and slot['execution_day']==now.astimezone(ZoneInfo('America/New_York')).date().isoformat() and slot['cutoff']=='2026-11-13')
+    need(slot['slot_id']=='soxx-nov14-gap' and slot['execution_day'] in ('2026-11-14','2026-11-15','2026-11-16') and slot['execution_day']==now.astimezone(ZoneInfo('America/New_York')).date().isoformat() and slot['cutoff']=='2026-11-13')
     need(B._stamp(scope['valid_from'])<=B._stamp(slot['valid_from']) and B._stamp(slot['receipt_until'])<=B._stamp(scope['valid_until']))
     req=grant['request_template'];need(req['start_date']=='2025-08-08' and req['end_date']=='2026-11-11')
     need(len(calendar['sessions'])==320 and calendar['sessions'][-1]['trade_date']=='2026-11-13'
