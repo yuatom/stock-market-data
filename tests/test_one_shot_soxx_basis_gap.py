@@ -23,11 +23,31 @@ class OneShotScope(unittest.TestCase):
             for key in keys:obj[key]=(datetime.fromisoformat(obj[key])+timedelta(days=1)).isoformat()
         g['slots'][0]['execution_day']='2026-11-15'
         self.validate(s,g,c,n)
+    def nov16_fixture(self):
+        s,g,c,n=self.fixture();n=n+timedelta(days=2)
+        for obj,keys in ((s,('valid_from','valid_until','actions_free_until')),(g['slots'][0],('valid_from','receipt_until'))):
+            for key in keys:obj[key]=(datetime.fromisoformat(obj[key])+timedelta(days=2)).isoformat()
+        g['slots'][0]['execution_day']='2026-11-16'
+        return s,g,c,n
+    def test_authorized_nov16_execution_keeps_nov13_cutoff(self):
+        self.validate(*self.nov16_fixture())
+    def test_nov16_execution_rejects_wrong_new_york_day(self):
+        s,g,c,n=self.nov16_fixture()
+        # UTC Nov 16 is still NY Nov 15 before 05:00 UTC.
+        n=n.replace(hour=4)
+        s['valid_from']=(n-timedelta(hours=1)).isoformat()
+        with self.assertRaises(ValueError):self.validate(s,g,c,n)
+    def test_nov17_current_day_not_implicitly_authorized(self):
+        s,g,c,n=self.nov16_fixture();n=n+timedelta(days=1)
+        for obj,keys in ((s,('valid_from','valid_until','actions_free_until')),(g['slots'][0],('valid_from','receipt_until'))):
+            for key in keys:obj[key]=(datetime.fromisoformat(obj[key])+timedelta(days=1)).isoformat()
+        g['slots'][0]['execution_day']='2026-11-17'
+        with self.assertRaises(ValueError):self.validate(s,g,c,n)
     def test_wrong_accounting_day_rejected(self):
         s,g,c,n=self.fixture();g['slots'][0]['execution_day']='2026-11-15'
         with self.assertRaises(ValueError):self.validate(s,g,c,n)
     def test_future_day_not_implicitly_authorized(self):
-        s,g,c,n=self.fixture();g['slots'][0]['execution_day']='2026-11-16'
+        s,g,c,n=self.fixture();g['slots'][0]['execution_day']='2026-11-17'
         with self.assertRaises(ValueError):self.validate(s,g,c,n)
     def test_extra_request_rejected(self):
         s,g,c,n=self.fixture();g['request_limit']=2
