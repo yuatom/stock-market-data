@@ -30,13 +30,40 @@ GRANT_KEYS=('schema_version','kind','repository','repository_id','owner_id','com
     'allowed_actions','volume_policy')
 
 
-class DailyBasisError(RuntimeError):pass
+CAPTURE_DETAILS={
+    ('capture_preflight_failed','preflight',0):'CAPTURE_PREFLIGHT',
+    ('capture_preflight_failed','request_guard',0):'CAPTURE_REQUEST_GUARD',
+    ('capture_transport_failed','transport',1):'CAPTURE_TRANSPORT',
+    ('capture_retention_unconfirmed','raw_retention',1):'CAPTURE_RAW_RETENTION',
+    ('capture_evidence_invalid','evidence',1):'CAPTURE_EVIDENCE',
+    ('capture_retention_unconfirmed','envelope_retention',1):'CAPTURE_ENVELOPE_RETENTION',
+}
+SAFE_CAPTURE_DETAILS=frozenset(CAPTURE_DETAILS.values())
+
+
+class DailyBasisError(RuntimeError):
+    def __init__(self,message,*,safe_capture_detail='UNSPECIFIED'):
+        self.safe_capture_detail=(safe_capture_detail if type(safe_capture_detail) is str and
+            safe_capture_detail in SAFE_CAPTURE_DETAILS else 'UNSPECIFIED')
+        super().__init__(message)
+
+
+def _capture_detail(error):
+    from scripts.rebase_market_data_baseline import CaptureOnlyError
+    # Match the concrete owner error and complete fixed tuple, not arbitrary
+    # exception attributes. Attempt count is not evidence of provider billing.
+    if type(error) is not CaptureOnlyError:return 'UNSPECIFIED'
+    if type(error.code) is not str or type(error.phase) is not str or type(error.requests_attempted) is not int:
+        return 'UNSPECIFIED'
+    return CAPTURE_DETAILS.get((error.code,error.phase,error.requests_attempted),'UNSPECIFIED')
 
 
 def guarded(function):
     def call(*args,**kwargs):
         try:return function(*args,**kwargs)
-        except Exception:raise DailyBasisError('DAILY_BASIS_STOPPED_INSPECT_NO_RETRY') from None
+        except Exception as exc:
+            detail=exc.safe_capture_detail if type(exc) is DailyBasisError else _capture_detail(exc)
+            raise DailyBasisError('DAILY_BASIS_STOPPED_INSPECT_NO_RETRY',safe_capture_detail=detail) from None
     return call
 
 

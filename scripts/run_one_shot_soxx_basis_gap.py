@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 from zoneinfo import ZoneInfo
 from scripts import provider_basis_snapshot as B
-from scripts.daily_basis_updates import DailyUpdater,GrantAuthority,provider_capture
+from scripts.daily_basis_updates import DailyUpdater,GrantAuthority,provider_capture,DailyBasisError,SAFE_CAPTURE_DETAILS
 from scripts.run_daily_basis_route import (GitHubAPI,basis_actions_token,report_release_reader,check_private_readiness,dispatch_verify_once,
     wait_for_daily_budget_window,_quiet,_source,_environment,ReadinessFailure,READINESS_STEPS)
 from scripts import run_basis_actions_readiness_probe as readiness_probe
@@ -28,7 +28,7 @@ STAGES=frozenset({'INITIALIZATION','SOURCE_GATE','PLATFORM_GATE','STORE_ADAPTER'
     'RUN_AUTHORITY','PRIVATE_READINESS','GRANT_BASELINE','BUDGET_WINDOW',
     'CAPTURE_AND_CANDIDATE','PRIVATE_VERIFICATION','PROMOTION','CONSUMER_READ','PRECLAIM_CHECK','SAME_PROCESS_READINESS'})
 
-SAFE_DETAILS=SAFE_PHASES|READINESS_STEPS
+SAFE_DETAILS=SAFE_PHASES|READINESS_STEPS|SAFE_CAPTURE_DETAILS
 
 class OneShotFailure(RuntimeError):
     def __init__(self,stage,error):
@@ -39,6 +39,8 @@ class OneShotFailure(RuntimeError):
                        'CONTRACT_OR_INPUT' if isinstance(error,(ValueError,KeyError,TypeError)) else
                        'GUARDED_OPERATION')
         self.detail=error.safe_phase if isinstance(error,RemoteStoreError) and error.safe_phase in SAFE_PHASES else 'UNSPECIFIED'
+        if type(error) is DailyBasisError and type(error.safe_capture_detail) is str and error.safe_capture_detail in SAFE_CAPTURE_DETAILS:
+            self.detail=error.safe_capture_detail
         self.http_status=None
         if isinstance(error,ReadinessFailure):
             self.detail=error.safe_step if error.safe_step in READINESS_STEPS else 'UNSPECIFIED'
