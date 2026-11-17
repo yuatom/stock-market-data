@@ -16,6 +16,9 @@ EXCEPTION_CLASSES = frozenset({
     "CoverageContractError", "RuntimeError", "ValueError", "TypeError",
     "KeyError", "AssertionError", "FileNotFoundError", "PermissionError",
     "JSONDecodeError", "ModuleNotFoundError", "ImportError", "OSError",
+    "KnownIntradayRejection", "DynamicPublicationUnknown", "MarketDataError",
+    "MarketDataConflict", "MarketDataIdentityError", "MarketDataSourceAffinityError",
+    "BudgetExceeded", "StoreIntegrityError",
 })
 
 
@@ -44,7 +47,15 @@ def summarize_failure(exit_code: int, error_file: Path) -> dict[str, object]:
             lines = lines[1:]
         terminal = next((line for line in reversed(lines) if line.strip()), "")
         prefix = terminal.partition(":")[0]
-        name = prefix.removeprefix("market_data_collection.")
+        allowed_modules = {
+            "market_data_collection": {"CoverageContractError"},
+            "dynamic_intraday_response": {"KnownIntradayRejection"},
+            "dynamic_daily_owner": {"DynamicPublicationUnknown"},
+            "market_data_store": {"MarketDataError", "MarketDataConflict", "MarketDataIdentityError", "MarketDataSourceAffinityError"},
+            "market_data_collectors": {"BudgetExceeded", "StoreIntegrityError"},
+        }
+        module, sep, cls = prefix.rpartition(".")
+        name = cls if sep and cls in allowed_modules.get(module, set()) else (prefix if not sep else "")
         if name in EXCEPTION_CLASSES and terminal.startswith(prefix + ":"):
             payload["observed_exception_class"] = name
     except (OSError, ValueError):
