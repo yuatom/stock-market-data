@@ -85,11 +85,58 @@ class DataPlaneWriteBoundaryTest(unittest.TestCase):
                 verification = [
                     step for step in steps if step.get("name") == "Verify durable Store publication"
                 ]
+                if relative == ".github/workflows/dynamic-candidate-runtime.yml":
+                    # Current guarded CLI owns publication, including exact-manifest
+                    # durability. Do not reintroduce the obsolete outer publisher.
+                    self.assertNotIn("if", next(iter(workflow["jobs"].values())))
+                    guarded_steps = [step for step in steps if step.get("id") == "collect"]
+                    self.assertEqual(len(guarded_steps), 1)
+                    self._assert_dynamic_guarded_step(guarded_steps[0])
+                    self.assertEqual(len(verification), 0)
+                    executable_mentions = 0
+                    for step in steps:
+                        run = "\n".join(line for line in step.get("run", "").splitlines() if not line.lstrip().startswith("#"))
+                        executable_mentions += run.count("scripts/run_dynamic_guarded.py")
+                        for forbidden in ("git push", "git pull", "git add", "verify_store_publication.py"):
+                            self.assertNotIn(forbidden, run)
+                    self.assertEqual(executable_mentions, 1)
+                    continue
                 self.assertEqual(len(verification), 1)
                 run = verification[0]["run"]
                 self.assertIn("verify_store_publication.py", run)
                 self.assertIn("--expected-commit", run)
                 self.assertIn("--required-manifest", run)
+
+    def _assert_dynamic_guarded_step(self, step):
+        import os, shlex, subprocess, tempfile
+        self.assertNotIn("if", step)
+        self.assertNotIn("continue-on-error", step)
+        self.assertEqual(step.get("shell"), "bash")
+        self.assertEqual(step.get("working-directory"), "compute")
+        # Assert the existing bounded wrapper, not arbitrary shell substrings.
+        # In particular, comments, echo, exit, conditionals and shell functions
+        # cannot stand in for a directly executed guarded command.
+        logical = step["run"].replace("\\\n", " ").splitlines()
+        commands = [shlex.split(line, comments=True) for line in logical]
+        commands = [tokens for tokens in commands if tokens]
+        expected = ['python', '-B', 'scripts/run_dynamic_guarded.py',
+                    '--control', '../control', '--control-ref', '$CONTROL_REF',
+                    '--store', '../store']
+        self.assertEqual(commands, [['set', '-euo', 'pipefail'], expected])
+        # Execute only this validated shell wrapper against a fake Python. Never
+        # import/run the actual collector; a nonzero child must propagate.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            binary = root / 'python'; capture = root / 'args'
+            binary.write_text('#!/bin/bash\nprintf "%s\\n" "$@" > "$CAPTURE"\nexit 23\n')
+            binary.chmod(0o700)
+            result = subprocess.run(['/bin/bash', '--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', step['run']],
+                                    cwd=root, capture_output=True, text=True,
+                                    env={'PATH': str(root), 'CONTROL_REF': 'synthetic-control', 'CAPTURE': str(capture)})
+            self.assertEqual(result.returncode, 23, result.stderr)
+            self.assertEqual(capture.read_text().splitlines(),
+                             ['-B', 'scripts/run_dynamic_guarded.py', '--control', '../control',
+                              '--control-ref', 'synthetic-control', '--store', '../store'])
 
     def test_readiness_writer_stages_only_state_and_generated_publication_manifest(self):
         workflow = yaml.safe_load(
@@ -152,6 +199,49 @@ class DataPlaneWriteBoundaryTest(unittest.TestCase):
         self.assertTrue(interface["research_runtime_implicit_historical_repair_forbidden"])
         self.assertTrue(interface["request_is_control_state_not_market_fact"])
 
+
+
+
+class DynamicManifestBoundaryTest(unittest.TestCase):
+    """Real finalizer/StorePublisher on synthetic local Git; no provider/network."""
+    def setUp(self):
+        from test_dynamic_daily_owner_integration import DynamicOwnerIntegration
+        self.fixture = DynamicOwnerIntegration()
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        self.result = self.fixture.collect()
+
+    def test_guarded_finalizer_verifies_exact_published_head_and_manifest(self):
+        import run_dynamic_guarded as runtime
+        from unittest.mock import patch
+        from test_dynamic_daily_owner_integration import git
+        f = self.fixture
+        with patch.object(runtime.durable, 'verify_publication', wraps=runtime.durable.verify_publication) as verify:
+            result = runtime.finalize(f.owner, self.result)
+        verify.assert_called_once()
+        args, kwargs = verify.call_args
+        self.assertEqual(args, (f.repo, result['store_commit_sha']))
+        self.assertEqual(kwargs, {'required_manifest': 'data/market-data/' + self.result['publication_manifest_path']})
+        self.assertEqual(result['store_commit_sha'], git(f.remote, 'rev-parse', 'refs/heads/main'))
+        self.assertEqual(result['publication_status'], 'DURABILITY_VERIFIED')
+
+    def test_guarded_finalizer_verification_failure_cannot_emit_success_or_retry(self):
+        import run_dynamic_guarded as runtime
+        from dynamic_daily_owner import DynamicPublicationUnknown
+        from unittest.mock import patch
+        from test_dynamic_daily_owner_integration import git
+        f = self.fixture
+        with patch.object(runtime.durable, 'verify_publication', side_effect=RuntimeError('synthetic exact manifest rejection')) as verify:
+            with self.assertRaises(DynamicPublicationUnknown):
+                runtime.finalize(f.owner, self.result)
+            verify.assert_called_once()
+            head = git(f.remote, 'rev-parse', 'refs/heads/main')
+            with self.assertRaises(DynamicPublicationUnknown):
+                runtime.finalize(f.owner, self.result)
+            verify.assert_called_once()
+        self.assertTrue(f.owner.failed)
+        self.assertNotIn('publication_status', self.result)
+        self.assertEqual(head, git(f.remote, 'rev-parse', 'refs/heads/main'))
 
 if __name__ == "__main__":
     unittest.main()

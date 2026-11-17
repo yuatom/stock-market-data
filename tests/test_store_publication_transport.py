@@ -387,7 +387,7 @@ class TransportOwnerTests(unittest.TestCase):
         import yaml
         owner = yaml.safe_load((ROOT / "config/store-publication-durability.yaml").read_text())
         contract = owner["verification_transport"]
-        self.assertEqual(owner["contract_version"], 4)
+        self.assertEqual(owner["contract_version"], 5)
         self.assertEqual(V.REMOTE_ATTEMPTS, contract["max_attempts_per_operation"])
         self.assertEqual(V.REMOTE_COMMAND_TIMEOUT_SECONDS, contract["command_timeout_seconds"])
         self.assertEqual(V.REMOTE_BUDGET_SECONDS, contract["shared_elapsed_budget_seconds"])
