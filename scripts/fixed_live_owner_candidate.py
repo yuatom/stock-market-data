@@ -31,6 +31,24 @@ class FixedLiveOwner(DynamicDailyOwner):
         self.request_sha=hashlib.sha256(self.request_raw).hexdigest()
         self.intraday_scope=None;self.allowed={self.budget_relative};self.active=None
         self.reservation='NOT_STARTED';self.failed=False;self.predebit_publish_started=False
+    def reserve(self,symbol,h,budget):
+        from admit_market_data_baseline import AdmissionError
+        from dynamic_intraday_response import KnownIntradayRejection
+        try:
+            return super().reserve(symbol,h,budget)
+        except AdmissionError as exc:
+            # Only deterministic pre-debit budget/time refusals may retain the
+            # fixed window's qualified primary facts. No HTTP or publication
+            # may have begun, and clean exact HEAD must still be verified.
+            if (exc.code not in {'budget_exhausted','deadline_exceeded','budget_slot_expired'}
+                    or self.failed or self.reservation!='NOT_DEBITED'
+                    or not self.active or self.active.get('called')
+                    or self.predebit_publish_started
+                    or self.safe_path(self.active['claim']).exists()):
+                self.abort()
+            self.assert_current()
+            self.finish([], 'REJECTED')  # Existing no-claim cleanup; no fake terminal.
+            raise KnownIntradayRejection(exc.code) from None
     @property
     def mode(self):return 'fixed_intraday_attempt'
     def business_request_identity(self):return self.request.get('control_request_id')
