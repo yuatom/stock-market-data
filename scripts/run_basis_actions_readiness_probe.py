@@ -11,9 +11,9 @@ COMPUTE='yuatom/stock-market-data';STORE='yuatom/stock-market-data-store'
 WORKFLOW='.github/workflows/basis-actions-readiness-probe.yml'
 CALLER_PROFILES={'isolated':(WORKFLOW,'probe'),'one_shot':('.github/workflows/one-shot-soxx-basis-gap.yml','soxx_gap')}
 OWNER=10399225;STORE_ID=1335101677;WORKFLOW_ID=415302427
-SOURCE='cb7c3302d131278f5564eb702ce29ba4ef8ee08d'
+SOURCE='787e1d66f4d8ff5215842224589bb9a216a660d7'
 BASIS='812eefd58ef3cc569af6fc53fb6c1c54364234f0f1fa21d5c806bc8e385c9433'
-LABELS={'self-hosted','macOS','ARM64','soxx-private-once-20261114'}
+LABELS={'self-hosted','macOS','ARM64','soxx-private-once-20261118-nov17'}
 STAGES={'INPUT','SOURCE','CALLER','RECEIPT','PRIVATE_TARGET','DISPATCH','POLL','DELIVERY'}
 INPUT_DETAILS={'UNSPECIFIED','PIN_PARAMETERS','TIME_WINDOW','RUNNER_PARAMETERS','CREDENTIAL_SELECTION'}
 STOP='BASIS_ACTIONS_READINESS_STOPPED_NO_RETRY'
