@@ -96,11 +96,33 @@ def validate_scope(raw,expected_sha,grant_raw,calendar_raw,*,compute_sha,now):
     need(grant['request_limit']==grant['credit_limit']==grant['verification_limit']==1 and len(grant['slots'])==1)
     need(grant['initial_selector']['basis_id']==BASIS and grant['baseline_ref']['sha256']==DIAGNOSTIC)
     slot=grant['slots'][0]
-    need(slot['slot_id']=='soxx-nov14-gap' and slot['execution_day'] in ('2026-11-14','2026-11-15','2026-11-16') and slot['execution_day']==now.astimezone(ZoneInfo('America/New_York')).date().isoformat() and slot['cutoff']=='2026-11-13')
+    need(slot['execution_day']==now.astimezone(ZoneInfo('America/New_York')).date().isoformat())
+    if slot['slot_id']=='soxx-nov14-gap':
+        # Preserve the consumed historical scope, never extend it to a new day.
+        need(slot['execution_day'] in ('2026-11-14','2026-11-15','2026-11-16') and slot['cutoff']=='2026-11-13')
+        need(len(calendar['sessions'])==320 and calendar['sessions'][-1]['trade_date']=='2026-11-13'
+             and calendar['sessions'][-2]['trade_date']=='2026-11-12')
+    else:
+        # Only this separately approved, hash-bound recovery target is added.
+        # Independent grant/calendar bytes, not the name alone, remain authority.
+        need(slot['slot_id']=='soxx-2026-11-17-gap' and slot['execution_day']=='2026-11-18'
+             and slot['cutoff']=='2026-11-17')
+        maturity=datetime(2026,11,18,7,0,tzinfo=ZoneInfo('America/New_York'))
+        need(maturity<=B._stamp(slot['valid_from'])<=now<B._stamp(slot['valid_until']))
+        B._closed(calendar,('schema_version','kind','source_url','known_at','sessions'))
+        need(type(calendar['schema_version']) is int and calendar['schema_version']==1
+             and calendar['kind']=='reviewed_finite_daily_calendar'
+             and calendar['source_url']=='https://www.nyse.com/trade/hours-calendars'
+             and B._stamp(calendar['known_at'])<=now)
+        rows=calendar['sessions'];need(type(rows) is list and 2<=len(rows)<=5000)
+        dates=[]
+        for row in rows:
+            B._closed(row,('trade_date','scheduled_close'))
+            dates.append(B._day(row['trade_date']));need(row['scheduled_close'] in ('13:00','16:00'))
+        need(dates==sorted(set(dates)) and dates[0]==grant['request_template']['start_date']
+             and dates[-1]==slot['cutoff'] and dates[-2]=='2026-11-16')
     need(B._stamp(scope['valid_from'])<=B._stamp(slot['valid_from']) and B._stamp(slot['receipt_until'])<=B._stamp(scope['valid_until']))
     req=grant['request_template'];need(req['start_date']=='2025-08-08' and req['end_date']=='2026-11-11')
-    need(len(calendar['sessions'])==320 and calendar['sessions'][-1]['trade_date']=='2026-11-13'
-         and calendar['sessions'][-2]['trade_date']=='2026-11-12')
     return scope,grant
 
 
@@ -185,7 +207,11 @@ def run_once(*,store,api,scope_commit,scope_sha,expected_store_sha,compute_sha,e
             source_check();u.promote(candidate,verified)
             stage="CONSUMER_READ"
             view=u.read_current(verified,fields=B.PRICE_FIELDS)
-            need(view['record_count']==320 and view['last_trade_date']=='2026-11-13' and view['volume_status']=='BLOCKED_UNRESOLVED')
+            expected_dates=[row['trade_date'] for row in B._parse(loaded[1])['sessions']]
+            need(view['record_count']==len(expected_dates) and view['last_trade_date']==slot['cutoff']
+                 and view['volume_status']=='BLOCKED_UNRESOLVED')
+            if slot['slot_id']=='soxx-2026-11-17-gap':
+                need([row['trade_date'] for row in view['records']]==expected_dates)
             return dict(status='ONE_SHOT_SOXX_GAP_COMPLETE',requests_attempted=1,additional_credits=1,store_sha=store.head(),basis_id=candidate.selector['basis_id'],last_trade_date=view['last_trade_date'],volume_policy='BLOCKED_UNRESOLVED',verification_run_id=verified.run_id,receipt_commitment=candidate.receipt_commitment,**({'readiness_run_id':proof['run_id']} if readiness is not None else {}))
     except OneShotFailure:raise
     except Exception as exc:raise OneShotFailure(stage,exc) from None
@@ -216,3 +242,4 @@ def main():
     except Exception as exc:print(json.dumps(failure_result(exc)));return 2
 
 if __name__=='__main__':raise SystemExit(main())
+

@@ -64,6 +64,90 @@ class OneShotScope(unittest.TestCase):
     def test_wrong_diagnostic_rejected(self):
         s,g,c,n=self.fixture();g['baseline_ref']['sha256']='e'*64
         with self.assertRaises(ValueError):self.validate(s,g,c,n)
+    def current_fixture(self):
+        s,g,c,_=self.fixture()
+        now=datetime(2026,11,18,12,0,tzinfo=timezone.utc)
+        for key,hours in (('valid_from',-1),('valid_until',3),('actions_free_until',4)):
+            s[key]=(now+timedelta(hours=hours)).isoformat()
+        slot=g['slots'][0]
+        slot.update(slot_id='soxx-2026-11-17-gap',execution_day='2026-11-18',cutoff='2026-11-17',
+            valid_from=now.isoformat(),valid_until=(now+timedelta(hours=1)).isoformat(),
+            cleanup_until=(now+timedelta(hours=1,minutes=10)).isoformat(),receipt_until=(now+timedelta(hours=2)).isoformat())
+        start=datetime(2025,8,8).date()
+        # Synthetic ordered dates, not an assertion of the official market calendar.
+        dates=[(start+timedelta(days=i)).isoformat() for i in range(320)]+['2026-11-16','2026-11-17']
+        c=dict(schema_version=1,kind='reviewed_finite_daily_calendar',source_url='https://www.nyse.com/trade/hours-calendars',
+            known_at=(now-timedelta(hours=1)).isoformat(),sessions=[dict(trade_date=d,scheduled_close='16:00') for d in dates])
+        return s,g,c,now
+    def test_current_target_accepts_exact_nov17_at_maturity(self):
+        self.validate(*self.current_fixture())
+    def test_current_target_rejects_before_0700_et(self):
+        s,g,c,n=self.current_fixture()
+        with self.assertRaises(ValueError):self.validate(s,g,c,n-timedelta(seconds=1))
+    def test_current_target_rejects_expired_slot_even_with_live_scope(self):
+        s,g,c,n=self.current_fixture()
+        now=n+timedelta(hours=1)
+        self.assertLess(now,datetime.fromisoformat(s['valid_until']))
+        with self.assertRaises(ValueError):self.validate(s,g,c,now)
+    def test_current_target_rejects_other_cutoff_or_future_slot(self):
+        for cutoff,slot in [('2026-11-16','soxx-2026-11-16-gap'),('2026-11-18','soxx-2026-11-18-gap'),('2026-11-17','future-slot')]:
+            with self.subTest(cutoff=cutoff,slot=slot):
+                s,g,c,n=self.current_fixture();g['slots'][0].update(cutoff=cutoff,slot_id=slot)
+                with self.assertRaises(ValueError):self.validate(s,g,c,n)
+    def test_current_target_rejects_old_slot_reused_for_new_day(self):
+        s,g,c,n=self.current_fixture();g['slots'][0]['slot_id']='soxx-nov14-gap'
+        with self.assertRaises(ValueError):self.validate(s,g,c,n)
+    def test_current_target_rejects_missing_duplicate_or_unsorted_calendar(self):
+        for mutate in (lambda c:c['sessions'].pop(),lambda c:c['sessions'].append(c['sessions'][-1]),lambda c:c['sessions'].reverse()):
+            s,g,c,n=self.current_fixture();mutate(c)
+            with self.assertRaises(ValueError):self.validate(s,g,c,n)
+    def test_current_target_rejects_multiple_slots_or_request_increase(self):
+        s,g,c,n=self.current_fixture();g['slots'].append(copy.deepcopy(g['slots'][0]))
+        with self.assertRaises(ValueError):self.validate(s,g,c,n)
+        s,g,c,n=self.current_fixture();g['credit_limit']=2
+        with self.assertRaises(ValueError):self.validate(s,g,c,n)
+    def test_current_target_rejects_expired_wrong_execution_or_future_calendar(self):
+        s,g,c,n=self.current_fixture()
+        with self.assertRaises(ValueError):self.validate(s,g,c,n+timedelta(hours=4))
+        g['slots'][0]['execution_day']='2026-11-19'
+        with self.assertRaises(ValueError):self.validate(s,g,c,n)
+        s,g,c,n=self.current_fixture();c['known_at']=(n+timedelta(seconds=1)).isoformat()
+        with self.assertRaises(ValueError):self.validate(s,g,c,n)
+    def test_current_bound_grant_bytes_cannot_be_changed(self):
+        s,g,c,n=self.current_fixture();self.validate(s,g,c,n);raw=B.encode(s)
+        g['slots'][0]['cutoff']='2026-11-16'
+        with self.assertRaises(ValueError):M.validate_scope(raw,B.sha(raw),B.encode(g),B.encode(c),compute_sha='a'*40,now=n)
+    def test_current_bound_calendar_bytes_cannot_be_changed(self):
+        s,g,c,n=self.current_fixture();self.validate(s,g,c,n);raw=B.encode(s)
+        c['sessions'][-1]['trade_date']='2026-11-16'
+        with self.assertRaises(ValueError):M.validate_scope(raw,B.sha(raw),B.encode(g),B.encode(c),compute_sha='a'*40,now=n)
+    def test_current_consumed_claim_stops_actual_daily_updater_before_debit(self):
+        _,g,c,n=self.current_fixture();u=object.__new__(M.DailyUpdater)
+        u.grant_raw=B.encode(g);u.calendar_raw=B.encode(c);u.store=Mock();u.store.exists.return_value=True
+        u._fresh=Mock(return_value=n);u._previous=Mock();u._debit=Mock();capture=Mock()
+        with self.assertRaises(M.DailyBasisError):u.run_slot(g['slots'][0]['slot_id'],'100-1',capture=capture)
+        u._debit.assert_not_called();u._previous.assert_not_called();capture.assert_not_called()
+    def test_current_final_read_checks_322_records_through_nov17(self):
+        s,g,c,n=self.current_fixture();self.validate(s,g,c,n);raw=B.encode(s)
+        args=self.hosted_mocks();args.update(clock=lambda:n,scope_sha=B.sha(raw))
+        args['store'].read.side_effect=lambda commit,path:raw if path==M.SCOPE_PATH else B.encode(g if 'grant_ref' in path else c)
+        updater=Mock();updater.run_slot.return_value.selector={'basis_id':'e'*64}
+        updater.run_slot.return_value.receipt_commitment='f'*64
+        updater.read_current.return_value=dict(record_count=322,last_trade_date='2026-11-17',volume_status='BLOCKED_UNRESOLVED',records=[{'trade_date':r['trade_date']} for r in c['sessions']])
+        verified=Mock(run_id=222)
+        with patch.object(M,'check_private_readiness',return_value={}),patch.object(M,'DailyUpdater',return_value=updater),patch.object(M,'wait_for_daily_budget_window'),patch.object(M,'dispatch_verify_once',return_value=verified):
+            result=M.run_once(**args)
+            self.assertEqual(result['last_trade_date'],'2026-11-17')
+            updater.run_slot.assert_called_once_with('soxx-2026-11-17-gap','100-1',capture=args['capture'])
+            updater.read_current.return_value['record_count']=320
+            with self.assertRaises(M.OneShotFailure) as failure:M.run_once(**args)
+            self.assertEqual(failure.exception.stage,'CONSUMER_READ')
+            updater.read_current.return_value['record_count']=322
+            updater.read_current.return_value['records'][40]['trade_date']='2026-11-16'
+            # Same count and final date must not conceal a different middle session.
+            with self.assertRaises(M.OneShotFailure) as failure:M.run_once(**args)
+            self.assertEqual(failure.exception.stage,'CONSUMER_READ')
+
     def surface(self):
         env=dict(GITHUB_ACTIONS='true',GITHUB_EVENT_NAME='workflow_dispatch',GITHUB_RUN_ATTEMPT='1',GITHUB_REPOSITORY=M.COMPUTE,GITHUB_SHA='a'*40,GITHUB_REF='refs/heads/main',GITHUB_JOB='soxx_gap',GITHUB_ACTOR='yuatom',GITHUB_TRIGGERING_ACTOR='yuatom',GITHUB_WORKFLOW_REF=M.COMPUTE+'/'+M.WORKFLOW+'@refs/heads/main',GITHUB_RUN_ID='100')
         repo=dict(full_name=M.COMPUTE,id=11,owner={'id':12});run=dict(id=100,repository={'id':11},head_repository={'id':11},head_sha='a'*40,path=M.WORKFLOW,event='workflow_dispatch',run_attempt=1,head_branch='main',status='in_progress',actor={'id':12},triggering_actor={'id':12})
@@ -146,3 +230,4 @@ class SafeDiagnosticTests(unittest.TestCase):
         self.assertEqual(M.failure_result(result)['error_category'],'GUARDED_OPERATION')
 
 if __name__=='__main__':unittest.main()
+
