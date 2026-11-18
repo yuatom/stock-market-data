@@ -13,6 +13,7 @@ import hashlib
 import json
 import math
 import re
+import stat
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 from pathlib import Path
@@ -56,6 +57,54 @@ class MetricProofError(RuntimeError):
 class MetricProofUnavailable(RuntimeError):
     """The required provider-affine series does not exist at all."""
 
+
+
+class MetricProofBasisUnavailable(MetricProofUnavailable):
+    """SOXX is retained but its versioned daily operands are not admitted here."""
+
+
+def _isolate_soxx_catalog(root: Path, symbol: str) -> bool:
+    if symbol != "SOXX":
+        return False
+    path = root / "series-active/daily/twelve_data_basic/SOXX.json"
+    if any(p.is_symlink() for p in (path, *path.parents)):
+        raise MetricProofError("invalid active daily catalog")
+    def unique_pairs(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError("duplicate catalog key")
+            value[key] = item
+        return value
+    try:
+        if not stat.S_ISREG(path.stat().st_mode):
+            raise ValueError("catalog must be a regular file")
+        with path.open("rb") as stream:
+            raw = stream.read(8193)
+        if len(raw) > 8192:
+            raise ValueError("oversized catalog")
+        catalog = json.loads(raw, object_pairs_hook=unique_pairs)
+        if not isinstance(catalog, dict):
+            raise ValueError("invalid catalog shape")
+    except (OSError, ValueError):
+        raise MetricProofError("invalid active daily catalog") from None
+    expected = {"schema_version", "provider", "symbol", "basis_id", "snapshot_blob_sha", "admission_blob_sha"}
+    if (set(catalog) != expected or type(catalog.get("schema_version")) is not int
+            or catalog["schema_version"] != 1 or catalog["provider"] != PROVIDER
+            or catalog["symbol"] != symbol
+            or not isinstance(catalog["basis_id"], str)
+            or not re.fullmatch(r"[0-9a-f]{64}", catalog["basis_id"])
+            or not isinstance(catalog["snapshot_blob_sha"], str)
+            or not HEX40.fullmatch(catalog["snapshot_blob_sha"])
+            or not isinstance(catalog["admission_blob_sha"], str)
+            or not HEX40.fullmatch(catalog["admission_blob_sha"])):
+        raise MetricProofError("invalid active daily catalog")
+    return True
+
+
+def _unavailable_reason(error: MetricProofUnavailable) -> str:
+    return ("active_daily_price_basis_unavailable" if isinstance(error, MetricProofBasisUnavailable)
+            else "provider_affine_daily_series_unavailable")
 
 def canonical_bytes(value: Any) -> bytes:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -151,6 +200,8 @@ def _load_daily_series(root: Path, symbol: str, target_trade_date: str) -> tuple
     try:
         store_integrity.assert_legacy_basis(root, provider=PROVIDER, symbol=symbol)
     except store_integrity.MarketDataError:
+        if _isolate_soxx_catalog(root, symbol):
+            raise MetricProofBasisUnavailable("active_daily_price_basis_unavailable") from None
         raise MetricProofError("explicit_versioned_basis_required") from None
     index_rel = f"series/daily/{PROVIDER}/{symbol.upper()}/_index.json"
     try:
@@ -558,22 +609,22 @@ def verify_proof_source_blobs(root: Path, proof: Mapping[str, Any]) -> None:
         symbol, reason = row.get("symbol"), row.get("reason")
         if (not isinstance(symbol, str) or not symbol or symbol != symbol.upper()
                 or symbol in missing_by_symbol or symbol in subject_symbols
-                or reason not in {"qualified_stage_target_unavailable", "provider_affine_daily_series_unavailable", "provider_affine_daily_series_behind_observed_peer"}):
+                or reason not in {"qualified_stage_target_unavailable", "provider_affine_daily_series_unavailable", "provider_affine_daily_series_behind_observed_peer", "active_daily_price_basis_unavailable"}):
             raise MetricProofError("invalid, duplicate or overlapping proof missing target")
         missing_by_symbol[symbol] = reason
     no_target = observed_symbols - selected_targets.keys()
-    missing_daily: set[str] = set()
+    missing_daily: dict[str, str] = {}
     for symbol in selected_targets:
         try:
             _load_daily_series(root, symbol, trade_date)
-        except MetricProofUnavailable:
-            missing_daily.add(symbol)
+        except MetricProofUnavailable as exc:
+            missing_daily[symbol] = _unavailable_reason(exc)
         except (OSError, ValueError) as exc:
             raise MetricProofError(f"daily-series integrity failure: {symbol}") from exc
     expected_missing = {symbol: "qualified_stage_target_unavailable" for symbol in no_target}
-    expected_missing.update({symbol: "provider_affine_daily_series_unavailable" for symbol in missing_daily})
+    expected_missing.update(missing_daily)
     expected_missing.update({symbol: "provider_affine_daily_series_behind_observed_peer" for symbol in behind})
-    if missing_by_symbol != expected_missing or subject_symbols != set(selected_targets) - missing_daily - behind:
+    if missing_by_symbol != expected_missing or subject_symbols != set(selected_targets) - missing_daily.keys() - behind:
         raise MetricProofError("proof subject/missing target partition does not match verified snapshot and daily series")
 
     for subject in subjects:
@@ -633,10 +684,12 @@ def build_proof(root: Path, *, trade_date: str, stage: str, data_plane_commit_sh
     observed_symbols: set[str] = set()
     targets = _target_observations(root, snapshot, missing_symbols=observed_symbols)
     daily_cache: dict[str, tuple[list[dict[str, Any]], dict[str, Any]]] = {}
+    unavailable_reasons: dict[str, str] = {}
     for symbol in sorted(set(targets) | {"SPY", "QQQ"}):
         try:
             daily_cache[symbol] = _load_daily_series(root, symbol, trade_date)
-        except MetricProofUnavailable:
+        except MetricProofUnavailable as exc:
+            unavailable_reasons[symbol] = _unavailable_reason(exc)
             continue
 
     target_dates = [daily_cache[s][1]['prior_last_trade_date'] for s in targets if s in daily_cache]
@@ -651,7 +704,7 @@ def build_proof(root: Path, *, trade_date: str, stage: str, data_plane_commit_sh
     ]
     for symbol in sorted(targets):
         if symbol not in daily_cache:
-            missing.append({"symbol": symbol, "reason": "provider_affine_daily_series_unavailable"})
+            missing.append({"symbol": symbol, "reason": unavailable_reasons[symbol]})
             continue
         if symbol in behind:
             missing.append({"symbol":symbol,"reason":"provider_affine_daily_series_behind_observed_peer"})
@@ -796,3 +849,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

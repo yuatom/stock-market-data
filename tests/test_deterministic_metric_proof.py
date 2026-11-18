@@ -381,7 +381,88 @@ def _write_three_timestamp_facts(root: Path, *, stage: str, provider: str,
     )
 
 
+def _add_soxx_isolation_fixture(root, stage):
+    snapshot, _, _ = proofmod._load_snapshot(root, "2026-09-05", stage)
+    capture = json.loads((root / snapshot['data_refs'][0]['path']).read_text())
+    fact = dict(capture['qualified_facts'][0], symbol='SOXX', asset_class='etf')
+    path, blob = store.write_capture(root, trade_date='2026-09-05', session='regular',
+        provider=capture['provider'], capture_id=stage+'-soxx', generated_at=snapshot['generated_at'],
+        actual_data_cutoff=snapshot['actual_data_cutoff'], window=capture['window'],
+        feed_scope='synthetic SOXX isolation', qualified_facts=[fact])
+    store.write_snapshot(root, stage=stage, trade_date='2026-09-05', snapshot_id=stage+'-soxx',
+        generated_at='2026-09-05T21:00:00+00:00', data_refs=snapshot['data_refs']+[
+            {'path':path,'blob_sha':blob,'kind':'regular_intraday_capture'}],
+        coverage={'available':4}, missing=[],target_window=snapshot['target_window'],
+        actual_data_cutoff=snapshot['actual_data_cutoff'])
+    catalog=root/'series-active/daily/twelve_data_basic/SOXX.json'
+    catalog.parent.mkdir(parents=True,exist_ok=True)
+    catalog.write_text(json.dumps(dict(schema_version=1,provider='twelve_data_basic',symbol='SOXX',
+        basis_id='a'*64,snapshot_blob_sha='b'*40,admission_blob_sha='c'*40)))
+    return catalog
+
+
 class DeterministicMetricProofTest(unittest.TestCase):
+
+    def test_soxx_isolation_preserves_other_qualified_subjects(self):
+        for stage in ('open_30m','open_60m','close'):
+            with self.subTest(stage=stage):
+                root,_ = _seed_intraday_stage(self.tmp_path / ('isolated-'+stage),stage=stage)
+                original,_ = proofmod.build_proof(root,trade_date='2026-09-05',stage=stage,data_plane_commit_sha='a'*40)
+                _add_soxx_isolation_fixture(root,stage)
+                actual,_ = proofmod.build_proof(root,trade_date='2026-09-05',stage=stage,data_plane_commit_sha='a'*40)
+                self.assertEqual(actual['subjects'],original['subjects'])
+                self.assertEqual(actual['missing'],[{'symbol':'SOXX','reason':'active_daily_price_basis_unavailable'}])
+                proofmod.verify_proof_source_blobs(root,actual)
+                forged=copy.deepcopy(actual);forged['missing'][0]['reason']='provider_affine_daily_series_unavailable'
+                with self.assertRaises(proofmod.MetricProofError):proofmod.verify_proof_source_blobs(root,forged)
+
+    def test_soxx_isolation_rejects_oversized_catalog(self):
+        root,_ = _seed_intraday_stage(self.tmp_path/'oversized-catalog',stage='open_30m')
+        catalog=_add_soxx_isolation_fixture(root,'open_30m')
+        catalog.write_text(catalog.read_text()+' '*8192)
+        with self.assertRaises(proofmod.MetricProofError):proofmod._load_daily_series(root,'SOXX','2026-09-05')
+
+    def test_soxx_isolation_requires_string_hashes_and_regular_catalog(self):
+        root,_ = _seed_intraday_stage(self.tmp_path/'strict-identities',stage='open_30m')
+        catalog=_add_soxx_isolation_fixture(root,'open_30m');original=json.loads(catalog.read_text())
+        for key,width in (('basis_id',64),('snapshot_blob_sha',40),('admission_blob_sha',40)):
+            with self.subTest(key=key):
+                altered=dict(original);altered[key]=int('1'*width);catalog.write_text(json.dumps(altered))
+                with self.assertRaises(proofmod.MetricProofError):proofmod._load_daily_series(root,'SOXX','2026-09-05')
+        catalog.unlink();catalog.mkdir()
+        with self.assertRaises(proofmod.MetricProofError):proofmod._load_daily_series(root,'SOXX','2026-09-05')
+
+    def test_soxx_isolation_never_reads_legacy_and_cannot_be_forged_after_catalog_removal(self):
+        root,_ = _seed_intraday_stage(self.tmp_path/'no-legacy-fallback',stage='open_30m')
+        catalog=_add_soxx_isolation_fixture(root,'open_30m')
+        index=root/'series/daily/twelve_data_basic/SOXX/_index.json'
+        index.parent.mkdir(parents=True);index.write_text('not valid legacy JSON')
+        actual,_=proofmod.build_proof(root,trade_date='2026-09-05',stage='open_30m',data_plane_commit_sha='a'*40)
+        self.assertEqual(actual['missing'],[{'symbol':'SOXX','reason':'active_daily_price_basis_unavailable'}])
+        catalog.unlink();index.unlink();index.parent.rmdir()
+        with self.assertRaises(proofmod.MetricProofError):proofmod.verify_proof_source_blobs(root,actual)
+
+    def test_soxx_isolation_rejects_duplicate_catalog_keys_and_symlinks(self):
+        root,_ = _seed_intraday_stage(self.tmp_path/'catalog-shape',stage='open_30m')
+        catalog=_add_soxx_isolation_fixture(root,'open_30m')
+        raw=catalog.read_text()
+        catalog.write_text(raw[:-1]+',"symbol":"SOXX"}')
+        with self.assertRaises(proofmod.MetricProofError):
+            proofmod.build_proof(root,trade_date='2026-09-05',stage='open_30m',data_plane_commit_sha='a'*40)
+        catalog.unlink();target=catalog.with_name('source.json');target.write_text(raw);catalog.symlink_to(target)
+        with self.assertRaises(proofmod.MetricProofError):
+            proofmod.build_proof(root,trade_date='2026-09-05',stage='open_30m',data_plane_commit_sha='a'*40)
+
+    def test_soxx_isolation_does_not_swallow_malformed_catalog_or_other_symbol(self):
+        root,_ = _seed_intraday_stage(self.tmp_path/'invalid-isolation',stage='open_30m')
+        catalog=_add_soxx_isolation_fixture(root,'open_30m')
+        catalog.write_text('{}')
+        with self.assertRaises(proofmod.MetricProofError):
+            proofmod.build_proof(root,trade_date='2026-09-05',stage='open_30m',data_plane_commit_sha='a'*40)
+        catalog.unlink()
+        other=catalog.with_name('SPY.json');other.write_text('{}')
+        with self.assertRaises(proofmod.MetricProofError):
+            proofmod.build_proof(root,trade_date='2026-09-05',stage='open_30m',data_plane_commit_sha='a'*40)
 
     def test_close_build_and_verify_reject_snapshot_with_open_stage_owner_window(self):
         root, capture_path = _seed_intraday_stage(
@@ -1283,3 +1364,4 @@ class DeterministicMetricProofTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
