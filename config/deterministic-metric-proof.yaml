@@ -119,3 +119,19 @@ forbidden:
   - model_asserted_arithmetic_as_proof
   - research_or_strategy_inference
   - writing_stock_dairy_repository_state
+
+
+soxx_daily_isolation:
+  scope: SOXX_only
+  reason: active_daily_price_basis_unavailable
+  active_catalog_must_be_regular_exact_identity_json: true
+  duplicate_keys_malformed_or_symlink_catalog: integrity_failure
+  classification_is_not_read_authority_or_verified_receipt: true
+  legacy_daily_fallback: forbidden
+  retain_qualified_intraday_target_in_snapshot: true
+  retain_symbol_in_proof_missing_partition: true
+  isolated_daily_metrics_and_benchmark_use: forbidden
+  unrelated_qualified_subjects: unchanged
+  independent_verifier_rederives_exact_partition: true
+  consumer_explicit_isolation_and_existing_required_obligations: required
+  other_symbols_and_selected_read_failure_policy: unchanged
