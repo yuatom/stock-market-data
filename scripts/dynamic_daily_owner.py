@@ -44,6 +44,9 @@ class DynamicDailyOwner(owner.StorePublisher):
         self.assert_current()
         self.intraday_outcomes=[]
         self.intraday_scope=dict(provider='twelve_data_basic',stage=stage,trade_date=trade_date,start=start,end=end,interval='1min')
+    def attempt_namespace(self):
+        return 'dynamic-intraday-attempt' if self.intraday_scope else 'dynamic-daily-attempt'
+    def capture_identity_prefix(self,symbol):return self.intraday_scope['stage']+'-'+symbol.lower()+'-'
     def raw_prefix(self,symbol):
         kind='dynamic-intraday' if self.intraday_scope else 'dynamic-daily'
         return f'collector-state/{self.day[:7]}/{kind}-{symbol}-'
@@ -69,6 +72,7 @@ class DynamicDailyOwner(owner.StorePublisher):
     def _bind(self,request,root):
         if request!=self.request or Path(root).resolve()!=self.repo/'data/market-data':raise ValueError('dynamic binding mismatch')
         self.assert_current()
+    def business_request_identity(self):return self.request['request_id']
     def report(self,*args,**kwargs):raise ValueError('baseline report interface forbidden')
     def _verify(self,repo,sha,**kwargs):
         if kwargs:raise ValueError('baseline verifier forbidden')
@@ -92,7 +96,7 @@ class DynamicDailyOwner(owner.StorePublisher):
         if paths==[self.budget_relative]:
             if not self.active or self.safe_path(self.active['claim']).exists():raise ValueError('duplicate debit')
             value=dict(schema_version=1,mode=self.mode,status='CONSERVATIVE_RESERVATION',symbol=self.active['symbol'],execution_day=self.day,
-                run_id=self.request_id,business_request_id=self.request['request_id'],request_commit=self.request_commit,
+                run_id=self.request_id,business_request_id=self.business_request_identity(),request_commit=self.request_commit,
                 request_blob_sha=self.request_blob,request_sha256=self.request_sha,compute_sha=self.compute_sha,
                 provider_charge_status='NOT_VERIFIED',automatic_retry_allowed=False,
                 **({'intraday_scope':self.intraday_scope} if self.intraday_scope else {}))
@@ -116,7 +120,7 @@ class DynamicDailyOwner(owner.StorePublisher):
         identity=(self.request['request_id']+'\0'+symbol).encode()
         if self.intraday_scope:identity+=b'\0'+encode(self.intraday_scope)
         token=hashlib.sha256(identity).hexdigest()
-        namespace='dynamic-intraday-attempt' if self.intraday_scope else 'dynamic-daily-attempt'
+        namespace=self.attempt_namespace()
         claim=f'data/market-data/collector-state/{namespace}-{token}.json';self.allowed.add(claim)
         if self.safe_path(claim).exists():raise ValueError('attempt already exists')
         self.active=dict(symbol=symbol,claim=claim,called=False);self.predebit_publish_started=False
@@ -179,7 +183,7 @@ class DynamicDailyOwner(owner.StorePublisher):
                     if (status=='SELECTED_TWELVE')!=(provider=='twelve_data_basic'):raise ValueError('selected fallback mismatch')
                     if provider not in ('nasdaq_public_intraday','twelve_data_basic') or not relative.startswith(prefix) or '/' in relative[len(prefix):]:raise ValueError('intraday capture path')
                     if data.get('trade_date')!=scope['trade_date'] or data.get('session')!='regular' or data.get('window')!={'start':scope['start'],'end':scope['end']}:raise ValueError('intraday capture scope')
-                    if not data.get('capture_id','').startswith(scope['stage']+'-'+symbol.lower()+'-') or not data.get('qualified_facts') or any(x.get('symbol')!=symbol for x in data['qualified_facts']):raise ValueError('intraday capture identity')
+                    if not data.get('capture_id','').startswith(self.capture_identity_prefix(symbol)) or not data.get('qualified_facts') or any(x.get('symbol')!=symbol for x in data['qualified_facts']):raise ValueError('intraday capture identity')
                     series=True
             if not (series or normalized or relative==self.active.get('raw','').removeprefix('data/market-data/')):raise ValueError('unexpected symbol closure path')
             path='data/market-data/'+relative;self.allowed.add(path);data=self.safe_path(path).read_bytes()

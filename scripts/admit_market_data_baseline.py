@@ -181,15 +181,18 @@ class StorePublisher:
             raise AdmissionError('invalid_target')
         self.report_relative = f'{prefix}-{report_namespace}-{request_id}.json'
         self.allowed = {self.budget_relative, self.report_relative}
-        if git(self.repo, 'rev-parse', 'HEAD') != expected or self.remote_head() != expected:
+        if self._git(self.repo, 'rev-parse', 'HEAD') != expected or self.remote_head() != expected:
             raise AdmissionError('object_drift')
-        if git(self.repo, 'status', '--porcelain') or git(self.repo, 'ls-files', '--others'):
+        if self._git(self.repo, 'status', '--porcelain') or self._git(self.repo, 'ls-files', '--others'):
             raise AdmissionError('dirty_checkout')
         if self.safe_path(self.report_relative).exists():
             raise AdmissionError('report_exists')
 
+    def _git(self, repo, *args):
+        return git(repo, *args)
+
     def remote_head(self) -> str:
-        value = git(self.repo, 'ls-remote', 'origin', 'refs/heads/main').split()
+        value = self._git(self.repo, 'ls-remote', 'origin', 'refs/heads/main').split()
         if len(value) != 2 or value[1] != 'refs/heads/main':
             raise AdmissionError('object_drift')
         return value[0]
@@ -209,8 +212,8 @@ class StorePublisher:
 
     def assert_allowed(self) -> None:
         # Include deletions, staged/unstaged changes and ignored untracked files.
-        changed = set(filter(None, git(self.repo, 'diff', '--name-only', '-z', self.base, '--').split('\0')))
-        changed.update(filter(None, git(self.repo, 'ls-files', '--others', '-z').split('\0')))
+        changed = set(filter(None, self._git(self.repo, 'diff', '--name-only', '-z', self.base, '--').split('\0')))
+        changed.update(filter(None, self._git(self.repo, 'ls-files', '--others', '-z').split('\0')))
         if not changed <= self.allowed:
             raise AdmissionError('unexpected_store_change')
         for relative in changed:
@@ -220,30 +223,30 @@ class StorePublisher:
 
     def assert_current(self, expected: str | None = None) -> None:
         expected = expected or self.head
-        if (self.head != expected or git(self.repo, 'rev-parse', 'HEAD') != expected or
+        if (self.head != expected or self._git(self.repo, 'rev-parse', 'HEAD') != expected or
             self.remote_head() != expected):
             raise AdmissionError('object_drift')
-        if git(self.repo, 'status', '--porcelain') or git(self.repo, 'ls-files', '--others'):
+        if self._git(self.repo, 'status', '--porcelain') or self._git(self.repo, 'ls-files', '--others'):
             raise AdmissionError('dirty_checkout')
 
     def publish(self, paths: list[str], *, expected_report: dict[str, str] | None = None) -> str:
         if not paths or not set(paths) <= self.allowed:
             raise AdmissionError('unsafe_path')
         self.assert_allowed()
-        if self.remote_head() != self.head or git(self.repo, 'rev-parse', 'HEAD') != self.head:
+        if self.remote_head() != self.head or self._git(self.repo, 'rev-parse', 'HEAD') != self.head:
             raise AdmissionError('object_drift')
-        staged = set(filter(None, git(self.repo, 'diff', '--cached', '--name-only').splitlines()))
+        staged = set(filter(None, self._git(self.repo, 'diff', '--cached', '--name-only').splitlines()))
         if not staged <= set(paths):
             raise AdmissionError('unexpected_store_change')
         for relative in paths:
             if not self.safe_path(relative).is_file():
                 raise AdmissionError('unsafe_path')
-        git(self.repo, 'add', '--', *paths)
-        if git(self.repo, 'diff', '--cached', '--name-only'):
-            git(self.repo, '-c', 'user.name=stock-market-data-bot', '-c',
+        self._git(self.repo, 'add', '--', *paths)
+        if self._git(self.repo, 'diff', '--cached', '--name-only'):
+            self._git(self.repo, '-c', 'user.name=stock-market-data-bot', '-c',
                 'user.email=stock-market-data-bot@users.noreply.github.com',
                 'commit', '--quiet', '--no-gpg-sign', '-m', 'data: record daily admission budget or diagnostic')
-            candidate = git(self.repo, 'rev-parse', 'HEAD')
+            candidate = self._git(self.repo, 'rev-parse', 'HEAD')
         else:
             candidate = self.head
         publication = {'candidate_commit_sha': candidate, 'last_verified_commit_sha': self.head,
@@ -253,7 +256,7 @@ class StorePublisher:
         try:
             if candidate != self.head:
                 # No pull/rebase/force retry: a concurrent writer invalidates this operation.
-                git(self.repo, 'push', 'origin', f'{candidate}:refs/heads/main')
+                self._git(self.repo, 'push', 'origin', f'{candidate}:refs/heads/main')
             publication['publication_phase'] = 'main_readback'
             if self.remote_head() != candidate:
                 raise AdmissionError('object_drift')
@@ -283,7 +286,7 @@ class StorePublisher:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(value, ensure_ascii=False, allow_nan=False,
                                    sort_keys=True, separators=(',', ':')) + '\n', encoding='utf-8')
-        blob = git(self.repo, 'hash-object', '--', str(path))
+        blob = self._git(self.repo, 'hash-object', '--', str(path))
         # The budget is also the retained protocol's manifest. No third Store
         # path or circular self-blob declaration; existing counters are preserved.
         budget.update(schema_version=1, request_id=self.request_id, stage=MODE,

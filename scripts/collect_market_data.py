@@ -33,6 +33,7 @@ import build_deterministic_metric_proof as metric_proof
 import collection_universe as collection
 import market_data_collectors as base
 import market_data_collection as runtime
+from collector_mode_args import normalize_mode_args
 
 ET = ZoneInfo("America/New_York")
 
@@ -47,6 +48,7 @@ REGULAR_STAGE_PREWARM_MAX_SECONDS = 6 * 60
 
 
 def _arg_value(argv: list[str], flag: str, default: str | None = None) -> str | None:
+    if flag=='--mode':argv=normalize_mode_args(argv)
     try:
         index = argv.index(flag)
     except ValueError:
@@ -57,7 +59,7 @@ def _arg_value(argv: list[str], flag: str, default: str | None = None) -> str | 
 
 
 def _replace_mode(argv: list[str], mode: str) -> list[str]:
-    out = list(argv)
+    out = normalize_mode_args(argv)
     try:
         index = out.index("--mode")
     except ValueError as exc:
@@ -201,7 +203,7 @@ def _settlement_gate_result(argv: list[str], *, now_et: datetime | None = None) 
     }
 
 
-def _ensure_predecessors(argv: list[str]) -> None:
+def _ensure_predecessors(argv: list[str], *, owner_factory=None, stage_publish=None) -> None:
     mode = str(_arg_value(argv, "--mode") or "")
     trade_date = _arg_value(argv, "--trade-date")
     if not trade_date:
@@ -223,9 +225,13 @@ def _ensure_predecessors(argv: list[str]) -> None:
         if _snapshot_materialized(store_root, trade_date, stage):
             continue
         print(f"dependency_snapshot_absent stage={stage}; materializing exact predecessor window")
-        rc = runtime.main(_replace_mode(argv, stage))
+        stage_args=_replace_mode(argv,stage)
+        rc = runtime.main(stage_args, **({'owner_factory':owner_factory} if owner_factory is not None else {}))
         if rc != 0:
             raise SystemExit(rc)
+        if stage_publish is not None:
+            _build_metric_proof_if_applicable(stage_args)
+            stage_publish(stage_args)
         if not _snapshot_materialized(store_root, trade_date, stage):
             # Do not fabricate completeness. The requested later stage still
             # runs and will carry predecessor missing symbols into its snapshot.
@@ -276,7 +282,7 @@ def _live_close_retry_symbols(
     return sorted(required - qualified)
 
 
-def _run_live_close(argv: list[str]) -> int | None:
+def _run_live_close(argv: list[str], *, owner_factory=None) -> int | None:
     mode = str(_arg_value(argv, "--mode") or "")
     if mode not in {"close", "close_retry", "close_final"}:
         return None
@@ -311,6 +317,7 @@ def _run_live_close(argv: list[str]) -> int | None:
         access=access,
         symbols_override=symbols_override,
         eligible_universe=eligible,
+        **({'owner_factory':owner_factory} if owner_factory is not None else {}),
     )
     result["terminal_semantics"] = (
         "timestamped_regular_session_context_provider_specific_not_official_close_or_sip"
@@ -330,6 +337,10 @@ def _build_metric_proof_if_applicable(argv: list[str]) -> None:
         return
     trade_date = str(_arg_value(argv, "--trade-date") or datetime.now(ET).date().isoformat())
     store_root = Path(str(_arg_value(argv, "--store-root", "sources/market-data")))
+    # A legitimate no_new_qualified_facts result has no snapshot to prove.
+    # Missing stays missing; a present but invalid pointer still fails normally.
+    if stage.startswith("open_") and not (store_root / f"snapshots/{trade_date[:7]}/{trade_date}/{stage}/latest.json").exists():
+        return
     compute_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
     proof, rel = metric_proof.build_proof(
         store_root,
@@ -353,22 +364,33 @@ def _build_metric_proof_if_applicable(argv: list[str]) -> None:
     latest.write_bytes(metric_proof.canonical_bytes(pointer) + b"\n")
 
 
-def cli(argv: list[str] | None = None) -> int:
-    args = list(sys.argv[1:] if argv is None else argv)
+def cli(argv: list[str] | None = None, *, owner_factory=None, stage_publish=None) -> int:
+    args = normalize_mode_args(sys.argv[1:] if argv is None else argv)
+    if owner_factory is not None or stage_publish is not None:
+        if _arg_value(args,'--mode') not in runtime.FIXED_GUARDED_MODES:
+            raise ValueError('unsupported guarded mode')
+        if owner_factory is None or stage_publish is None:
+            raise ValueError('guarded owner and publisher must be supplied together')
     gate = _settlement_gate_result(args)
     if gate is not None:
         print(json.dumps(gate, ensure_ascii=False, sort_keys=True))
         return 0
     _wait_until_regular_stage_cutoff(args)
-    _ensure_predecessors(args)
-    close_result = _run_live_close(args)
+    if owner_factory is None:
+        _ensure_predecessors(args)
+        close_result=_run_live_close(args)
+    else:
+        _ensure_predecessors(args,owner_factory=owner_factory,stage_publish=stage_publish)
+        close_result=_run_live_close(args,owner_factory=owner_factory)
     if close_result is not None:
         if close_result == 0:
             _build_metric_proof_if_applicable(args)
+            if stage_publish is not None:stage_publish(args)
         return close_result
-    rc = runtime.main(args)
+    rc = runtime.main(args, **({'owner_factory':owner_factory} if owner_factory is not None else {}))
     if rc == 0:
         _build_metric_proof_if_applicable(args)
+        if stage_publish is not None:stage_publish(args)
     return rc
 
 

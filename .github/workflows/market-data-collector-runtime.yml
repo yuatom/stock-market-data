@@ -116,6 +116,7 @@ jobs:
           mode = ''
           trade_date = ''
           request_id = ''
+          transaction_id = ''
           probe_path = ''
           probe_blob_sha = ''
           maintenance_authorized = False
@@ -308,9 +309,20 @@ jobs:
                   'nominal_date_is_inferred_from_resolved_trade_date': True,
               }
 
+          # Reuse the existing resolved invocation; no new identity authority.
+          fixed_modes = {'open_15m','open_30m','open_60m','close','close_retry','close_final'}
+          publication_route = 'guarded' if mode in fixed_modes else 'legacy'
+          resolved = Path(os.environ['RUNNER_TEMP']) / 'fixed-resolved-invocation.json'
+          resolved.write_text(json.dumps(dict(mode=mode,trade_date=trade_date,
+              logical_trigger=event,request_id=request_id or None,
+              transaction_id=transaction_id or None,control_ref=control_ref or None,
+              market_data_contract_sha=compute_sha)), encoding='utf-8')
+          resolved.chmod(0o600)
+
           output = Path(os.environ['GITHUB_OUTPUT'])
           with output.open('a', encoding='utf-8') as fh:
               fh.write(f'mode={mode}\n')
+              fh.write(f'publication_route={publication_route}\n')
               fh.write(f'trade_date={trade_date}\n')
               fh.write(f'request_id={request_id}\n')
               fh.write(f'probe_path={probe_path}\n')
@@ -466,8 +478,36 @@ jobs:
               sys.exit(2)
           PYTHON
 
+      - name: Collect and publish guarded fixed windows
+        if: steps.invocation.outputs.publication_route == 'guarded'
+        working-directory: compute
+        shell: bash
+        env:
+          MARKET_DATA_STORE_TOKEN: ${{ secrets.MARKET_DATA_STORE_TOKEN }}
+          TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
+          MODE: ${{ steps.invocation.outputs.mode }}
+          TRADE_DATE: ${{ steps.invocation.outputs.trade_date }}
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          set -euo pipefail
+          umask 077
+          export MARKET_DATA_STORE_INPUT_SHA="$(cat "$RUNNER_TEMP/market-data-store-input-sha")"
+          python -B scripts/run_fixed_guarded_candidate.py \
+            --invocation "$RUNNER_TEMP/fixed-resolved-invocation.json" \
+            --failure-summary "$RUNNER_TEMP/fixed-failure-summary.json" -- \
+            --mode "$MODE" --trade-date "$TRADE_DATE" \
+            --store-root ../store/data/market-data \
+            --universe config/collection-universe.json \
+            --config config/market-data-store.yaml \
+            --access-config config/market-data-collector-access.yaml \
+            > "$RUNNER_TEMP/fixed-collector-private.log" 2>&1 || {
+              python scripts/fixed_failure_summary.py --summary "$RUNNER_TEMP/fixed-failure-summary.json"
+              exit 1
+            }
+          echo '{"status":"fixed_guarded_complete"}'
+
       - name: Collect qualified facts into private Store checkout
-        if: steps.invocation.outputs.mode != 'smoke_readonly'
+        if: steps.invocation.outputs.mode != 'smoke_readonly' && steps.invocation.outputs.publication_route == 'legacy'
         working-directory: compute
         shell: bash
         env:
@@ -608,7 +648,7 @@ jobs:
           PY
 
       - name: Rebuild private Store inventory
-        if: steps.invocation.outputs.mode != 'smoke_readonly'
+        if: steps.invocation.outputs.mode != 'smoke_readonly' && steps.invocation.outputs.publication_route == 'legacy'
         working-directory: compute
         run: >-
           python scripts/build_market_data_inventory.py
@@ -618,7 +658,7 @@ jobs:
 
       - name: Build Store publication manifest
         id: publication
-        if: steps.invocation.outputs.mode != 'smoke_readonly'
+        if: steps.invocation.outputs.mode != 'smoke_readonly' && steps.invocation.outputs.publication_route == 'legacy'
         working-directory: compute
         shell: bash
         run: |
@@ -632,7 +672,7 @@ jobs:
           echo "publication_manifest_path=$manifest_path" >> "$GITHUB_OUTPUT"
 
       - name: Persist private Store only
-        if: steps.invocation.outputs.mode != 'smoke_readonly'
+        if: steps.invocation.outputs.mode != 'smoke_readonly' && steps.invocation.outputs.publication_route == 'legacy'
         working-directory: store
         shell: bash
         env:
@@ -686,7 +726,7 @@ jobs:
           PRIVATE_SCRIPT
 
       - name: Verify durable Store publication
-        if: steps.invocation.outputs.mode != 'smoke_readonly'
+        if: steps.invocation.outputs.mode != 'smoke_readonly' && steps.invocation.outputs.publication_route == 'legacy'
         working-directory: store
         shell: bash
         env:

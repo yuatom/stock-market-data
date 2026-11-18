@@ -118,17 +118,41 @@ class DynamicDailyTests(unittest.TestCase):
         self.assertEqual(result['status'],'partial');self.assertEqual(result['daily_history_available'],['BBB'])
         self.assertEqual(result['daily_history_execution']['local_budget_debits'],2)
     def test_workflow_fails_business_only_after_persist_and_durability(self):
-        steps=yaml.safe_load((existing.ROOT/'.github/workflows/dynamic-candidate-runtime.yml').read_text())['jobs']['collect']['steps']
-        names=[x['name'] for x in steps if 'name' in x]
-        last=steps[-1]
-        self.assertEqual(last['if'],"steps.collect.outputs.business_stopped == 'true'")
-        self.assertIn('exit 2',last['run']);self.assertNotIn('always()',last['if'])
-        self.assertLess(names.index('Persist private Store only'),names.index('Verify durable Store publication'))
-        self.assertEqual(names[-2],'Verify durable Store publication')
-        publish=next(x['run'] for x in steps if x.get('name')=='Persist private Store only')
-        self.assertEqual(publish.count('git push origin HEAD:main'),1)
-        self.assertNotIn('for attempt',publish)
-        self.assertIn('set -euo pipefail',publish)
+        # Exercise the current CLI's ordering, rather than indexing obsolete
+        # outer workflow publication steps. Auth/provider are synthetic here;
+        # actual finalizer durability is tested in test_data_plane_write_boundary.
+        import contextlib, io
+        from types import SimpleNamespace
+        import run_dynamic_guarded as runtime
+        from dynamic_daily_owner import DynamicPublicationUnknown
+        events = []
+        owner = SimpleNamespace(request={})
+        def abort():
+            events.append('abort')
+            raise DynamicPublicationUnknown('synthetic unknown')
+        owner.abort = abort
+        def collect(**kwargs):
+            events.append('collect')
+            return {'status': 'STOPPED'}
+        def finalize(writer, result):
+            self.assertIs(writer, owner)
+            events.append('finalize')
+            return dict(result, publication_status='DURABILITY_VERIFIED')
+        def git(repo, *args):
+            if args[0] in ('status', 'ls-files'): return ''
+            if args[0] == 'ls-remote': return 'a'*40 + ' refs/heads/main'
+            return 'a'*40
+        argv = ['--control', '/synthetic/control', '--control-ref', 'a'*40, '--store', '/synthetic/store']
+        output = io.StringIO()
+        with patch.object(runtime, 'origin'), patch.object(runtime.base, 'git', side_effect=git), patch.object(runtime.authority, 'attest', return_value={'run_id': '123'}), patch.object(runtime, 'DynamicDailyOwner', return_value=owner), patch.object(d, 'collect_request', side_effect=collect), patch.object(runtime, 'finalize', side_effect=finalize), contextlib.redirect_stdout(output):
+            self.assertEqual(runtime.main(argv), 2)
+        self.assertEqual(events, ['collect', 'finalize'])
+        self.assertEqual(json.loads(output.getvalue())['publication_status'], 'DURABILITY_VERIFIED')
+        events.clear(); output = io.StringIO()
+        with patch.object(runtime, 'origin'), patch.object(runtime.base, 'git', side_effect=git), patch.object(runtime.authority, 'attest', return_value={'run_id': '123'}), patch.object(runtime, 'DynamicDailyOwner', return_value=owner), patch.object(d, 'collect_request', side_effect=collect), patch.object(runtime, 'finalize', side_effect=RuntimeError('synthetic unknown')), contextlib.redirect_stdout(output):
+            with self.assertRaises(DynamicPublicationUnknown): runtime.main(argv)
+        self.assertEqual(events, ['collect', 'abort'])
+        self.assertEqual(output.getvalue(), '')
 
 
 if __name__=='__main__':unittest.main()

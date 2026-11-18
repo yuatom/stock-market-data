@@ -9,6 +9,9 @@ research watchlist compatibility file is authoritative here.
 """
 from __future__ import annotations
 
+import sys
+from collector_mode_args import normalize_mode_args
+
 import argparse
 import json
 import math
@@ -662,6 +665,9 @@ def _write_regular_capture(store_root,trade_date,mode,symbol,provider,facts,coll
     return rel,blob
 
 
+FIXED_GUARDED_MODES=frozenset({'open_15m','open_30m','open_60m','close','close_retry','close_final'})
+
+
 def collect_regular_window(
     *,
     mode: str,
@@ -676,6 +682,7 @@ def collect_regular_window(
     symbols_override: Sequence[str] | None = None,
     eligible_universe: Sequence[tuple[str, str]] | None = None,
     durable_owner=None,
+    owner_factory=None,
 ) -> dict[str, Any]:
     full_universe = list(eligible_universe) if eligible_universe is not None else collection.intraday_universe(universe_config)
     if mode == HISTORICAL_CONTEXT_REPAIR and eligible_universe is None:
@@ -696,6 +703,10 @@ def collect_regular_window(
             raise RuntimeError(f"symbols_override outside eligible collection universe: {unknown}")
         universe = [(symbol, by_symbol[symbol]) for symbol in requested]
 
+    if owner_factory is not None:
+        if mode not in FIXED_GUARDED_MODES:raise ValueError('unsupported guarded mode')
+        if durable_owner is not None:raise ValueError('supply one durable owner source')
+        durable_owner=owner_factory(mode=mode,stage=stage or mode,trade_date=trade_date,start_et=start_et,end_et=end_et,store_root=store_root,symbols=[s for s,_ in universe])
     if durable_owner is not None:durable_owner.begin_intraday(trade_date,stage or mode,start_et,end_et)
     collection_started_at = datetime.now(ET).isoformat()
     durable_captures={}
@@ -810,7 +821,11 @@ def collect_regular_window(
                     durable_captures[symbol]=ref
                 durable_owner.close_intraday(ref[0] if ref else None,'REJECTED' if rejection else ('SELECTED_TWELVE' if selected and selected[0]==TWELVE else 'UNSELECTED_VALID'))
             except Exception:durable_owner.abort()
-        if rejection is not None:raise rejection
+        # Fixed windows retain qualified primary facts after a known fallback
+        # rejection, as the legacy source-election contract does. Any active
+        # attempt has been durably closed above; uncertain closure still aborts.
+        # Discovery retains its separate STOPPED-on-rejection contract.
+        if rejection is not None and mode not in FIXED_GUARDED_MODES:raise rejection
 
     context_specs = collection.context_by_symbol(universe_config)
     sector_symbols = set(collection.sector_symbols(universe_config))
@@ -1035,7 +1050,7 @@ def _retry_symbols(store_root: Path, trade_date: str, universe_config: Mapping[s
     return [symbol for symbol, _asset in collection.intraday_universe(universe_config)]
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(argv: Sequence[str] | None = None, *, owner_factory=None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--mode",
@@ -1058,7 +1073,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--config", default="config/market-data-store.yaml")
     parser.add_argument("--access-config", default="config/market-data-collector-access.yaml")
     parser.add_argument("--maintenance-authorized", action="store_true")
-    args = parser.parse_args(argv)
+    args = parser.parse_args(normalize_mode_args(sys.argv[1:] if argv is None else argv))
+    if owner_factory is not None and args.mode not in FIXED_GUARDED_MODES:
+        raise ValueError('unsupported guarded mode')
 
     trade_date = args.trade_date or datetime.now(ET).strftime("%Y-%m-%d")
     store_root = Path(args.store_root)
@@ -1066,6 +1083,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     config = base.load_yaml(args.config)
     access = base.load_yaml(args.access_config)
 
+    owner_kwargs={'owner_factory':owner_factory} if owner_factory is not None else {}
     if args.mode == HISTORICAL_CONTEXT_REPAIR and not args.maintenance_authorized:
         raise RuntimeError("historical_context_repair requires --maintenance-authorized")
 
@@ -1080,11 +1098,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             access=access,
         )
     elif args.mode == "open_15m":
-        result = collect_regular_window(mode=args.mode, stage=None, trade_date=trade_date, start_et="09:30", end_et="09:45", store_root=store_root, universe_config=universe_config, config=config, access=access)
+        result = collect_regular_window(mode=args.mode, stage=None, trade_date=trade_date, start_et="09:30", end_et="09:45", store_root=store_root, universe_config=universe_config, config=config, access=access, **owner_kwargs)
     elif args.mode == "open_30m":
-        result = collect_regular_window(mode=args.mode, stage=None, trade_date=trade_date, start_et="09:45", end_et="10:00", store_root=store_root, universe_config=universe_config, config=config, access=access)
+        result = collect_regular_window(mode=args.mode, stage=None, trade_date=trade_date, start_et="09:45", end_et="10:00", store_root=store_root, universe_config=universe_config, config=config, access=access, **owner_kwargs)
     elif args.mode == "open_60m":
-        result = collect_regular_window(mode=args.mode, stage=None, trade_date=trade_date, start_et="10:00", end_et="10:30", store_root=store_root, universe_config=universe_config, config=config, access=access)
+        result = collect_regular_window(mode=args.mode, stage=None, trade_date=trade_date, start_et="10:00", end_et="10:30", store_root=store_root, universe_config=universe_config, config=config, access=access, **owner_kwargs)
     elif args.mode in ("close", "close_retry", "close_final"):
         symbols_override = None
         if args.mode in ("close_retry", "close_final"):
@@ -1092,7 +1110,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if not symbols_override:
                 print(json.dumps({"mode": args.mode, "status": "nothing_missing", "changed": 0}, sort_keys=True))
                 return 0
-        result = collect_regular_window(mode=args.mode, stage="close", trade_date=trade_date, start_et="15:45", end_et="16:00", store_root=store_root, universe_config=universe_config, config=config, access=access, symbols_override=symbols_override)
+        result = collect_regular_window(mode=args.mode, stage="close", trade_date=trade_date, start_et="15:45", end_et="16:00", store_root=store_root, universe_config=universe_config, config=config, access=access, symbols_override=symbols_override, **owner_kwargs)
         result["terminal_semantics"] = "timestamped_regular_session_context_provider_specific_not_official_close_or_sip"
     elif args.mode == HISTORICAL_CONTEXT_REPAIR:
         maintenance_universe = collection.close_supported_baseline_universe(universe_config)
