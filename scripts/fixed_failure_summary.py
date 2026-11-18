@@ -5,6 +5,7 @@ from pathlib import Path
 # draft is merged. This runner sees exception objects, so module+class can be
 # checked directly instead of inferring a name from stderr.
 MODULE_CLASSES={
+    'build_deterministic_metric_proof':frozenset({'MetricProofError','MetricProofUnavailable'}),
     'builtins':frozenset({'RuntimeError','ValueError','TypeError','KeyError','AssertionError','FileNotFoundError','PermissionError','ModuleNotFoundError','ImportError','OSError','TimeoutError','IndexError'}),
     'json.decoder':frozenset({'JSONDecodeError'}),
     'subprocess':frozenset({'TimeoutExpired','CalledProcessError'}),
