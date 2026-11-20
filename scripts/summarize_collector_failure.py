@@ -48,6 +48,7 @@ def summarize_failure(exit_code: int, error_file: Path) -> dict[str, object]:
         terminal = next((line for line in reversed(lines) if line.strip()), "")
         prefix = terminal.partition(":")[0]
         allowed_modules = {
+            "build_deterministic_metric_proof": {"MetricProofError", "MetricProofUnavailable"},
             "market_data_collection": {"CoverageContractError"},
             "dynamic_intraday_response": {"KnownIntradayRejection"},
             "dynamic_daily_owner": {"DynamicPublicationUnknown"},
@@ -55,8 +56,10 @@ def summarize_failure(exit_code: int, error_file: Path) -> dict[str, object]:
             "market_data_collectors": {"BudgetExceeded", "StoreIntegrityError"},
         }
         module, sep, cls = prefix.rpartition(".")
-        name = cls if sep and cls in allowed_modules.get(module, set()) else (prefix if not sep else "")
-        if name in EXCEPTION_CLASSES and terminal.startswith(prefix + ":"):
+        # Module-qualified names and legacy bare names have separate
+        # allowlists. Proof errors must never match the bare-name path.
+        name = cls if sep and cls in allowed_modules.get(module, set()) else (prefix if not sep and prefix in EXCEPTION_CLASSES else "")
+        if name and terminal.startswith(prefix + ":"):
             payload["observed_exception_class"] = name
     except (OSError, ValueError):
         pass

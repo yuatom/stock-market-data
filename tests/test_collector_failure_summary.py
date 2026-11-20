@@ -143,5 +143,22 @@ class CollectorCustomExceptionVocabularyTest(unittest.TestCase):
             self.assertEqual(summary.summarize_failure(1,path)['observed_exception_class'],'unknown')
 
 
+class CollectorProofExceptionVocabularyTest(unittest.TestCase):
+    def test_only_exact_qualified_proof_terminal_names_are_observed(self):
+        for name in ('MetricProofError', 'MetricProofUnavailable'):
+            for prefix, expected in (
+                ('build_deterministic_metric_proof.' + name, name),
+                ('other.' + name, 'unknown'),
+                (name, 'unknown'),
+            ):
+                with self.subTest(prefix=prefix), tempfile.TemporaryDirectory() as tmp:
+                    path = Path(tmp) / 'stderr.txt'
+                    path.write_text(f'{prefix}: SYNTHETIC_PRIVATE https://example.invalid/?apikey=SYNTHETIC_PRIVATE\n')
+                    result = summary.summarize_failure(1, path)
+                    self.assertEqual(result['observed_exception_class'], expected)
+                    self.assertEqual(result['exit_code'], 1)
+                    self.assertNotIn('SYNTHETIC_PRIVATE', json.dumps(result))
+
+
 if __name__ == '__main__':
     unittest.main()
