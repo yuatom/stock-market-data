@@ -641,8 +641,12 @@ jobs:
           TRADE_DATE: ${{ steps.invocation.outputs.trade_date }}
           MARKET_DATA_CONTRACT_SHA: ${{ steps.invocation.outputs.market_data_contract_sha }}
         run: |
-          python -B ../compute/scripts/quiet_private_store.py run --repo . <<'PRIVATE_SCRIPT'
+          python -B ../compute/scripts/quiet_private_store.py run --repo . --report-proof-recheck-failure <<'PRIVATE_SCRIPT'
           set -euo pipefail
+          # Private protocol with quiet_private_store.py. A Git or push failure
+          # with the same raw status must not masquerade as a proof recheck.
+          proof_recheck_failed=0
+          trap 'rc=$?; if (( rc != 0 )); then if (( proof_recheck_failed )); then exit 78; fi; exit 1; fi' EXIT
           store_base_sha="$(git rev-parse HEAD)"
           git add -- data/market-data
           if git diff --cached --quiet; then
@@ -665,7 +669,7 @@ jobs:
               --trade-date "$TRADE_DATE" \
               --stage "$proof_stage" \
               --data-plane-commit-sha "$MARKET_DATA_CONTRACT_SHA" \
-              --verify-existing
+              --verify-existing || { proof_recheck_failed=1; exit 1; }
 
             python ../compute/scripts/push_proof_store_commit.py \
               --store-root . \
