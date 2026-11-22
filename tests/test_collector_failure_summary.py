@@ -120,5 +120,45 @@ class CollectorFailureSummaryTest(unittest.TestCase):
         self.assertNotIn('not-public', result.stdout)
 
 
+class CollectorCustomExceptionVocabularyTest(unittest.TestCase):
+    def test_known_custom_errors_are_fixed_classes_without_details(self):
+        examples = (
+            ('dynamic_intraday_response.KnownIntradayRejection','KnownIntradayRejection'),
+            ('dynamic_daily_owner.DynamicPublicationUnknown','DynamicPublicationUnknown'),
+            ('market_data_store.MarketDataConflict','MarketDataConflict'),
+            ('market_data_collectors.BudgetExceeded','BudgetExceeded'),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/'err'
+            for qualified, expected in examples:
+                with self.subTest(name=qualified):
+                    path.write_text(f'{qualified}: private-detail\n')
+                    result=summary.summarize_failure(1,path)
+                    self.assertEqual(result['observed_exception_class'],expected)
+                    self.assertNotIn('private-detail',json.dumps(result))
+
+    def test_wrong_module_does_not_promote_known_custom_class(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/'err';path.write_text('other.KnownIntradayRejection: private-detail\n')
+            self.assertEqual(summary.summarize_failure(1,path)['observed_exception_class'],'unknown')
+
+
+class CollectorProofExceptionVocabularyTest(unittest.TestCase):
+    def test_only_exact_qualified_proof_terminal_names_are_observed(self):
+        for name in ('MetricProofError', 'MetricProofUnavailable'):
+            for prefix, expected in (
+                ('build_deterministic_metric_proof.' + name, name),
+                ('other.' + name, 'unknown'),
+                (name, 'unknown'),
+            ):
+                with self.subTest(prefix=prefix), tempfile.TemporaryDirectory() as tmp:
+                    path = Path(tmp) / 'stderr.txt'
+                    path.write_text(f'{prefix}: SYNTHETIC_PRIVATE https://example.invalid/?apikey=SYNTHETIC_PRIVATE\n')
+                    result = summary.summarize_failure(1, path)
+                    self.assertEqual(result['observed_exception_class'], expected)
+                    self.assertEqual(result['exit_code'], 1)
+                    self.assertNotIn('SYNTHETIC_PRIVATE', json.dumps(result))
+
+
 if __name__ == '__main__':
     unittest.main()
