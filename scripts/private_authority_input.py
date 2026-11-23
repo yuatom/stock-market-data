@@ -25,7 +25,7 @@ from scripts import eleven_symbol_append as append
 from scripts.raw_response_evidence import validate_request
 
 DESCRIPTOR_PATH = 'capture-authority/selection.json'
-ROUTES = frozenset({'soxx_capture_only', 'eleven_symbol_conditional_append'})
+ROUTES = frozenset({'soxx_capture_only', 'eleven_symbol_conditional_append', 'fixed_daily_tail_20261120'})
 MAX_JSON_BYTES = 65536
 STORE_REPOSITORY = 'yuatom/stock-market-data-store'
 DESCRIPTOR_KEYS = frozenset({'schema_version', 'kind', 'route', 'compute_sha',
@@ -282,6 +282,18 @@ def _eleven(reader, descriptor, head, compute):
     return raw
 
 
+def _fixed_tail(descriptor, head, compute):
+    # This handoff remains private. The closed route profile validates the
+    # entire approval/window/target set again before claim or collection.
+    approval = descriptor['approval']
+    _need(type(approval) is dict and approval.get('compute_sha') == compute
+          and approval.get('store_sha') == head
+          and approval.get('kind') == 'private_fixed_tail_20261120')
+    raw = _encode(approval)
+    _need(hashlib.sha256(raw).hexdigest() == descriptor['approval_sha256'])
+    return raw
+
+
 def load_authority(store, route, compute_sha, expected_store_head, descriptor_commit):
     """Select only a privately pinned local object, never permission or execution.
 
@@ -305,7 +317,10 @@ remains at expected_store_head, not at the off-main descriptor commit.
               and descriptor['compute_sha'] == compute_sha and descriptor['authority_store_sha'] == expected_store_head)
         _hex(descriptor['approval_sha256'], 64)
         reader.single_addition(descriptor_commit, expected_store_head, DESCRIPTOR_PATH, blob)
-        approval_raw = (_soxx if route == 'soxx_capture_only' else _eleven)(reader, descriptor, expected_store_head, compute_sha)
+        if route == 'fixed_daily_tail_20261120':
+            approval_raw = _fixed_tail(descriptor, expected_store_head, compute_sha)
+        else:
+            approval_raw = (_soxx if route == 'soxx_capture_only' else _eleven)(reader, descriptor, expected_store_head, compute_sha)
         reader.assert_unmodified_graph()
         reader.bind_refs(route, compute_sha, expected_store_head, descriptor_commit)
         return PrivateAuthoritySelection(approval_raw, descriptor['approval_sha256'], expected_store_head, descriptor_commit)
