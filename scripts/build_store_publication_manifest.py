@@ -80,19 +80,16 @@ EOD_VARIABLES = {
 EOD_INVOCATION_RE = re.compile(r"[1-9][0-9]{0,19}-[1-9][0-9]{0,8}")
 
 
-def _eod_scope(stage: str, requested_id: str, requested_trigger: str) -> tuple[str, str] | None:
+def _eod_scope(stage: str) -> tuple[str, str] | None:
     """The trusted caller for formal EOD is the existing GitHub workflow.
 
-    While old workflow definitions may run new Compute bytes, their runner
-    context and the pre-existing diagnostic still name the same invocation.
-    Explicit args are only corroboration; they cannot confer hosted scope.
+    The workflow and Compute checkout can have different source revisions.
+    Only the existing caller context and diagnostic name the current run;
+    no new CLI flags are needed or accepted.
     """
-    explicit = bool(requested_id or requested_trigger)
     if stage != "previous_session_eod":
-        if explicit:
-            raise PublicationManifestError("EOD identity supplied for a different stage")
         return None
-    if not explicit and not any(key in os.environ for key in EOD_VARIABLES):
+    if not any(key in os.environ for key in EOD_VARIABLES):
         return None
     if any(os.environ.get(key) != value for key, value in EOD_CONTEXT.items()):
         raise PublicationManifestError("ordinary EOD hosted context not verified")
@@ -101,8 +98,7 @@ def _eod_scope(stage: str, requested_id: str, requested_trigger: str) -> tuple[s
     invocation = f"{run}-{attempt}"
     trigger = os.environ.get("GITHUB_EVENT_NAME", "")
     if (not EOD_INVOCATION_RE.fullmatch(invocation)
-            or trigger not in {"schedule", "workflow_dispatch"}
-            or (explicit and (requested_id, requested_trigger) != (invocation, trigger))):
+            or trigger not in {"schedule", "workflow_dispatch"}):
         raise PublicationManifestError("invalid EOD manifest invocation")
     ref = os.environ.get("GITHUB_REF", "")
     ref_type = os.environ.get("GITHUB_REF_TYPE", "")
@@ -126,8 +122,6 @@ def build_manifest(
     request_id: str,
     trade_date: str,
     stage: str,
-    eod_invocation_id: str = "",
-    eod_trigger: str = "",
 ) -> Path | None:
     store_root = store_root.resolve()
     repo_root = Path(_git(store_root, "rev-parse", "--show-toplevel").strip()).resolve()
@@ -135,7 +129,7 @@ def build_manifest(
     if store_root != data_root:
         raise PublicationManifestError("store_root must equal repository data/market-data root")
 
-    scope = _eod_scope(stage, eod_invocation_id, eod_trigger)
+    scope = _eod_scope(stage)
     if scope is not None:
         eod_invocation_id, eod_trigger = scope
         try:
@@ -317,8 +311,6 @@ def main() -> int:
     parser.add_argument("--store-root", required=True)
     parser.add_argument("--result-file", required=True)
     parser.add_argument("--request-id", default="")
-    parser.add_argument("--eod-invocation-id", default="")
-    parser.add_argument("--eod-trigger", default="")
     parser.add_argument("--trade-date", required=True)
     parser.add_argument("--stage", required=True)
     args = parser.parse_args()
@@ -326,8 +318,6 @@ def main() -> int:
         store_root=Path(args.store_root),
         result_file=Path(args.result_file),
         request_id=args.request_id,
-        eod_invocation_id=args.eod_invocation_id,
-        eod_trigger=args.eod_trigger,
         trade_date=args.trade_date,
         stage=args.stage,
     )

@@ -63,9 +63,9 @@ class EodManifestByInvocation(unittest.TestCase):
         self.result.write_text(json.dumps(dict(result_state_path=path.relative_to(self.store).as_posix()))+'\n')
         return path
 
-    def arguments(self, identity='', event=''):
+    def arguments(self):
         return dict(store_root=self.store, result_file=self.result, request_id='',
-                    trade_date=DAY, stage=STAGE, eod_invocation_id=identity, eod_trigger=event)
+                    trade_date=DAY, stage=STAGE)
 
     @staticmethod
     def hosted(identity, event, ref="refs/heads/main"):
@@ -79,7 +79,7 @@ class EodManifestByInvocation(unittest.TestCase):
 
     def build(self, identity='', event=''):
         with patch.dict(os.environ,self.hosted(identity,event)):
-            return build_manifest(**self.arguments(identity,event))
+            return build_manifest(**self.arguments())
 
     def save(self):
         self.git('add', 'data')
@@ -152,8 +152,11 @@ class EodManifestByInvocation(unittest.TestCase):
 
     def test_github_context_absent_incomplete_or_conflicting_cannot_claim_scope(self):
         self.evidence('202-1','schedule','test scope')
-        with self.assertRaises(PublicationManifestError):
-            build_manifest(**self.arguments('202-1','schedule'))
+        # No GitHub caller context is local-only, never formal run scope.
+        local = build_manifest(**self.arguments())
+        self.assertEqual(local, self.alias)
+        self.assertFalse(list(self.state.glob('*-run-*-publication.json')))
+        self.alias.unlink()  # scratch fixture; malformed hosted cases write nothing
         env=self.hosted('202-1','schedule')
         for key,value in [('GITHUB_ACTIONS',''),('GITHUB_REPOSITORY','other/repo'),
                          ('GITHUB_RUN_ID',''),('GITHUB_WORKFLOW_REF','other'),('GITHUB_REF','refs/heads/dev'),
@@ -161,23 +164,18 @@ class EodManifestByInvocation(unittest.TestCase):
             with self.subTest(key=key), patch.dict(os.environ,dict(env,**{key:value})):
                 with self.assertRaises(PublicationManifestError):
                     build_manifest(**self.arguments())
-        with patch.dict(os.environ,env):
-            with self.assertRaises(PublicationManifestError):
-                build_manifest(**self.arguments('303-1','schedule'))
         self.assertFalse(list(self.state.glob('*-publication.json')))
 
     def test_manual_same_repo_supported_branch_or_tag_keeps_native_admission(self):
         for n, ref in enumerate(("refs/heads/main", "refs/heads/fix/test+中文", "refs/tags/v1.2.3")):
-            for explicit in (False, True):
-                run=f"{100+2*n+int(explicit)}-1"
-                with self.subTest(ref=ref,explicit=explicit):
-                    self.evidence(run,"workflow_dispatch","independent target")
-                    args=self.arguments(run,"workflow_dispatch") if explicit else self.arguments()
-                    with patch.dict(os.environ,self.hosted(run,"workflow_dispatch",ref)):
-                        got=build_manifest(**args)
-                    self.assertEqual(json.loads(got.read_bytes())["request_id"],f"eod-run-{run}")
-                    self.assertTrue(self.check_at(self.save(),got))
-                    self.assertFalse(self.alias.exists())
+            run=f"{100+n}-1"
+            with self.subTest(ref=ref):
+                self.evidence(run,"workflow_dispatch","independent target")
+                with patch.dict(os.environ,self.hosted(run,"workflow_dispatch",ref)):
+                    got=build_manifest(**self.arguments())
+                self.assertEqual(json.loads(got.read_bytes())["request_id"],f"eod-run-{run}")
+                self.assertTrue(self.check_at(self.save(),got))
+                self.assertFalse(self.alias.exists())
 
     def test_ref_mismatch_foreign_workflow_and_nonmain_schedule_fail_closed(self):
         flow="yuatom/stock-market-data/.github/workflows/market-data-collector.yml@"
@@ -195,10 +193,17 @@ class EodManifestByInvocation(unittest.TestCase):
                     build_manifest(**self.arguments())
         self.evidence("888-1","schedule","still not authorized")
         with patch.dict(os.environ,self.hosted("888-1","schedule",ref)):
-            for args in (self.arguments(),self.arguments("888-1","schedule")):
-                with self.assertRaises(PublicationManifestError):
-                    build_manifest(**args)
+            with self.assertRaises(PublicationManifestError):
+                build_manifest(**self.arguments())
         self.assertFalse(list(self.state.glob("*-publication.json")))
+
+    def test_cli_keeps_original_flag_surface(self):
+        script = HERE/'scripts/build_store_publication_manifest.py'
+        helptext = subprocess.run([sys.executable, '-B', str(script), '--help'], check=True,
+                                  capture_output=True, text=True).stdout
+        self.assertNotIn('--eod-invocation-id',helptext)
+        self.assertNotIn('--eod-trigger',helptext)
+        self.assertIn('--request-id',helptext)
 
     def test_legacy_python_caller_unchanged(self):
         self.evidence('101-1', 'schedule', 'old-compatible')

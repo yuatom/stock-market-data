@@ -621,22 +621,14 @@ jobs:
         if: steps.invocation.outputs.mode != 'smoke_readonly'
         working-directory: compute
         shell: bash
-        env:
-          EOD_LOGICAL_TRIGGER: ${{ inputs.trigger_kind }}
         run: |
           set -euo pipefail
-          set --
-          if [[ '${{ steps.invocation.outputs.mode }}' == 'previous_session_eod' ]]; then
-            set -- --eod-invocation-id "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
-              --eod-trigger "$EOD_LOGICAL_TRIGGER"
-          fi
           manifest_path="$(python scripts/build_store_publication_manifest.py \
             --store-root ../store/data/market-data \
             --result-file /tmp/collector-output.txt \
             --request-id '${{ steps.invocation.outputs.request_id }}' \
             --trade-date '${{ steps.invocation.outputs.trade_date }}' \
-            --stage '${{ steps.invocation.outputs.mode }}' \
-            "$@")"
+            --stage '${{ steps.invocation.outputs.mode }}')"
           echo "publication_manifest_path=$manifest_path" >> "$GITHUB_OUTPUT"
 
       - name: Persist private Store only
