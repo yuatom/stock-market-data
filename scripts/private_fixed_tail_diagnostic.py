@@ -97,29 +97,37 @@ def _metadata_version(repo,sha,parent,report_path,budget,day,request_id):
     return current
 
 
-def _child_terminal(repo,history,path,budget,cursor,context,symbol):
-    # The owner writes this report three times. The middle debit changes the
-    # ledger only. Never accept an add-only shortcut, gaps, deletions, or
-    # rewrites after the terminal declaration.
-    _need([action for action,_ in history]==["A","M","M"])
-    initial,retained,terminal=(sha for _,sha in history)
-    debit=_parent(repo,retained)
-    first_state=_metadata_version(repo,initial,cursor,path,budget,context["trade_date"],context["request_id"])
-    _need(_parent(repo,debit)==initial and _changed(repo,debit)=={budget})
+def _child_report(repo,sha,path,context,status,count):
+    record=_object(repo,sha,path)
+    _matches(record,dict(context,status=status,requests_attempted=count,budget_debits=count))
+    _need(type(record["schema_version"]) is int and type(record["requests_attempted"]) is int
+          and type(record["budget_debits"]) is int and record.get("market_fact_authority") is False
+          and record.get("production_recovery_accepted") is False)
+    return record
+
+
+def _child_debit(repo,initial,debit,path,budget,cursor,context):
+    day,request=context["trade_date"],context["request_id"]
+    first_state=_metadata_version(repo,initial,cursor,path,budget,day,request)
+    record=_child_report(repo,initial,path,context,"IN_PROGRESS",0)
+    _need(type(record.get("started_at")) is str and "retained_normalized_response" not in record)
+    _need(debit is not None and _parent(repo,debit)==initial and _changed(repo,debit)=={budget})
     debit_state=_object(repo,debit,budget)
+    outputs=[{"path":path,"blob_sha":native._immutable_blob(repo,initial,path)}]
+    native.r.validate_manifest(debit_state,outputs,request,day,mode=tail.MODE)
     native._one_debit(first_state,debit_state)
     _need({k:v for k,v in debit_state.items() if k not in ("credits","minutes")}
           =={k:v for k,v in first_state.items() if k not in ("credits","minutes")})
     _tag(repo,debit)
+    return record
+
+
+def _child_terminal(repo,retained,terminal,debit,initial_report,path,budget,context,symbol):
     _metadata_version(repo,retained,debit,path,budget,context["trade_date"],context["request_id"])
     _need(_parent(repo,terminal)==retained)
-    a,b,c=(_object(repo,sha,path) for sha in (initial,retained,terminal))
-    for record,status,count in ((a,"IN_PROGRESS",0),(b,"RESPONSE_RETAINED_UNQUALIFIED",1),
-                                 (c,"CANDIDATE_VALIDATED",1)):
-        _matches(record,dict(context,status=status,requests_attempted=count,budget_debits=count))
-        _need(type(record["schema_version"]) is int and type(record["requests_attempted"]) is int
-              and type(record["budget_debits"]) is int and record.get("market_fact_authority") is False
-              and record.get("production_recovery_accepted") is False)
+    a=initial_report
+    b=_child_report(repo,retained,path,context,"RESPONSE_RETAINED_UNQUALIFIED",1)
+    c=_child_report(repo,terminal,path,context,"CANDIDATE_VALIDATED",1)
     _need(type(a.get("started_at")) is str and a["started_at"]==b.get("started_at")==c.get("started_at"))
     response=b.get("retained_normalized_response")
     _need(type(response) is dict and set(response)=={"symbol","records","authority"}
@@ -132,11 +140,17 @@ def _child_terminal(repo,history,path,budget,cursor,context,symbol):
 
 def diagnose(h,repo,*,observed_main,approval_store_sha,operational_store_sha,commitment,
              plan_sha,compute_sha,execution_date,historical_cutoff,request_id,fixed_selector):
-    """Return a value-free, verified prefix only; no full result or action."""
+    """Return a value-free, verified prefix only; no full result or action.
+
+    Internal project debits are a lower bound, independent of published
+    prices and checkpoints. They attest to neither provider calls nor charges.
+    """
     facts={"status":DIAGNOSTIC,"verified_price_rows":0,"verified_checkpoints":0,
            "verified_volume_unresolved":0,"prefix_evidence_available":False,
-           "later_main_observed":False,"automatic_retry_allowed":False}
-    durable=[]; checked=0; anchor=None
+           "later_main_observed":False,"automatic_retry_allowed":False,
+           "verified_project_credit_debits_lower_bound":0,
+           "provider_requests":"UNKNOWN","provider_charges":"UNKNOWN"}
+    durable=[]; checked=0; debits=0; anchor=None
     try:
         for sha in (observed_main,approval_store_sha,operational_store_sha,plan_sha,compute_sha):
             _need(_hex(sha))
@@ -190,16 +204,30 @@ def diagnose(h,repo,*,observed_main,approval_store_sha,operational_store_sha,com
               requests_attempted=0,budget_debits_confirmed=0,budget_debits_unconfirmed=0,
               published_count=0,last_verified_commit_sha=operational_store_sha,stop=None))
         cursor=anchor=plan_sha
+        main_line=list(order)
+        successor=dict(zip(main_line,main_line[1:]))
         passed=set(); prefix_rows=[]
         for count,target in enumerate(targets,1):
             symbol=target["symbol"]
-            versions=history.get(part[symbol]); cp=members.get(checkpoint[symbol])
+            path=part[symbol]
+            versions=history.get(path); cp=members.get(checkpoint[symbol])
             if not versions:
                 break
-            child=_child_terminal(repo,versions,part[symbol],budget,cursor,dict(
-                schema_version=1,mode=tail.MODE,compute_sha=compute_sha,store_start_sha=cursor,
+            # Accept only the existing exact terminal shape or a stopped child
+            # with a single initial report. Neither proves a provider request.
+            actions=[action for action,_ in versions]
+            _need(actions in (["A"],["A","M","M"]))
+            initial=versions[0][1]
+            debit=successor.get(initial)
+            context=dict(schema_version=1,mode=tail.MODE,compute_sha=compute_sha,store_start_sha=cursor,
                 trade_date=execution_date,execution_date=execution_date,historical_cutoff=CUTOFF,
-                request_id=request_id,target_count=1,fixed_selection={"schema_version":1,"targets":[target]}),symbol)
+                request_id=request_id,target_count=1,fixed_selection={"schema_version":1,"targets":[target]})
+            initial_report=_child_debit(repo,initial,debit,path,budget,cursor,context)
+            debits+=1
+            anchor=debit
+            if actions==["A"]:
+                break
+            child=_child_terminal(repo,versions[1][1],versions[2][1],debit,initial_report,path,budget,context,symbol)
             _need(order[child]>order[cursor])
             before=native._immutable_budget(repo,cursor,budget)
             budget_obj=_object(repo,child,budget)
@@ -249,5 +277,6 @@ def diagnose(h,repo,*,observed_main,approval_store_sha,operational_store_sha,com
             return facts
         facts.update(verified_price_rows=len(durable),verified_checkpoints=checked,
                      verified_volume_unresolved=durable.count("BLOCKED_UNRESOLVED"),
-                     prefix_evidence_available=bool(durable),later_main_observed=anchor!=observed_main)
+                     verified_project_credit_debits_lower_bound=debits,
+                     prefix_evidence_available=bool(durable or debits),later_main_observed=anchor!=observed_main)
     return facts

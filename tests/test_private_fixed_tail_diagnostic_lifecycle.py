@@ -5,17 +5,29 @@ import subprocess
 import sys
 import tempfile
 
-def test_native_lifecycle_partial_diagnostic():
+def _exercise(scenario):
     source=Path(__file__).resolve().parents[1]
     fixture=source/"tests/fixtures/private_fixed_tail_native_lifecycle.py"
     env=dict(os.environ,GIT_ALLOW_PROTOCOL="file",GIT_CONFIG_NOSYSTEM="1",
              GIT_CONFIG_GLOBAL="/dev/null",GIT_CONFIG_SYSTEM="/dev/null")
     env.pop("PYTHONPATH",None)
     with tempfile.TemporaryDirectory(prefix="private-fixed-tail-lifecycle-") as d:
-        subprocess.run([sys.executable,"-B",str(fixture),d,str(source),str(source/"scripts")],
+        subprocess.run([sys.executable,"-B",str(fixture),d,str(source),str(source/"scripts"),scenario],
                        cwd=source,env=env,check=True,timeout=120)
-        subprocess.run([sys.executable,"-B",__file__,"--assert-worker",d,str(source),str(source/"scripts")],
+        subprocess.run([sys.executable,"-B",__file__,"--assert-worker",d,str(source),str(source/"scripts"),scenario],
                        cwd=source,env=env,check=True,timeout=120)
+
+def test_native_lifecycle_partial_diagnostic():
+    _exercise("terminal-before-checkpoint")
+
+def test_stopped_child_exact_debit_only():
+    _exercise("debit-exact")
+
+def test_stopped_child_debit_rejects_wrong_report_blob():
+    _exercise("debit-wrong-report-blob")
+
+def test_stopped_child_debit_without_tag():
+    _exercise("debit-no-tag")
 
 def _assert_worker():
     del sys.argv[1]
@@ -47,12 +59,26 @@ def _assert_worker():
     before=git("rev-parse","HEAD")
     assert git("status","--porcelain")==""
     result=diagnose(h,repo,**fields)
-    if len(sys.argv)>4 and sys.argv[4]=="noncanonical":
+    scenario=sys.argv[4]
+    if scenario.startswith("debit-"):
+        assert v["stopped"]
+        expected=4 if scenario=="debit-exact" else 3
+        actual=result.get("verified_project_credit_debits_lower_bound",result["verified_price_rows"])
+        assert actual==expected,(scenario,expected,result)
+        assert result["verified_price_rows"]==3 and result["verified_checkpoints"]==3,result
+        assert result["verified_volume_unresolved"]==1 and result["status"]==DIAGNOSTIC,result
+        assert result["provider_requests"]==result["provider_charges"]=="UNKNOWN",result
+        assert not result["automatic_retry_allowed"],result
+        assert git("rev-parse","HEAD")==before==fields["observed_main"] and git("status","--porcelain")==""
+        print(f"PASS {scenario}: 3 prices/3 checkpoints, {expected} proven project credits, provider requests and charges unknown; EOD ledger=5 excluded")
+        return
+    if scenario=="noncanonical":
         assert result["verified_price_rows"]==0 and not result["prefix_evidence_available"] and result["status"]==DIAGNOSTIC,result
         print("PASS noncanonical claim bytes rejected before attributing any child evidence")
         sys.exit(0)
     assert result==dict(status=DIAGNOSTIC,verified_price_rows=3,verified_checkpoints=2,verified_volume_unresolved=1,
-                       prefix_evidence_available=True,later_main_observed=True,automatic_retry_allowed=False),result
+                       prefix_evidence_available=True,later_main_observed=True,automatic_retry_allowed=False,
+                       verified_project_credit_debits_lower_bound=3,provider_requests="UNKNOWN",provider_charges="UNKNOWN"),result
     print("PASS 3 durable actual native price appends, 2 checkpoints, 1 unresolved volume; later unrelated EOD excludes its ledger effects")
     actual=native.a.git
     third=v["children"][2]["row"]["store_commit_sha"]
@@ -97,4 +123,7 @@ if __name__=="__main__":
     if sys.argv[1:2]==["--assert-worker"]:
         _assert_worker()
     else:
+        test_stopped_child_exact_debit_only()
+        test_stopped_child_debit_rejects_wrong_report_blob()
+        test_stopped_child_debit_without_tag()
         test_native_lifecycle_partial_diagnostic()

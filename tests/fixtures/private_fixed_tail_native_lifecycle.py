@@ -86,8 +86,9 @@ put(PLAN,dict(common,mode=n.MODE,kind='append_only_batch_plan',status='PLANNED',
     last_verified_commit_sha=op, stop=None))
 ledger([PLAN],0,n.MODE)
 plan=commit('synthetic native-plan shape')
-cursor=plan; rows=[]; witnesses=[]
-for i,target in enumerate(targets[:3],1):
+scenario=sys.argv[4] if len(sys.argv)>4 else 'terminal-before-checkpoint'
+cursor=plan; rows=[]; witnesses=[]; stopped=None
+for i,target in enumerate(targets[:4 if scenario.startswith('debit-') else 3],1):
     sym=target['symbol']
     child_path=prefix+f'-daily-history-tail-backfill-{RUN}-{sym}.json'
     checkpoint_path=prefix+f'-daily-symbol-maintenance-{RUN}-{sym}.json'
@@ -109,8 +110,16 @@ for i,target in enumerate(targets[:3],1):
     ledger([child_path],i-1,t.MODE)
     initial=commit('native lifecycle: initial report and manifest')
     ledger([child_path],i,t.MODE)
-    debit=commit('native lifecycle: ledger-only durable debit')
+    if i==4 and scenario=='debit-wrong-report-blob':
+        bad=json.loads((repo/BUD).read_bytes())
+        bad['required_outputs'][0]['blob_sha']='0'*40
+        put(BUD,bad)
+    debit=commit('native lifecycle: ledger-only durable debit',tag=not(i==4 and scenario=='debit-no-tag'))
     assert git(repo,'diff-tree','--no-commit-id','--name-status','-r',debit)==f'M\t{BUD}'
+    if i==4:
+        stopped=dict(initial=initial,debit=debit,report=child_path)
+        assert git(repo,'diff-tree','--no-commit-id','--name-status','-r',initial,'--',child_path)==f'A\t{child_path}'
+        break
     put(child_path,dict(report,status='RESPONSE_RETAINED_UNQUALIFIED',requests_attempted=1,budget_debits=1,
         retained_normalized_response=dict(symbol=sym,records=synth,authority='normalized_not_raw_http')))
     ledger([child_path],i,t.MODE)
@@ -125,7 +134,7 @@ for i,target in enumerate(targets[:3],1):
     row=dict(symbol=sym,status='PASS',store_start_sha=cursor,store_commit_sha=child,result_state_path=child_path,
              volume_policy=entry['summary']['volume_policy'])
     cp=None
-    if i<=2:
+    if i<=2 or scenario.startswith('debit-'):
         put(checkpoint_path,dict(common,mode=n.MODE,kind='append_only_batch_checkpoint',status='PROGRESS_VALIDATED',
              batch_manifest_commit_sha=plan,batch_manifest_path=PLAN,transactions=rows+[row],
              last_verified_commit_sha=child,requests_attempted=i,budget_debits_confirmed=i,
@@ -139,7 +148,7 @@ for i,target in enumerate(targets[:3],1):
 # row is attributed retroactively to the stopped run.
 other=prefix+'-previous_session_eod-SYNTHETIC-unrelated.json'
 put(other,dict(mode='previous_session_eod',synthetic=True,request_id='99-1'))
-ledger([other],4,'previous_session_eod','99-1')
+ledger([other],5 if stopped else 4,'previous_session_eod','99-1')
 latest=commit('unrelated synthetic EOD')
 git(repo,'push','-q','origin','HEAD:refs/heads/main','--tags')
 available=set()
@@ -168,7 +177,7 @@ last_child=witnesses[-1]['row']['store_commit_sha']
 try: n._remote_exact(repo,last_child)
 except n.r.RecoveryError: print('PR110_CURRENT_REMOTE_MAIN_EQUALITY_REJECTS_LATER_EOD')
 else: raise AssertionError('remote main not moved')
-print('claim=1 verified_children=3 verified_checkpoints=2 batch_debits=3 current_ledger=4 remaining_rows=NOT_PROVEN no_retry=true')
+print('synthetic scenario:',scenario)
 (root/'LOCATORS.json').write_text(json.dumps(dict(reviewed=old,claim=op,claim_path=CLAIM,plan=plan,plan_path=PLAN,
     later_et_main=latest,request_id=RUN,execution_date=DAY,historical_cutoff=END,compute_sha=COMPUTE,selector=selection,
-    children=witnesses),indent=2,sort_keys=True)+'\n')
+    children=witnesses,stopped=stopped),indent=2,sort_keys=True)+'\n')
