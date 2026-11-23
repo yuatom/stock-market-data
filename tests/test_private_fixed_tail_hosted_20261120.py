@@ -19,9 +19,10 @@ def test_manual_workflow_public_surface():
     assert not {"store_sha","fixed_selection","descriptor_commit"} & set(triggers["workflow_dispatch"]["inputs"])
 
 
-def test_hosted_private_grant_claim_and_native_prewrite_on_file_git():
+def _hosted_private_grant_claim_on_file_git(*, rewind_after_claim=False):
     from contextlib import nullcontext
     import os, sys, tempfile, json, hashlib
+    from datetime import datetime, timedelta
     from types import SimpleNamespace
     from unittest.mock import patch
     sys.path.insert(0,str(ROOT))
@@ -86,6 +87,20 @@ def test_hosted_private_grant_claim_and_native_prewrite_on_file_git():
         helpers=SimpleNamespace(collection=collection_universe,
                                 collectors=SimpleNamespace(load_yaml=lambda p:yaml.safe_load(p.read_text())))
         plans=[]
+        wall=NOW
+        elapsed=100.0
+        class FrozenDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return wall.astimezone(tz) if tz is not None else wall.replace(tzinfo=None)
+        native_claim=hosted.retention.retain_capture_object
+        def commit_then_clock_rewind(*args, **kwargs):
+            nonlocal wall, elapsed
+            receipt=native_claim(*args, **kwargs)
+            if rewind_after_claim:
+                elapsed+=3600
+                wall-=timedelta(minutes=1)  # Remains inside the approved wall window.
+            return receipt
         def prewrite(*args,**kw):
             plans.append(args[5]);raise AssertionError("stop before any native plan write/child")
         def fixture_main(w):
@@ -94,7 +109,10 @@ def test_hosted_private_grant_claim_and_native_prewrite_on_file_git():
         import backfill_market_data_tail as tail
         b=hosted.HostedBackend(compute=ROOT,compute_sha=SHA,token="fake-token-only",
                                 key="fake-key-only",destination=root/"consumer")
-        with patch.object(hosted,"fetch_private_receipt",side_effect=fixture_fetch), \
+        with patch.object(hosted.time,"monotonic",side_effect=lambda:elapsed), \
+             patch.object(hosted.native.r,"datetime",FrozenDatetime), \
+             patch.object(hosted.retention,"retain_capture_object",side_effect=commit_then_clock_rewind), \
+             patch.object(hosted,"fetch_private_receipt",side_effect=fixture_fetch), \
              patch.object(hosted,"materialize_store",side_effect=fixture_materialize), \
              patch.object(hosted,"resolve_private_reference"),patch.object(hosted,"_source"), \
              patch.object(hosted,"_store_binding",side_effect=fixture_bind),patch.object(hosted,"_environment",lambda *args:nullcontext()), \
@@ -104,19 +122,32 @@ def test_hosted_private_grant_claim_and_native_prewrite_on_file_git():
              patch.object(tail,"backfill",side_effect=AssertionError("never call provider")) as child:
             result=hosted.profile.run_profile(env=ENV,compute_sha=SHA,expected_commitment=commitment,backend=b,now=NOW)
             assert result==hosted.profile.UNKNOWN and child.call_count==0
-            assert b.op is not None and len(plans)==1
+            assert b.op is not None
             op=b.op.operational_store_sha
-            assert b.op.approval_store_sha==old and op!=old and plans[0]["store_start_sha"]==op
-            assert plans[0]["maximum_provider_requests"]==10
-            assert plans[0]["fixed_selection"]["targets"]==private_grant["targets"]
+            assert b.op.approval_store_sha==old and op!=old
             assert git(bare,"rev-parse",f"refs/tags/market-data-read/{op}")==op
             assert git(bare,"rev-parse",f"{old}:data/market-data")==git(bare,"rev-parse",f"{op}:data/market-data")
+            if rewind_after_claim:
+                assert not plans, "a durable claim must not renew the originally anchored expiry"
+                assert git(bare,"rev-parse","refs/heads/main")==op
+                return
+            assert len(plans)==1 and plans[0]["store_start_sha"]==op
+            assert plans[0]["maximum_provider_requests"]==10
+            assert plans[0]["fixed_selection"]["targets"]==private_grant["targets"]
             replay=hosted.HostedBackend(compute=ROOT,compute_sha=SHA,token="fake-token-only",
                  key="fake-key-only",destination=root/"replay")
             repeat=hosted.profile.run_profile(env=dict(ENV,GITHUB_RUN_ID="43"),compute_sha=SHA,
                          expected_commitment=commitment,backend=replay,now=NOW)
             assert repeat==hosted.profile.STOP and replay.op is None and len(plans)==1
             assert git(bare,"rev-parse","refs/heads/main")==op
+
+def test_hosted_private_grant_claim_and_native_prewrite_on_file_git():
+    _hosted_private_grant_claim_on_file_git()
+
+
+def test_elapsed_private_grant_expires_across_claim_even_with_wall_rewind():
+    _hosted_private_grant_claim_on_file_git(rewind_after_claim=True)
+
 
 if __name__=="__main__":
     test_manual_workflow_public_surface()

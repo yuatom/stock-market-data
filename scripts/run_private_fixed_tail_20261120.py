@@ -15,6 +15,7 @@ import re
 import secrets
 import sys
 import tempfile
+import time
 
 COMPUTE = Path(__file__).resolve().parents[1]
 SCRIPTS = COMPUTE / "scripts"
@@ -82,6 +83,7 @@ class HostedBackend:
         self.grant=None
         self.commitment=None
         self.op=None
+        self.approval_window=None
         self.selector=None
         self.helpers=None
         self.config=yaml.safe_load((compute/"config/market-data-store.yaml").read_text(encoding="utf-8"))
@@ -110,26 +112,46 @@ class HostedBackend:
         _need(self.selection is not None and sha==self.selection.authority_store_sha)
         return self.repo
 
+    def _anchor_private_approval(self):
+        # The first verified preclaim observation owns the elapsed deadline.
+        # Don't sample again after claim/readback: wall-clock rewind could
+        # otherwise renew an already expired approval.
+        _need(self.grant is not None and self.approval_window is None)
+        observed_elapsed=time.monotonic()
+        observed_wall=native.r.now_utc()
+        profile._window(self.grant,observed_wall)
+        until=profile._utc(self.grant["valid_until"])
+        self.approval_window=(until,observed_elapsed+(until-observed_wall).total_seconds())
+
+    def _check_claim_window(self):
+        _need(self.approval_window is not None)
+        until,deadline=self.approval_window
+        _need(time.monotonic()<deadline and native.r.now_utc()<until)
+
     def preclaim_state(self, *, repo, store_sha, execution_date):
         _need(repo==self.repo and store_sha==self.selection.authority_store_sha
               and execution_date==self.grant["execution_date"])
+        self._anchor_private_approval()
         _source(self.compute,self.compute_sha)
         resolve_private_reference(self.token,ROUTE,self.compute_sha,self.selection.descriptor_commit)
         with _environment(self.token):
             _store_binding(repo,ROUTE,self.compute_sha,self.selection)
             budget=native._budget(repo,execution_date,self.config)
+            self._check_claim_window()
             return dict(compute_repository="yuatom/stock-market-data",lock_group="market-data-collector",
                         lock_held=True,cancel_in_progress=False,queue="max",store_sha=_remote_main(repo),
                         available_credits=200-budget["credits"])
 
     def claim_once(self, commitment, run_id):
         _need(commitment == self.commitment and self.op is None)
+        self._check_claim_window()
         _source(self.compute,self.compute_sha)
         old=self.selection.authority_store_sha
         day=self.grant["execution_date"]
         request_id=f"{run_id}-1"
         raw=_claim_payload(commitment=commitment,compute_sha=self.compute_sha,prior=old,day=day,request_id=request_id)
         with _environment(self.token):
+            self._check_claim_window()
             receipt=retention.retain_capture_object(repo=self.repo,expected_commit=old,
                approval_sha256=commitment,symbol=LANE,name="claim.json",payload=raw,
                execution_day=day,request_id=request_id,forbidden_bytes=(self.key.encode(),self.token.encode()))
@@ -143,6 +165,8 @@ class HostedBackend:
               and kwargs["compute_sha"]==self.compute_sha and kwargs["store_sha"]==op.operational_store_sha
               and kwargs["execution_date"]==self.grant["execution_date"] and kwargs["historical_cutoff"]==profile.CUTOFF
               and kwargs["fixed_selector"]=={"schema_version":1,"targets":self.grant["targets"]})
+        _need(self.approval_window is not None)
+        authorization_valid_until,authorization_deadline=self.approval_window
         _source(self.compute,self.compute_sha)
         self.helpers=native.a.load_helpers()
         self.selector=kwargs["fixed_selector"]
@@ -151,7 +175,9 @@ class HostedBackend:
         with _environment(self.token):
             native._remote_exact(self.repo,op.operational_store_sha)
             return native.maintain_append(h=self.helpers,compute=self.compute,config=self.config,
-                                          universe=universe,access=access,key=self.key,**kwargs)
+                                          universe=universe,access=access,key=self.key,
+                                          authorization_valid_until=authorization_valid_until,
+                                          authorization_deadline=authorization_deadline,**kwargs)
 
     def verify_native_receipts(self, *, result, compute_sha, store_sha, execution_date, historical_cutoff, request_id):
         _need(self.op is not None and self.selector is not None and self.helpers is not None

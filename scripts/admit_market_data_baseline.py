@@ -13,7 +13,9 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -226,9 +228,16 @@ class StorePublisher:
         if git(self.repo, 'status', '--porcelain') or git(self.repo, 'ls-files', '--others'):
             raise AdmissionError('dirty_checkout')
 
-    def publish(self, paths: list[str], *, expected_report: dict[str, str] | None = None) -> str:
+    def publish(self, paths: list[str], *, expected_report: dict[str, str] | None = None,
+                prepare_budget: Callable[[Path], None] | None = None,
+                authorize_budget_push: Callable[[], None] | None = None) -> str:
         if not paths or not set(paths) <= self.allowed:
             raise AdmissionError('unsafe_path')
+        if prepare_budget is not None or authorize_budget_push is not None:
+            if (paths != [self.budget_relative] or expected_report is not None
+                or prepare_budget is None or authorize_budget_push is None):
+                raise AdmissionError('contract_invalid')
+            return self._publish_prepared_budget(prepare_budget, authorize_budget_push)
         self.assert_allowed()
         if self.remote_head() != self.head or git(self.repo, 'rev-parse', 'HEAD') != self.head:
             raise AdmissionError('object_drift')
@@ -270,6 +279,72 @@ class StorePublisher:
             raise
         self.head = candidate
         return candidate
+
+    def _publish_prepared_budget(self, prepare, authorize_push) -> str:
+        # The private predebit must not dirty the active checkout or advance
+        # its ref before authorization and durable readback. No reset/rollback
+        # can be safe after we have tried to push.
+        parent = self.head
+        relative = self.budget_relative
+
+        def assert_clean_parent():
+            try:
+                self.assert_current(parent)
+            except AdmissionError as exc:
+                if exc.code != 'dirty_checkout':
+                    raise
+                raise AdmissionError('object_drift') from None
+
+        assert_clean_parent()
+        with tempfile.TemporaryDirectory(prefix='private-predebit-git-') as temp:
+            stage = Path(temp) / 'candidate'
+            git(self.repo, 'worktree', 'add', '--detach', str(stage), parent)
+            try:
+                assert_clean_parent()
+                prepare(stage / relative)
+                expected_blob = git(stage, 'hash-object', '--', str(stage / relative))
+                git(stage, 'add', '--', relative)
+                if git(stage, 'diff', '--cached', '--name-only', '-z') != relative + '\0':
+                    raise AdmissionError('unexpected_store_change')
+                git(stage, '-c', 'user.name=stock-market-data-bot', '-c',
+                    'user.email=stock-market-data-bot@users.noreply.github.com',
+                    'commit', '--quiet', '--no-gpg-sign', '-m', 'data: record daily admission budget or diagnostic')
+                candidate = git(stage, 'rev-parse', 'HEAD')
+                if (git(stage, 'rev-list', '--parents', '-n1', candidate).split() != [candidate, parent]
+                    or git(stage, 'diff', '--name-only', '-z', parent, candidate, '--') != relative + '\0'
+                    or git(stage, 'rev-parse', f'{candidate}:{relative}') != expected_blob):
+                    raise AdmissionError('object_drift')
+                assert_clean_parent()
+                publication = {'candidate_commit_sha': candidate, 'last_verified_commit_sha': parent,
+                               'publication_kind': 'budget_predebit', 'publication_phase': 'main_push',
+                               'main_publication_outcome': 'UNCONFIRMED', 'durability_outcome': 'UNCONFIRMED'}
+                # Last dual-clock check after *all* local commit/preflight work,
+                # directly before the actual fast-forward push.
+                authorize_push()
+                try:
+                    git(stage, 'push', 'origin', f'{candidate}:refs/heads/main')
+                    publication['publication_phase'] = 'main_readback'
+                    if self.remote_head() != candidate:
+                        raise AdmissionError('object_drift')
+                    publication['main_publication_outcome'] = 'CONFIRMED'
+                    publication['publication_phase'] = 'durability_verification'
+                    self.verify(stage, candidate)
+                    publication['durability_outcome'] = 'CONFIRMED'
+                    if (git(self.repo, 'rev-parse', 'HEAD') != parent
+                        or git(self.repo, 'status', '--porcelain') or git(self.repo, 'ls-files', '--others')):
+                        raise AdmissionError('object_drift')
+                    git(self.repo, 'merge', '--ff-only', '--no-edit', candidate)
+                except Exception as exc:
+                    exc.publication = publication
+                    raise
+                self.head = candidate
+                return candidate
+            finally:
+                # Only the newly-created scratch worktree, never the parent.
+                try:
+                    git(self.repo, 'worktree', 'remove', '--force', str(stage))
+                except AdmissionError:
+                    pass
 
     def report(self, value: dict[str, Any]) -> str:
         # Do not hide a post-debit local edit inside a new diagnostic commit.
@@ -422,7 +497,8 @@ def debit_before_request(h, writer, root: Path, day: str, budget: dict,
                          *, clock: Callable[[], datetime] = utc_now,
                          deadline: float | None = None, maturity: str = '00:00',
                          compute: Path | None = None, compute_sha: str | None = None,
-                         timing: list | None = None, sleep=None, monotonic=None) -> BudgetDebit:
+                         timing: list | None = None, sleep=None, monotonic=None,
+                         authorization_valid_until: datetime | None = None) -> BudgetDebit:
     sleep = sleep or time.sleep
     monotonic = monotonic or time.monotonic
     deadline = deadline if deadline is not None else monotonic() + 600
@@ -430,7 +506,9 @@ def debit_before_request(h, writer, root: Path, day: str, budget: dict,
     path = writer.safe_path(writer.budget_relative) if hasattr(writer, 'safe_path') else None
 
     def check_deadline():
-        if monotonic() >= deadline:
+        if monotonic() >= deadline or (
+            authorization_valid_until is not None and clock() >= authorization_valid_until
+        ):
             raise AdmissionError('deadline_exceeded')
 
     def event(stage: str, stamp: datetime) -> None:
@@ -497,26 +575,66 @@ def debit_before_request(h, writer, root: Path, day: str, budget: dict,
         if stamp.second + stamp.microsecond / 1_000_000 >= 58.0 - PREDEBIT_HEADROOM_SECONDS:
             wait_next(stamp)
             continue
-        check_deadline()
-        event('debit_start', stamp)
-        h.collectors.consume_twelve_credit(root, day, amount=1, **kwargs)
-        minute = stamp.strftime('%Y-%m-%dT%H:%MZ')
-        if path is not None:
-            validate_budget_file(path, day, **kwargs)
-            state = read_budget_state(path, day)
-            changes = {k: v - before['minutes'].get(k, 0) for k, v in state['minutes'].items()
-                       if v != before['minutes'].get(k, 0)}
-            if state['credits'] != before['credits'] + 1 or len(changes) != 1 or next(iter(changes.values())) != 1:
-                raise AdmissionError('budget_state_invalid')
-            minute = next(iter(changes))
-        try:
-            sha = writer.publish([writer.budget_relative])
-        except Exception as exc:
-            # Local ledger mutation is not a durable receipt, nor proof of provider I/O.
-            exc.predebit = {'state': 'UNCONFIRMED'}
-            if path is not None:
-                exc.predebit.update(credits_before=before['credits'], credits_after=state['credits'])
-            raise
+        guarded = authorization_valid_until is not None
+        if guarded and path is None:
+            raise AdmissionError('contract_invalid')
+        # A private approval may expire during the collector's local ledger
+        # mutation/validation. Prepare it off-checkout so a denied write needs
+        # no rollback (and a concurrent edit is never replaced or published).
+        context = tempfile.TemporaryDirectory(prefix='private-predebit-') if guarded else nullcontext(root)
+        with context as preparation:
+            candidate_root = Path(preparation)
+            candidate_path = path
+            if guarded:
+                candidate_path = candidate_root / path.relative_to(root)
+                preimage = path.read_bytes() if path.exists() else None
+                if preimage is not None:
+                    candidate_path.parent.mkdir(parents=True)
+                    candidate_path.write_bytes(preimage)
+            check_deadline()
+            event('debit_start', stamp)
+            h.collectors.consume_twelve_credit(candidate_root, day, amount=1, **kwargs)
+            minute = stamp.strftime('%Y-%m-%dT%H:%MZ')
+            if candidate_path is not None:
+                validate_budget_file(candidate_path, day, **kwargs)
+                state = read_budget_state(candidate_path, day)
+                changes = {k: v - before['minutes'].get(k, 0) for k, v in state['minutes'].items()
+                           if v != before['minutes'].get(k, 0)}
+                if state['credits'] != before['credits'] + 1 or len(changes) != 1 or next(iter(changes.values())) != 1:
+                    raise AdmissionError('budget_state_invalid')
+                minute = next(iter(changes))
+            options = {}
+            push_started = False
+            if guarded:
+                postimage = candidate_path.read_bytes()
+
+                def install_budget(detached_path):
+                    if ((path.read_bytes() if path.exists() else None) != preimage
+                        or (detached_path.read_bytes() if detached_path.exists() else None) != preimage):
+                        raise AdmissionError('object_drift')
+                    check_deadline()
+                    detached_path.parent.mkdir(parents=True, exist_ok=True)
+                    detached_path.write_bytes(postimage)
+
+                def authorize_budget_push():
+                    nonlocal push_started
+                    check_deadline()
+                    push_started = True
+
+                # Fail before opening the writer if preparation consumed the
+                # allowance; recheck during install and immediately before push.
+                check_deadline()
+                options.update(prepare_budget=install_budget, authorize_budget_push=authorize_budget_push)
+            try:
+                sha = writer.publish([writer.budget_relative], **options)
+            except Exception as exc:
+                # A local candidate is not a debit attempt. After push starts,
+                # retain existing conservative accounting even on lost responses.
+                if not guarded or push_started:
+                    exc.predebit = {'state': 'UNCONFIRMED'}
+                    if path is not None:
+                        exc.predebit.update(credits_before=before['credits'], credits_after=state['credits'])
+                raise
         try:
             blob = git(writer.repo, 'rev-parse', f'{sha}:{writer.budget_relative}') if path is not None else None
             after = clock().astimezone(timezone.utc)
