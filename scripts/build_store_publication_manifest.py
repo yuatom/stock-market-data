@@ -4,8 +4,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import subprocess
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -61,6 +63,62 @@ def _declared_paths(value: Any) -> set[str]:
     return found
 
 
+EOD_HOST_REPOSITORY = "yuatom/stock-market-data"
+EOD_OWNER_WORKFLOW = "Market Data Collector"
+EOD_MAIN_REF = "refs/heads/main"
+EOD_OWNER_WORKFLOW_REF_PREFIX = EOD_HOST_REPOSITORY + "/.github/workflows/market-data-collector.yml@"
+EOD_CONTEXT = {
+    "GITHUB_ACTIONS": "true",
+    "GITHUB_REPOSITORY": EOD_HOST_REPOSITORY,
+    "GITHUB_REPOSITORY_OWNER": "yuatom",
+    "GITHUB_WORKFLOW": EOD_OWNER_WORKFLOW,
+}
+EOD_VARIABLES = {
+    *EOD_CONTEXT, "GITHUB_EVENT_NAME", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT",
+    "GITHUB_REF", "GITHUB_REF_TYPE", "GITHUB_WORKFLOW_REF",
+}
+EOD_INVOCATION_RE = re.compile(r"[1-9][0-9]{0,19}-[1-9][0-9]{0,8}")
+
+
+def _eod_scope(stage: str, requested_id: str, requested_trigger: str) -> tuple[str, str] | None:
+    """The trusted caller for formal EOD is the existing GitHub workflow.
+
+    While old workflow definitions may run new Compute bytes, their runner
+    context and the pre-existing diagnostic still name the same invocation.
+    Explicit args are only corroboration; they cannot confer hosted scope.
+    """
+    explicit = bool(requested_id or requested_trigger)
+    if stage != "previous_session_eod":
+        if explicit:
+            raise PublicationManifestError("EOD identity supplied for a different stage")
+        return None
+    if not explicit and not any(key in os.environ for key in EOD_VARIABLES):
+        return None
+    if any(os.environ.get(key) != value for key, value in EOD_CONTEXT.items()):
+        raise PublicationManifestError("ordinary EOD hosted context not verified")
+    run = os.environ.get("GITHUB_RUN_ID", "")
+    attempt = os.environ.get("GITHUB_RUN_ATTEMPT", "")
+    invocation = f"{run}-{attempt}"
+    trigger = os.environ.get("GITHUB_EVENT_NAME", "")
+    if (not EOD_INVOCATION_RE.fullmatch(invocation)
+            or trigger not in {"schedule", "workflow_dispatch"}
+            or (explicit and (requested_id, requested_trigger) != (invocation, trigger))):
+        raise PublicationManifestError("invalid EOD manifest invocation")
+    ref = os.environ.get("GITHUB_REF", "")
+    ref_type = os.environ.get("GITHUB_REF_TYPE", "")
+    prefix = {"branch": "refs/heads/", "tag": "refs/tags/"}.get(ref_type)
+    if (not prefix or not ref.startswith(prefix)
+            or os.environ.get("GITHUB_WORKFLOW_REF") != EOD_OWNER_WORKFLOW_REF_PREFIX + ref
+            or (trigger == "schedule" and ref != EOD_MAIN_REF)):
+        raise PublicationManifestError("ordinary EOD caller ref not verified")
+    # Never use a branch or tag name as a local path or shell interpolation.
+    # Match the same native ref space already supported by workflow_dispatch.
+    if subprocess.run(["git", "check-ref-format", ref], stdout=subprocess.DEVNULL,
+                      stderr=subprocess.DEVNULL, check=False).returncode:
+        raise PublicationManifestError("ordinary EOD caller ref is invalid")
+    return invocation, trigger
+
+
 def build_manifest(
     *,
     store_root: Path,
@@ -68,12 +126,24 @@ def build_manifest(
     request_id: str,
     trade_date: str,
     stage: str,
+    eod_invocation_id: str = "",
+    eod_trigger: str = "",
 ) -> Path | None:
     store_root = store_root.resolve()
     repo_root = Path(_git(store_root, "rev-parse", "--show-toplevel").strip()).resolve()
     data_root = repo_root / "data" / "market-data"
     if store_root != data_root:
         raise PublicationManifestError("store_root must equal repository data/market-data root")
+
+    scope = _eod_scope(stage, eod_invocation_id, eod_trigger)
+    if scope is not None:
+        eod_invocation_id, eod_trigger = scope
+        try:
+            normalized_day = date.fromisoformat(trade_date).isoformat()
+        except ValueError as exc:
+            raise PublicationManifestError("invalid EOD manifest date") from exc
+        if normalized_day != trade_date:
+            raise PublicationManifestError("invalid EOD manifest date")
 
     result = _last_json(result_file)
     if stage == "previous_session_eod" and not result.get("result_state_path"):
@@ -122,6 +192,18 @@ def build_manifest(
         expected_token = hashlib.sha256(invocation["invocation_id"].encode("utf-8")).hexdigest()[:16]
         if not relative.endswith(f"{expected_token}-conflicts.json"):
             raise PublicationManifestError("ordinary EOD diagnostic path does not match invocation identity")
+        if scope is not None:
+            run, attempt = eod_invocation_id.split("-")
+            expected_invocation = {
+                "invocation_id": eod_invocation_id,
+                "run_id": run,
+                "run_attempt": attempt,
+                "event": eod_trigger,
+                "repository": EOD_HOST_REPOSITORY,
+                "workflow": EOD_OWNER_WORKFLOW,
+            }
+            if any(invocation.get(key) != value for key, value in expected_invocation.items()):
+                raise PublicationManifestError("ordinary EOD diagnostic does not bind this run")
     declared: set[str] = set()
     for path in _declared_paths(result):
         if path.startswith("data/market-data/"):
@@ -161,29 +243,72 @@ def build_manifest(
 
     stable_request_id = request_id.strip() or f"scheduled-{trade_date}-{stage}"
     token = hashlib.sha256(stable_request_id.encode("utf-8")).hexdigest()[:16]
-    manifest = (
-        store_root
-        / "collector-state"
-        / trade_date[:7]
-        / f"{trade_date}-{stage}-{token}-publication.json"
-    )
-    manifest.parent.mkdir(parents=True, exist_ok=True)
-    manifest.write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "request_id": stable_request_id,
-                "trade_date": trade_date,
-                "stage": stage,
-                "required_outputs": refs,
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        + "\n",
-        encoding="utf-8",
-    )
+    directory = store_root / "collector-state" / trade_date[:7]
+    legacy = directory / f"{trade_date}-{stage}-{token}-publication.json"
+
+    def document(identity: str) -> bytes:
+        return (
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "request_id": identity,
+                    "trade_date": trade_date,
+                    "stage": stage,
+                    "required_outputs": refs,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode("utf-8")
+
+    directory.mkdir(parents=True, exist_ok=True)
+    if scope is None:
+        if stage == "previous_session_eod":
+            try:
+                with legacy.open("xb") as stream:
+                    stream.write(document(stable_request_id))
+            except FileExistsError as exc:
+                raise PublicationManifestError("legacy EOD manifest already exists") from exc
+        else:
+            legacy.write_bytes(document(stable_request_id))
+        return legacy
+
+    # Reserve the returned per-run path before touching the legacy locator.
+    # The same single-writer queue already owns this private checkout.
+    manifest = directory / f"{trade_date}-{stage}-run-{eod_invocation_id}-publication.json"
+    try:
+        stream = manifest.open("xb")
+    except FileExistsError as exc:
+        raise PublicationManifestError("this EOD run manifest already exists") from exc
+    new_legacy = False
+    try:
+        with stream:
+            # Preserve the old date locator once for the scheduled lane. It is
+            # compatible at its original commit, never proof of a later run.
+            if eod_trigger == "schedule":
+                legacy_bytes = document(stable_request_id)
+                try:
+                    compat = legacy.open("xb")
+                except FileExistsError:
+                    if legacy.is_symlink() or not legacy.is_file():
+                        raise PublicationManifestError("legacy EOD locator is not a normal file")
+                else:
+                    new_legacy = True
+                    with compat:
+                        compat.write(legacy_bytes)
+                    refs.append({"path": legacy.relative_to(store_root).as_posix(),
+                                 "blob_sha": _git_blob_sha(legacy_bytes)})
+                    refs.sort(key=lambda ref: ref["path"])
+            stream.write(document(f"eod-run-{eod_invocation_id}"))
+    except Exception:
+        # Both paths are scratch files this invocation created exclusively.
+        # A failed build cannot leave either one as an intended publication.
+        manifest.unlink()
+        if new_legacy:
+            legacy.unlink()
+        raise
     return manifest
 
 
@@ -192,6 +317,8 @@ def main() -> int:
     parser.add_argument("--store-root", required=True)
     parser.add_argument("--result-file", required=True)
     parser.add_argument("--request-id", default="")
+    parser.add_argument("--eod-invocation-id", default="")
+    parser.add_argument("--eod-trigger", default="")
     parser.add_argument("--trade-date", required=True)
     parser.add_argument("--stage", required=True)
     args = parser.parse_args()
@@ -199,6 +326,8 @@ def main() -> int:
         store_root=Path(args.store_root),
         result_file=Path(args.result_file),
         request_id=args.request_id,
+        eod_invocation_id=args.eod_invocation_id,
+        eod_trigger=args.eod_trigger,
         trade_date=args.trade_date,
         stage=args.stage,
     )
