@@ -419,6 +419,7 @@ def _conflict_record(
 def _write_private_eod_diagnostic(
     *, store_root: Path, trade_date: str, result: dict[str, Any], diagnostics: list[dict[str, Any]],
     conflict_count: int,
+    ordinary_eod_state=None,
 ) -> None:
     request_id = os.environ.get("MARKET_DATA_REQUEST_ID", "")
     invocation_id = "-".join(filter(None, (
@@ -449,9 +450,13 @@ def _write_private_eod_diagnostic(
         "conflict_diagnostics_truncated": conflict_count > len(diagnostics),
         "conflicts": diagnostics,
     }
-    destination = store_root / relative
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+    encoded = (json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    if ordinary_eod_state is None:
+        destination = store_root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(encoded)
+    else:
+        ordinary_eod_state.write_diagnostic(relative.as_posix(),encoded)
     result["result_state_path"] = relative.as_posix()
 
 
@@ -475,14 +480,36 @@ def collect_previous_session_eod(
     completeness: Mapping[str, Any],
     config: Mapping[str, Any],
     access: Mapping[str, Any],
+    ordinary_eod_state=None,
 ) -> dict[str, Any]:
     # New behavior requires an explicitly deployed policy; absent preserves legacy.
     revision_policy=config['collector']['twelve_data_daily'].get('overlap_revision_policy')
     if revision_policy not in (None,'price_only_volume_blocked_v1'):
         raise ValueError('unsupported daily revision policy')
     price_only=revision_policy=='price_only_volume_blocked_v1'
-    key = os.environ.get("TWELVE_DATA_API_KEY")
-    if not key:
+    claim_policy = config["collector"].get("ordinary_eod_admission", "legacy")
+    state = None
+
+    def held(status: str) -> dict[str, Any]:
+        return {"mode": "previous_session_eod", "status": status, "changed_series": 0,
+                "bootstrapped_series": 0, "failures": []}
+
+    if claim_policy != "legacy":
+        from scripts.ordinary_eod_local_state import OrdinaryEodKnownStop, OrdinaryEodLocalState, OrdinaryEodPreparedDrift
+        if claim_policy != "claimed_v1":
+            return held("held_ordinary_eod_unregistered")
+        if type(ordinary_eod_state) is not OrdinaryEodLocalState:
+            from scripts.ordinary_eod_authority import OrdinaryEodUnregistered, require_hosted_binding
+            try:
+                require_hosted_binding()
+            except OrdinaryEodUnregistered:
+                return held("held_ordinary_eod_unregistered")
+            return held("held_ordinary_eod_unregistered")
+        state = ordinary_eod_state
+    elif ordinary_eod_state is not None:
+        return held("held_ordinary_eod_unregistered")
+    key = os.environ.get("TWELVE_DATA_API_KEY") if state is None else None
+    if state is None and not key:
         return {
             "mode": "previous_session_eod",
             "status": "secret_missing",
@@ -507,6 +534,31 @@ def collect_previous_session_eod(
     universe = _daily_universe(watchlist, completeness)
     daily_basis_owner = _load_daily_basis_owner(store_root, trade_date)
     delegated_daily_symbols = []
+    if state is not None:
+        try:
+            maturity = config["collector"]["twelve_data_daily"]["settlement_maturity"]["minimum_next_day_et"]
+            ordinary_scope = [row for row in universe if row[0] not in daily_basis_owner]
+            admitted = state.begin(root=store_root, day=trade_date, scope=ordinary_scope,
+                identity_effective={symbol:_identity_effective_date(watchlist,symbol) for symbol,_ in ordinary_scope},
+                daily=int(budget["hard_credits_per_day"]), minute=int(budget["hard_credits_per_minute"]),
+                maturity=maturity)
+        except Exception:
+            return held("held_ordinary_eod_state_unknown")
+        if not admitted:
+            return held("held_ordinary_eod_consumed_no_replay")
+
+    def known_drift(exc: Exception) -> dict[str, Any]:
+        if state is not None and isinstance(exc, OrdinaryEodKnownStop):
+            # Only a deterministic local stop reaches this branch. Claim and
+            # any confirmed debits remain consumed; no partial series publish.
+            return held("held_ordinary_eod_pacing_no_replay")
+        if state is None or not isinstance(exc,OrdinaryEodPreparedDrift):
+            return held("held_ordinary_eod_state_unknown")
+        try:
+            return {**held("held_ordinary_eod_prepared_drift_no_replay"),
+                    "ordinary_eod_local_store_commit":state.reject_prepared()}
+        except Exception:
+            return held("held_ordinary_eod_state_unknown")
 
     for symbol, asset_class in universe:
         if symbol in daily_basis_owner:
@@ -516,21 +568,25 @@ def collect_previous_session_eod(
         phase = "budget_check"
         try:
             assert_legacy_basis(store_root, provider=TWELVE_PROVIDER, symbol=symbol)
-            wait_for_twelve_budget(
-                store_root,
-                trade_date,
-                per_day=int(budget["hard_credits_per_day"]),
-                per_minute=int(budget["hard_credits_per_minute"]),
-            )
-            consume_twelve_credit(
-                store_root,
-                trade_date,
-                amount=1,
-                per_day=int(budget["hard_credits_per_day"]),
-                per_minute=int(budget["hard_credits_per_minute"]),
-            )
-            phase = "provider_fetch"
-            fetched = fetch_twelve_daily(symbol, key, access, outputsize=outputsize)
+            if state is None:
+                wait_for_twelve_budget(
+                    store_root,
+                    trade_date,
+                    per_day=int(budget["hard_credits_per_day"]),
+                    per_minute=int(budget["hard_credits_per_minute"]),
+                )
+                consume_twelve_credit(
+                    store_root,
+                    trade_date,
+                    amount=1,
+                    per_day=int(budget["hard_credits_per_day"]),
+                    per_minute=int(budget["hard_credits_per_minute"]),
+                )
+                phase = "provider_fetch"
+                fetched = fetch_twelve_daily(symbol, key, access, outputsize=outputsize)
+            else:
+                phase = "provider_fetch"
+                fetched = state.collect_symbol(symbol, outputsize=outputsize)
             if price_only:
                 # Retain all normalized response rows BEFORE any comparison rejection.
                 # This is not original HTTP bytes and does not recover past responses.
@@ -541,9 +597,12 @@ def collect_previous_session_eod(
                 evidence_digest=hashlib.sha256(payload).hexdigest()
                 relative=Path('collector-state')/trade_date[:7]/('price-only-'+evidence_digest+'.json')
                 evidence_path=relative.as_posix()
-                target=store_root/relative
-                target.parent.mkdir(parents=True,exist_ok=True)
-                with target.open('xb') as handle: handle.write(payload)
+                if state is None:
+                    target=store_root/relative
+                    target.parent.mkdir(parents=True,exist_ok=True)
+                    with target.open('xb') as handle: handle.write(payload)
+                else:
+                    state.write_evidence(evidence_path,payload)
             effective = _identity_effective_date(watchlist, symbol)
             eligible = [
                 bar
@@ -605,7 +664,8 @@ def collect_previous_session_eod(
                             ))
                 if symbol_volume_blocked:
                     volume_blocked_symbols.append(symbol)
-                    if quarantine_daily_volume(store_root, provider=TWELVE_PROVIDER, symbol=symbol,
+                    quarantine = quarantine_daily_volume if state is None else state.quarantine_series
+                    if quarantine(store_root, provider=TWELVE_PROVIDER, symbol=symbol,
                             evidence_path=evidence_path, evidence_sha256=evidence_digest,
                             observed_trade_date=trade_date):
                         volume_quarantined_series += 1
@@ -634,7 +694,8 @@ def collect_previous_session_eod(
                                normalized_evidence_path=evidence_path,
                                normalized_evidence_sha256=evidence_digest)
             phase = "immutable_append"
-            result = append_daily_bars(
+            writer = append_daily_bars if state is None else state.append_series
+            result = writer(
                 store_root,
                 provider=TWELVE_PROVIDER,
                 symbol=symbol,
@@ -650,8 +711,12 @@ def collect_previous_session_eod(
                 if not existing:
                     bootstrapped_series += 1
         except BudgetExceeded:
+            if state is not None:
+                return held("held_ordinary_eod_state_unknown")
             raise
         except Exception as exc:
+            if state is not None:
+                return known_drift(exc)
             failure = {"symbol": symbol, "reason": type(exc).__name__, "detail": str(exc)[:240]}
             if isinstance(exc, MarketDataConflict):
                 # Classify only by the proven call phase, never by private provider data
@@ -683,13 +748,28 @@ def collect_previous_session_eod(
         "failures": failures,
         **({"delegated_daily_symbols": delegated_daily_symbols} if delegated_daily_symbols else {}),
     }
-    _write_private_eod_diagnostic(
-        store_root=store_root,
-        trade_date=trade_date,
-        result=result,
-        diagnostics=conflict_diagnostics,
-        conflict_count=conflict_record_count,
-    )
+    if state is not None and any(f["reason"] not in {
+        "no_eligible_previous_session_daily_rows", "insufficient_bootstrap_history"
+    } for f in failures):
+        return held("held_ordinary_eod_state_unknown")
+    diagnostic = dict(store_root=store_root,trade_date=trade_date,result=result,
+        diagnostics=conflict_diagnostics,conflict_count=conflict_record_count)
+    if state is None:
+        _write_private_eod_diagnostic(**diagnostic)
+    else:
+        try:
+            _write_private_eod_diagnostic(**diagnostic,ordinary_eod_state=state)
+            terminal, complete = state.finish()
+            if not complete:
+                return {**held("held_ordinary_eod_incomplete_no_replay"),
+                        "ordinary_eod_local_store_commit":terminal}
+            result["ordinary_eod_local_store_commit"] = terminal
+            if failures:
+                result["ordinary_eod_known_no_new_input"] = len(failures)
+                result["status"] = "ok"   # Exact verified target coverage is already durable.
+
+        except Exception as exc:
+            return known_drift(exc)
     return result
 
 
@@ -1041,6 +1121,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         }
 
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    if args.mode == "previous_session_eod" and result["status"].startswith("held_ordinary_eod_"):
+        return 2  # Existing hosted consumers must stop before manifest or Store publication.
     return 0
 
 

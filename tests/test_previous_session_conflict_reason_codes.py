@@ -319,18 +319,19 @@ class WorkflowSafeSummaryTest(unittest.TestCase):
             s for s in workflow["jobs"]["collect"]["steps"]
             if s["name"] == "Collect qualified facts into private Store checkout"
         )
-        script = step["run"].split("python - <<'PY'\n", 1)[1].split("\nPY", 1)[0]
+        script = step["run"].split("python - /tmp/collector-output.txt <<'PY'\n", 1)[1].split("\nPY", 1)[0]
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "result.json"
+            output = Path(d) / "github-output"
             path.write_text(json.dumps(result), encoding="utf-8")
-            source = "Path('/tmp/collector-output.txt')"
-            self.assertIn(source, script)
-            script = script.replace(source, f"Path({str(path)!r})")
             proc = subprocess.run(
-                [sys.executable, "-c", script],
+                [sys.executable, "-", str(path)], input=script,
+                cwd=ROOT, env=dict(os.environ, MODE=result["mode"], GITHUB_OUTPUT=str(output)),
                 check=False, capture_output=True, text=True,
             )
-        self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual(proc.stderr, "")
+            self.assertEqual(output.read_text(encoding="utf-8"), "legacy_writer_allowed=true\n")
         return proc.stdout, json.loads(proc.stdout)
 
     def test_typed_counts_are_allowlisted_and_private_details_are_not_logged(self):

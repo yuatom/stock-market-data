@@ -1114,6 +1114,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = {"mode": args.mode, "status": "no_qualified_live_premarket_adapter_registered", "changed": 0}
 
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    if args.mode == "previous_session_eod" and (
+        result["status"].startswith("held_ordinary_eod_")
+        or "ordinary_eod_local_store_commit" in result
+        or config["collector"].get("ordinary_eod_admission", "legacy") != "legacy"
+    ):
+        # The old hosted wrapper treats exit 0 as permission to stage/rebase
+        # and publish. Never let it consume an owned or held result.
+        return 2
     return 0
 
 
