@@ -44,7 +44,11 @@ class ControlWorkflowBoundaryTest(unittest.TestCase):
         names = [step["name"] for step in steps]
         self.assertLess(names.index("Persist private Store only"), names.index("Verify durable Store publication"))
         durability = steps[names.index("Verify durable Store publication")]
-        self.assertEqual(durability["if"], "steps.invocation.outputs.mode != 'smoke_readonly'")
+        self.assertEqual(
+            durability["if"],
+            "steps.invocation.outputs.mode != 'smoke_readonly' "
+            "&& steps.collected.outputs.legacy_writer_allowed == 'true'",
+        )
         self.assertNotIn("continue-on-error", durability)
         self.assertIn("verify_store_publication.py", durability["run"])
         self.assertIn("--required-manifest", durability["run"])
