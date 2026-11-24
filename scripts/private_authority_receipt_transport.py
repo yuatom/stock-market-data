@@ -12,7 +12,7 @@ import json
 import re
 import urllib.parse
 import urllib.request
-from scripts.private_authority_receipt import ROUTES, MAX_RECEIPT_BYTES, verify_receipt
+from scripts.private_authority_receipt import ORDINARY_RETAINED_ROUTE, ROUTES, MAX_RECEIPT_BYTES, verify_receipt
 
 STORE_REPOSITORY = 'yuatom/stock-market-data-store'
 RECEIPT_PATH = 'capture-authority/receipt.json'
@@ -50,6 +50,15 @@ def _constant(_):
     raise ValueError()
 
 
+def receipt_sidecar_ref(route, compute_sha, expected_commitment):
+    """Keep legacy addresses exact; new immutable grants need not collide."""
+    _need(type(route) is str and route in ROUTES)
+    _hex(compute_sha, 40)
+    _hex(expected_commitment, 64)
+    ref = f'refs/heads/capture-receipts/{route}/{compute_sha}'
+    return f'{ref}/{expected_commitment}' if route == ORDINARY_RETAINED_ROUTE else ref
+
+
 def fetch_private_receipt(token, route, compute_sha, expected_commitment):
     """Read separate private receipt sidecar and bind to trusted dispatch inputs.
 
@@ -60,11 +69,8 @@ This function neither authenticates approval nor checks durable replay gates.
 """
     try:
         _need(type(token) is str and re.fullmatch(r'[A-Za-z0-9_.-]{1,4096}', token))
-        _need(type(route) is str and route in ROUTES)
-        _hex(compute_sha, 40)
-        _hex(expected_commitment, 64)
+        ref = receipt_sidecar_ref(route, compute_sha, expected_commitment)
         base = 'https://api.github.com/repos/' + STORE_REPOSITORY
-        ref = f'refs/heads/capture-receipts/{route}/{compute_sha}'
         url = base + '/contents/' + RECEIPT_PATH + '?ref=' + urllib.parse.quote(ref, safe='')
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
 
