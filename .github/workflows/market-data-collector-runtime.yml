@@ -283,8 +283,10 @@ jobs:
           else:
               raise SystemExit(f'unsupported logical trigger: {event}/{branch}')
 
+          # Resolve schedule date and delivery observation from one ET clock sample.
+          observed = datetime.now(et) if event == 'schedule' else None
           if not trade_date:
-              trade_date = datetime.now(et).date().isoformat()
+              trade_date = (observed if observed is not None else datetime.now(et)).date().isoformat()
           if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', trade_date):
               raise SystemExit(f'invalid trade_date: {trade_date}')
 
@@ -297,7 +299,10 @@ jobs:
               nominal = datetime.fromisoformat(
                   f"{trade_date}T{int(cron_parts[1]):02d}:{int(cron_parts[0]):02d}:00"
               ).replace(tzinfo=et)
-              observed = datetime.now(et)
+              # The cron expression has no authoritative occurrence date. Before
+              # its inferred same-day Close slot, neither today nor yesterday is safe.
+              if mode in {'close', 'close_retry', 'close_final'} and observed < nominal:
+                  raise SystemExit('SCHEDULED_CLOSE_BEFORE_INFERRED_NOMINAL')
               lag = max(0, int((observed - nominal).total_seconds()))
               schedule_delivery_observation = {
                   'semantics': 'schedule_to_invocation_observed_after_checkout_not_actions_creation',
