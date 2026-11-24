@@ -228,6 +228,14 @@ class DailyUpdater:
         B._need(snap['last_trade_date']<slot['cutoff'] and snap['first_trade_date']==self._sessions(slot)[0])
         return current,snap
 
+    def _validate_claim_context(self,claim):
+        # Scheduled/legacy verification keeps its original claim contract.
+        return None
+
+    def _extra_debit_claims(self,slot,head,previous):
+        # The original scheduled owner keeps its exact native transaction.
+        return {}
+
     def _debit(self,slot,request_id,head,previous):
         now=self._fresh(slot);minute=now.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%MZ')
         B._need(now.second+now.microsecond/1_000_000<38)
@@ -246,6 +254,9 @@ class DailyUpdater:
         new['minutes'][minute]=new['minutes'].get(minute,0)+1
         new['minutes']=dict(sorted(new['minutes'].items())[-16:])
         updates={self._prefix(slot)+'/claim.json':B.encode(claim),path:B.encode(new)}
+        extra=self._extra_debit_claims(slot,head,previous)
+        B._need(type(extra) is dict and not (set(extra)&set(updates)))
+        updates.update(extra)
         newhead=self.store.publish(head,updates,replace={path} if self.store.exists(head,path) else set())
         return newhead,minute,path,B.blob_sha(B.encode(new))
 
@@ -346,6 +357,7 @@ class DailyUpdater:
                 claim['kind']=='daily_basis_attempt' and claim['status']=='CLAIMED_NO_REPLAY' and
                 claim['previous_selector']['basis_id']==old['basis_id'] and
                 claim['request_limit']==claim['credit_limit']==claim['verification_limit']==1)
+        self._validate_claim_context(claim)
         # Claim+budget lives on main. Raw, envelope and unqualified terminal
         # are independently retained on the private attempt ref even if main
         # or the acquisition window moves during the authorized response.
@@ -361,10 +373,14 @@ class DailyUpdater:
         B._need(cursor==head)
         parents=self.store.g.commit(head)[1];B._need(len(parents)==1)
         delta=self.store.g.text('diff-tree','--no-commit-id','--name-only','--no-renames','-r',parents[0],head).splitlines()
-        B._need(set(delta)=={prefix+'/claim.json',budget} and not self.store.exists(parents[0],prefix+'/claim.json'))
         cursor=parents[0]
         expected_previous,_=self._previous(slot,cursor)
         B._need(claim['previous_selector']==expected_previous)
+        extra=self._extra_debit_claims(slot,cursor,expected_previous)
+        required={prefix+'/claim.json',budget}
+        B._need(type(extra) is dict and not (set(extra)&required) and
+                set(delta)==(required|set(extra)) and not self.store.exists(cursor,prefix+'/claim.json'))
+        B._need(all(not self.store.exists(cursor,p) and self.store.read(head,p)==raw for p,raw in extra.items()))
         before=B._parse(self.store.read(cursor,budget)) if self.store.exists(cursor,budget) else dict(schema_version=1,trade_date=day,credits=0,minutes={})
         after=B._parse(self.store.read(head,budget));minute=claim['budget_minute']
         expected_minutes=dict(before['minutes']);expected_minutes[minute]=expected_minutes.get(minute,0)+1
