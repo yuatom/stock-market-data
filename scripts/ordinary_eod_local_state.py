@@ -5,13 +5,14 @@ on an isolated caller-owned checkout; it supplies no production authorization.
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
 import math
 from pathlib import Path
 import re
 from tempfile import TemporaryDirectory
+from time import sleep
 from zoneinfo import ZoneInfo
 
 from scripts.daily_basis_store import LocalGitStore
@@ -27,6 +28,18 @@ MAX_LOCAL_PATHS = 4096
 
 class OrdinaryEodHeld(RuntimeError):
     """Fail closed without retrying or including private response data."""
+
+
+class OrdinaryEodKnownStop(OrdinaryEodHeld):
+    """Deterministic local stop, distinct from an ambiguous CAS/fetch outcome."""
+
+
+class OrdinaryEodOutsideWindow(OrdinaryEodKnownStop):
+    """Current clock no longer fits the approved timing window."""
+
+
+class _MinuteChangedBeforeCas(Exception):
+    """No ref update was attempted; it is safe to recalculate the minute."""
 
 
 class OrdinaryEodPreparedDrift(OrdinaryEodHeld):
@@ -50,7 +63,7 @@ class OrdinaryEodLocalState:
     """
 
     def __init__(self, *, repo: Path, previous_session: str, cutoff: datetime,
-                 scope: tuple[tuple[str, str], ...], clock, offline_fetch):
+                 scope: tuple[tuple[str, str], ...], clock, offline_fetch, wait=sleep):
         day = date.fromisoformat(previous_session)
         need(day.isoformat() == previous_session)
         need(cutoff.tzinfo is not None and cutoff.utcoffset() is not None)
@@ -62,6 +75,7 @@ class OrdinaryEodLocalState:
         self.cutoff = cutoff.astimezone(ET)
         self.scope = scope
         self.clock = clock
+        self._wait = wait
         self._offline_fetch = offline_fetch
         self.head = None
         self.attempted = set()
@@ -79,9 +93,10 @@ class OrdinaryEodLocalState:
         instant = self.clock()
         need(instant.tzinfo is not None and instant.utcoffset() is not None)
         now = instant.astimezone(ET)
-        need(now.date().isoformat() == day == self.cutoff.date().isoformat())
         need(re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", maturity) is not None)
-        need(self.previous < day and now.strftime("%H:%M") >= maturity and now < self.cutoff)
+        if not (now.date().isoformat() == day == self.cutoff.date().isoformat()
+                and self.previous < day and now.strftime("%H:%M") >= maturity and now < self.cutoff):
+            raise OrdinaryEodOutsideWindow("HELD_OUTSIDE_WINDOW")
         return now
 
     def _read_checkout(self) -> dict[str, bytes]:
@@ -116,11 +131,13 @@ class OrdinaryEodLocalState:
         )
 
     def _publish(self, tip: str, updates: dict[str, bytes], *, replace: set[str],
-                 day: str, maturity: str) -> str:
+                 day: str, maturity: str, debit_minute: datetime | None = None) -> str:
         # No rebase. Check cutoff again after potentially slow object creation.
         need(self.store.head() == tip)
         candidate = self.store.commit(tip, updates, replace=replace)
-        self._now(day, maturity)
+        now = self._now(day, maturity).astimezone(timezone.utc)
+        if debit_minute is not None and now.replace(second=0, microsecond=0) != debit_minute:
+            raise _MinuteChangedBeforeCas
         self.store.cas("refs/heads/main", candidate, tip)
         return candidate
 
@@ -153,41 +170,78 @@ class OrdinaryEodLocalState:
         need(self.head is not None and symbol not in self.attempted and symbol in dict(self.scope))
         self._assert_prepared()
         daily, minute, maturity = self.limits
-        now = self._now(self.day, maturity)
-        minute_key = now.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
         budget_path = PREFIX + f"collector-state/{self.day[:7]}/{self.day}-twelve-data-budget.json"
         debit_path = self.claim.rsplit("/", 1)[0] + f"/debit-{symbol}.json"
-        with self.store.lock():
-            tip = self.store.head()
-            need(tip == self.head and not self.store.exists(tip, debit_path))
-            existing = self.store.exists(tip, budget_path)
-            budget = json.loads(self.store.read(tip, budget_path)) if existing else dict(
-                schema_version=1, trade_date=self.day, credits=0, minutes={}
-            )
-            need(set(budget) == {"schema_version","trade_date","credits","minutes"}
-                 and type(budget["schema_version"]) is int and budget["schema_version"] == 1
-                 and budget["trade_date"] == self.day and type(budget["credits"]) is int
-                 and 0 <= budget["credits"] < daily and type(budget["minutes"]) is dict
-                 and all(type(v) is int and 0 <= v <= minute for v in budget["minutes"].values())
-                 and sum(budget["minutes"].values()) <= budget["credits"]
-                 and budget["minutes"].get(minute_key, 0) < minute)
-            for stamp in budget["minutes"]:
-                need(re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}Z", stamp))
-                parsed = datetime.strptime(stamp,"%Y-%m-%dT%H:%MZ").replace(tzinfo=timezone.utc)
-                need(parsed <= now and parsed.astimezone(ET).date().isoformat() == self.day)
-            budget["credits"] += 1
-            budget["minutes"][minute_key] = budget["minutes"].get(minute_key, 0) + 1
-            budget["minutes"] = dict(sorted(budget["minutes"].items())[-16:])
-            debit = encode(dict(symbol=symbol, minute=minute_key, credits=1, state="CONSUMED_NO_REPLAY"))
-            self._now(self.day, maturity)
-            self.head = self._publish(tip, {budget_path: encode(budget), debit_path: debit},
-                                      replace={budget_path} if existing else set(),
-                                      day=self.day, maturity=maturity)
+        # At most one full-minute wait and one minute transition during object
+        # construction. Neither case has attempted a debit CAS. Never retry CAS.
+        waited = retried = False
+        while True:
+            self._assert_prepared()
+            with self.store.lock():
+                tip = self.store.head()
+                need(tip == self.head and not self.store.exists(tip, debit_path))
+                existing = self.store.exists(tip, budget_path)
+                budget = json.loads(self.store.read(tip, budget_path)) if existing else dict(
+                    schema_version=1, trade_date=self.day, credits=0, minutes={}
+                )
+                now = self._now(self.day, maturity).astimezone(timezone.utc)
+                minute_start = now.replace(second=0, microsecond=0)
+                minute_key = minute_start.strftime("%Y-%m-%dT%H:%MZ")
+                need(set(budget) == {"schema_version", "trade_date", "credits", "minutes"}
+                     and type(budget["schema_version"]) is int and budget["schema_version"] == 1
+                     and budget["trade_date"] == self.day and type(budget["credits"]) is int
+                     and 0 <= budget["credits"] and type(budget["minutes"]) is dict
+                     and all(type(v) is int and 0 <= v <= minute for v in budget["minutes"].values())
+                     and sum(budget["minutes"].values()) <= budget["credits"])
+                for stamp in budget["minutes"]:
+                    need(re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}Z", stamp))
+                    parsed = datetime.strptime(stamp, "%Y-%m-%dT%H:%MZ").replace(tzinfo=timezone.utc)
+                    need(parsed <= now and parsed.astimezone(ET).date().isoformat() == self.day)
+                if budget["credits"] >= daily:
+                    raise OrdinaryEodKnownStop("HELD_DAILY_BUDGET")
+                if budget["minutes"].get(minute_key, 0) == minute:
+                    next_minute = minute_start + timedelta(minutes=1)
+                    if waited or next_minute >= self.cutoff:
+                        raise OrdinaryEodKnownStop("HELD_MINUTE_BUDGET_BEFORE_CUTOFF")
+                else:
+                    budget["credits"] += 1
+                    budget["minutes"][minute_key] = budget["minutes"].get(minute_key, 0) + 1
+                    budget["minutes"] = dict(sorted(budget["minutes"].items())[-16:])
+                    debit = encode(dict(symbol=symbol, minute=minute_key, credits=1, state="CONSUMED_NO_REPLAY"))
+                    try:
+                        self.head = self._publish(tip, {budget_path: encode(budget), debit_path: debit},
+                            replace={budget_path} if existing else set(), day=self.day,
+                            maturity=maturity, debit_minute=minute_start)
+                    except _MinuteChangedBeforeCas:
+                        if retried:
+                            raise OrdinaryEodKnownStop("HELD_RESERVATION_MINUTE_ROLLED") from None
+                        retried = True
+                        continue
+                    break
+            # Do not sleep with the native Store lock held. Re-read time and
+            # owned tip after the wait; a drifted tip is not a budget denial.
+            now = self._now(self.day, maturity).astimezone(timezone.utc)
+            if now < next_minute:
+                remaining = (next_minute - now).total_seconds()
+                if remaining > 60:
+                    raise OrdinaryEodKnownStop("HELD_CLOCK_DISCONTINUITY")
+                self._wait(remaining)
+                if self._now(self.day, maturity).astimezone(timezone.utc) < next_minute:
+                    raise OrdinaryEodKnownStop("HELD_CLOCK_DID_NOT_ADVANCE")
+            waited = True
         self.attempted.add(symbol)
-        self._now(self.day, maturity)
-        # No provider key, endpoint or live callable is resolved by the collector.
         self._assert_prepared()
-        fetched = self._offline_fetch(symbol, outputsize=outputsize)
+        # If CAS/verification consumed the minute, this debit remains consumed;
+        # issuing in the new minute would bypass its own allowance.
+        now = self._now(self.day, maturity).astimezone(timezone.utc)
+        if now.replace(second=0, microsecond=0) != minute_start:
+            raise OrdinaryEodKnownStop("HELD_CONFIRMED_DEBIT_WITHOUT_REQUEST")
+        try:
+            fetched = self._offline_fetch(symbol, outputsize=outputsize)
+        except Exception:
+            # A request could have started. Never translate a fetch exception
+            # (even one with our own type or message) into a known local stop.
+            raise OrdinaryEodHeld("HELD_PROVIDER_OUTCOME_UNKNOWN") from None
         self._assert_prepared()
         return fetched
 

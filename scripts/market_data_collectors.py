@@ -495,8 +495,15 @@ def collect_previous_session_eod(
                 "bootstrapped_series": 0, "failures": []}
 
     if claim_policy != "legacy":
-        from scripts.ordinary_eod_local_state import OrdinaryEodLocalState, OrdinaryEodPreparedDrift
-        if claim_policy != "claimed_v1" or type(ordinary_eod_state) is not OrdinaryEodLocalState:
+        from scripts.ordinary_eod_local_state import OrdinaryEodKnownStop, OrdinaryEodLocalState, OrdinaryEodPreparedDrift
+        if claim_policy != "claimed_v1":
+            return held("held_ordinary_eod_unregistered")
+        if type(ordinary_eod_state) is not OrdinaryEodLocalState:
+            from scripts.ordinary_eod_authority import OrdinaryEodUnregistered, require_hosted_binding
+            try:
+                require_hosted_binding()
+            except OrdinaryEodUnregistered:
+                return held("held_ordinary_eod_unregistered")
             return held("held_ordinary_eod_unregistered")
         state = ordinary_eod_state
     elif ordinary_eod_state is not None:
@@ -541,6 +548,10 @@ def collect_previous_session_eod(
             return held("held_ordinary_eod_consumed_no_replay")
 
     def known_drift(exc: Exception) -> dict[str, Any]:
+        if state is not None and isinstance(exc, OrdinaryEodKnownStop):
+            # Only a deterministic local stop reaches this branch. Claim and
+            # any confirmed debits remain consumed; no partial series publish.
+            return held("held_ordinary_eod_pacing_no_replay")
         if state is None or not isinstance(exc,OrdinaryEodPreparedDrift):
             return held("held_ordinary_eod_state_unknown")
         try:

@@ -179,6 +179,10 @@ def _settlement_gate_result(argv: list[str], *, now_et: datetime | None = None) 
         return None
     config_path = Path(str(_arg_value(argv, "--config", "config/market-data-store.yaml")))
     config = base.load_yaml(config_path)
+    if config["collector"].get("ordinary_eod_admission", "legacy") != "legacy":
+        # This CLI belongs to the legacy workflow, including its early,
+        # no-collection success paths. An owned route never uses this entry.
+        return {"mode": "previous_session_eod", "status": "held_ordinary_eod_unregistered"}
     now = (now_et or datetime.now(ET)).astimezone(ET)
     trade_date = str(_arg_value(argv, "--trade-date") or now.date().isoformat())
     mature, reason = daily_series_settlement_mature(
@@ -358,7 +362,7 @@ def cli(argv: list[str] | None = None) -> int:
     gate = _settlement_gate_result(args)
     if gate is not None:
         print(json.dumps(gate, ensure_ascii=False, sort_keys=True))
-        return 0
+        return 2 if gate["status"] == "held_ordinary_eod_unregistered" else 0
     _wait_until_regular_stage_cutoff(args)
     _ensure_predecessors(args)
     close_result = _run_live_close(args)

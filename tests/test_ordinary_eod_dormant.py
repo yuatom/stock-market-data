@@ -125,6 +125,138 @@ class OrdinaryEodDormantTest(unittest.TestCase):
             self.assertEqual(market_data_store.read_daily_series(out,provider="twelve_data_basic",symbol=SYMBOL)[-1]["trade_date"],SESSION)
             self.assertEqual(second["status"],"held_ordinary_eod_consumed_no_replay")
 
+    def test_ordinary_scope_paces_across_partly_used_minute_on_native_git(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            out, _ = initialize(repo)
+            s = LocalGitStore(repo)
+            symbols = [f"TEST{i:02d}" for i in range(33)]
+            scope = tuple((symbol, "stocks") for symbol in symbols)
+            instant = START.replace(second=45)
+            minute_key = lambda: instant.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
+            first = minute_key()
+            budget = json.dumps(dict(schema_version=1, trade_date=DAY, credits=5, minutes={first:5})).encode()
+            target = repo / BUDGET
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(budget)
+            with s.lock():
+                s.publish(s.head(), {BUDGET: budget}, replace=set())
+            sleeps, fetched = [], []
+            def sleep(seconds):
+                nonlocal instant
+                sleeps.append(seconds)
+                instant += dt.timedelta(seconds=seconds)
+            def fetch(symbol, **kw):
+                tip = s.head()
+                debit = state.claim.rsplit("/", 1)[0] + f"/debit-{symbol}.json"
+                self.assertEqual(json.loads(s.read(tip, debit))["minute"], minute_key())
+                used = json.loads(s.read(tip, BUDGET))
+                self.assertLessEqual(used["minutes"][minute_key()], 8)
+                self.assertEqual(used["credits"], 6 + len(fetched))
+                fetched.append(symbol)
+                return rows()
+            state = OrdinaryEodLocalState(repo=repo, previous_session=SESSION, cutoff=STOP,
+                scope=scope, clock=lambda: instant, offline_fetch=fetch, wait=sleep)
+            item = collector.collect_previous_session_eod(trade_date=DAY, store_root=out,
+                watchlist=watch(*symbols), completeness={}, config=config(),
+                access=collector.load_yaml(ROOT/"config/market-data-collector-access.yaml"),
+                ordinary_eod_state=state)
+            self.assertEqual(item["status"], "ok")
+            self.assertEqual(sleeps,[15.0, 60.0, 60.0, 60.0])
+            self.assertEqual(fetched, symbols)
+            tip = s.head()
+            self.assertEqual(list(json.loads(s.read(tip,BUDGET))["minutes"].values()), [8,8,8,8,6])
+            terminal=json.loads(s.read(tip,state.terminal))
+            self.assertEqual(terminal["state"],"COMPLETE")
+            self.assertEqual(set(terminal["targets"]),set(symbols))
+            self.assertEqual(s.g.commit(tip)[1],(terminal["parent"],))
+
+    def test_real_hosted_collection_entry_stops_old_legacy_writer_even_on_claimed_policy(self):
+        # This is the actual hosted entry. The producer's test-facing main is not used.
+        import contextlib
+        import runpy
+        import sys
+        with tempfile.TemporaryDirectory() as tmp, patch.object(sys,"path",[str(ROOT/"scripts"),*sys.path]):
+            d = Path(tmp)
+            (d/"config.json").write_text(json.dumps(config()))
+            out = d/"out"
+            module=runpy.run_path(str(ROOT/"scripts/collect_market_data.py"))
+            argv=["--mode","previous_session_eod","--trade-date",DAY,"--store-root",str(out),
+                "--config",str(d/"config.json"),"--universe",str(ROOT/"config/collection-universe.json"),
+                "--access-config",str(ROOT/"config/market-data-collector-access.yaml")]
+            # Run before a synthetic future cutoff; the underlying held status needs
+            # to propagate even if the old YAML still chooses this mutable source.
+            for entry in (module["cli"], module["runtime"].main):
+                with contextlib.redirect_stdout(io.StringIO()) as log:
+                    rc = entry(argv)
+                self.assertEqual(json.loads(log.getvalue())["status"],"held_ordinary_eod_unregistered")
+                self.assertFalse(out.exists())
+                self.assertEqual(rc,2)
+
+    def test_legacy_yaml_writer_requires_explicit_compatible_collector_result(self):
+        import contextlib
+        import sys
+        import yaml
+        workflow = yaml.safe_load((ROOT/".github/workflows/market-data-collector-runtime.yml").read_text())
+        steps = workflow["jobs"]["collect"]["steps"]
+        collected = next(step for step in steps if step.get("id") == "collected")
+        gate = collected["run"].split("python - /tmp/collector-output.txt <<'PY'\n", 1)[1].split("\nPY", 1)[0]
+        downstream = ["Rebuild private Store inventory", "Build Store publication manifest",
+                      "Persist private Store only", "Verify durable Store publication"]
+        gates = {step["name"]: step["if"] for step in steps if step["name"] in downstream}
+        self.assertEqual(set(gates), set(downstream))
+        self.assertTrue(all("steps.collected.outputs.legacy_writer_allowed == 'true'" in value
+                            for value in gates.values()))
+        for status, owner, claimed, approved in (
+                ("ok", {}, False, True), ("settlement_not_mature", {}, False, True),
+                ("held_ordinary_eod_unregistered", {}, False, False),
+                ("ok", {"ordinary_eod_local_store_commit": "f"*40}, False, False),
+                ("ok", {}, True, False), ("unsupported", {}, False, False)):
+            with self.subTest(status=status, owner=bool(owner), claimed=claimed), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp)
+                (path/"config").mkdir()
+                (path/"config/market-data-store.yaml").write_text(json.dumps(config(claimed=claimed)))
+                summary = path/"result"
+                output = path/"github-output"
+                summary.write_text(json.dumps({"mode": "previous_session_eod", "status": status, **owner}))
+                with patch.dict(os.environ, {"MODE": "previous_session_eod", "GITHUB_OUTPUT": str(output)}), \
+                        patch.object(sys, "argv", ["-", str(summary)]), contextlib.chdir(path), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    if approved:
+                        exec(compile(gate, "<workflow legacy writer gate>", "exec"), {})
+                    else:
+                        with self.assertRaisesRegex(SystemExit, "ORDINARY_EOD_LEGACY_PUBLICATION_NOT_AUTHORIZED"):
+                            exec(compile(gate, "<workflow legacy writer gate>", "exec"), {})
+                self.assertEqual(output.read_text() if output.exists() else None,
+                                 "legacy_writer_allowed=true\n" if approved else None)
+
+    def test_rollover_during_cas_no_effect_and_no_replay(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)/"repo"
+            out, _ = initialize(repo)
+            crossed = []
+            instant = START.replace(second=59)
+            def never(*args, **kwargs):
+                crossed.append(True)
+                raise AssertionError("no request allowed after debit minute")
+            state = adapter(repo, never, clock=lambda:instant)
+            native_cas = state.store.cas
+            def rolls_after_debit(ref, new, expected):
+                nonlocal instant
+                native_cas(ref, new, expected)
+                if state.store.exists(new, BUDGET):
+                    instant += dt.timedelta(seconds=1)
+            with patch.object(state.store, "cas", side_effect=rolls_after_debit):
+                result = collect(out, state=state)
+            self.assertEqual(result["status"], "held_ordinary_eod_pacing_no_replay")
+            self.assertEqual(crossed, [])
+            tip = state.store.head()
+            self.assertEqual(json.loads(state.store.read(tip, BUDGET))["credits"], 1)
+            self.assertFalse(state.store.exists(tip, state.terminal))
+            self.assertEqual(collect(out, state=adapter(repo, never, clock=lambda:instant))["status"],
+                             "held_ordinary_eod_consumed_no_replay")
+            self.assertEqual(crossed, [])
+
     def test_old_default_uses_existing_path_and_caps(self):
         with tempfile.TemporaryDirectory() as t, patch.dict(os.environ,{"TWELVE_DATA_API_KEY":"fixture-only"}), \
                 patch.object(collector,"fetch_twelve_daily",return_value=rows()) as offline:
@@ -194,9 +326,11 @@ class OrdinaryEodDormantTest(unittest.TestCase):
                 def no(*a,**kw):
                     crossed.append(True)
                     raise AssertionError("cap reached provider boundary")
-                state=adapter(repo,no)
+                state=OrdinaryEodLocalState(repo=repo, previous_session=SESSION,
+                    cutoff=START.replace(second=59), scope=((SYMBOL, "stocks"),), clock=lambda:START,
+                    offline_fetch=no, wait=no)
                 result=collect(out,state=state)
-                self.assertEqual(result["status"],"held_ordinary_eod_state_unknown")
+                self.assertEqual(result["status"],"held_ordinary_eod_pacing_no_replay")
                 self.assertEqual(crossed,[])
                 self.assertEqual(s.read(s.head(),BUDGET),budget)
                 self.assertFalse(s.exists(s.head(),state.terminal))

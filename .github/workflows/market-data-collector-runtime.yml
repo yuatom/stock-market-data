@@ -472,6 +472,7 @@ jobs:
           PYTHON
 
       - name: Collect qualified facts into private Store checkout
+        id: collected
         if: steps.invocation.outputs.mode != 'smoke_readonly'
         working-directory: compute
         shell: bash
@@ -546,10 +547,12 @@ jobs:
               --access-config config/market-data-collector-access.yaml \
               "${extra[@]}" > /tmp/collector-output.txt 2>/tmp/collector-error.txt || collector_failed "$?"
           fi
-          python - <<'PY'
+          python - /tmp/collector-output.txt <<'PY'
           import json
+          import os
+          import sys
           from pathlib import Path
-          lines = Path('/tmp/collector-output.txt').read_text(errors='replace').splitlines()
+          lines = Path(sys.argv[1]).read_text(errors='replace').splitlines()
           result = None
           for line in reversed(lines):
               try:
@@ -561,6 +564,16 @@ jobs:
                   break
           if result is None:
               result = {'status': 'completed_without_parseable_summary'}
+          if os.environ['MODE'] == 'previous_session_eod':
+              import yaml
+              conf = yaml.safe_load(Path('config/market-data-store.yaml').read_text())
+              if (conf['collector'].get('ordinary_eod_admission', 'legacy') != 'legacy'
+                      or result.get('mode') != 'previous_session_eod'
+                      or result.get('status') not in {'ok', 'partial', 'secret_missing', 'settlement_not_mature'}
+                      or 'ordinary_eod_local_store_commit' in result):
+                  raise SystemExit('ORDINARY_EOD_LEGACY_PUBLICATION_NOT_AUTHORIZED')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              print('legacy_writer_allowed=true', file=output)
           allowed = {
               'mode','status','changed','changed_series','bootstrapped_series','symbols_requested',
               'symbols_requested_in_increment','symbols_available_in_increment','symbols_missing_in_increment',
@@ -613,7 +626,7 @@ jobs:
           PY
 
       - name: Rebuild private Store inventory
-        if: steps.invocation.outputs.mode != 'smoke_readonly'
+        if: steps.invocation.outputs.mode != 'smoke_readonly' && steps.collected.outputs.legacy_writer_allowed == 'true'
         working-directory: compute
         run: >-
           python scripts/build_market_data_inventory.py
@@ -623,7 +636,7 @@ jobs:
 
       - name: Build Store publication manifest
         id: publication
-        if: steps.invocation.outputs.mode != 'smoke_readonly'
+        if: steps.invocation.outputs.mode != 'smoke_readonly' && steps.collected.outputs.legacy_writer_allowed == 'true'
         working-directory: compute
         shell: bash
         run: |
@@ -637,7 +650,7 @@ jobs:
           echo "publication_manifest_path=$manifest_path" >> "$GITHUB_OUTPUT"
 
       - name: Persist private Store only
-        if: steps.invocation.outputs.mode != 'smoke_readonly'
+        if: steps.invocation.outputs.mode != 'smoke_readonly' && steps.collected.outputs.legacy_writer_allowed == 'true'
         working-directory: store
         shell: bash
         env:
@@ -691,7 +704,7 @@ jobs:
           PRIVATE_SCRIPT
 
       - name: Verify durable Store publication
-        if: steps.invocation.outputs.mode != 'smoke_readonly'
+        if: steps.invocation.outputs.mode != 'smoke_readonly' && steps.collected.outputs.legacy_writer_allowed == 'true'
         working-directory: store
         shell: bash
         env:
