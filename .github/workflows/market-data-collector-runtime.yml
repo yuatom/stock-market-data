@@ -691,16 +691,37 @@ jobs:
           PRIVATE_SCRIPT
 
       - name: Verify durable Store publication
+        id: verify_durable_store
         if: steps.invocation.outputs.mode != 'smoke_readonly'
         working-directory: store
         shell: bash
         env:
           MARKET_DATA_STORE_TOKEN: ${{ secrets.MARKET_DATA_STORE_TOKEN }}
+          # Explicitly disabled until the matching verifier and readers are deployed.
+          PRE_CAPTURE_AVAILABILITY_ENABLED: 'false'
+          PRE_CAPTURE_AVAILABILITY_MODE: ${{ steps.invocation.outputs.mode }}
         run: |
-          python -B ../compute/scripts/quiet_private_store.py run --repo . <<'PRIVATE_SCRIPT'
+          manifest_path='${{ steps.publication.outputs.publication_manifest_path }}'
+          if [[ "${PRE_CAPTURE_AVAILABILITY_ENABLED:-}" == true &&
+                "${PRE_CAPTURE_AVAILABILITY_MODE:-}" == premarket &&
+                "${GITHUB_REPOSITORY:-}" == yuatom/stock-market-data &&
+                "${GITHUB_EVENT_NAME:-}" == push &&
+                "${GITHUB_REF:-}" == refs/heads/collector-requests &&
+                -n "$manifest_path" ]]; then
+            if proof_status="$(python -B ../compute/scripts/quiet_private_store.py verify-capture-availability --repo . --manifest="$manifest_path")"; then
+              if [[ "$proof_status" == CAPTURE_AVAILABILITY_ARTIFACT_READY ]]; then
+                printf 'capture_availability_artifact_ready=true\n' >> "$GITHUB_OUTPUT"
+              fi
+              printf 'PRIVATE_STORE_OPERATION_COMPLETE\n'
+              exit 0
+            fi
+            printf 'PRIVATE_STORE_OPERATION_STOPPED\n'
+            exit 2
+          fi
+          PRIVATE_PUBLICATION_MANIFEST_PATH="$manifest_path" python -B ../compute/scripts/quiet_private_store.py run --repo . <<'PRIVATE_SCRIPT'
           set -euo pipefail
           args=()
-          manifest_path='${{ steps.publication.outputs.publication_manifest_path }}'
+          manifest_path="${PRIVATE_PUBLICATION_MANIFEST_PATH:-}"
           if [[ -n "$manifest_path" ]]; then
             args+=(--required-manifest "data/market-data/$manifest_path")
           fi
@@ -710,3 +731,13 @@ jobs:
             --writer-status store_persisted \
             "${args[@]}"
           PRIVATE_SCRIPT
+
+      - name: Upload capture availability commitment
+        if: ${{ success() && steps.verify_durable_store.outputs.capture_availability_artifact_ready == 'true' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          path: ${{ runner.temp }}/capture-availability-v2-${{ github.run_id }}-${{ github.run_attempt }}-collect.txt
+          archive: false
+          overwrite: false
+          if-no-files-found: error
+          retention-days: 3
