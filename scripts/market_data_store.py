@@ -413,6 +413,69 @@ def write_capture(
     return str(rel), git_blob_sha_bytes(canonical_bytes(doc) + b"\n")
 
 
+def _premarket_scope(document: Mapping[str, Any]) -> tuple[set[str], set[str]] | None:
+    """Identify a unique same-provider capture universe without trusting counts alone."""
+    refs = document.get("data_refs")
+    missing = document.get("missing")
+    coverage = document.get("coverage")
+    if (not isinstance(refs, list) or not refs or not isinstance(missing, list)
+            or not isinstance(coverage, dict)):
+        return None
+    symbols: set[str] = set()
+    for ref in refs:
+        if (not isinstance(ref, dict) or ref.get("kind") != "premarket_trade_capture"
+                or ref.get("provider") != "nasdaq_public_extended"
+                or ref.get("window") != "04:00-09:30"):
+            return None
+        sym = ref.get("symbol")
+        if not isinstance(sym, str) or not re.fullmatch(r"[A-Z0-9.-]{1,20}", sym) or sym in symbols:
+            return None
+        symbols.add(sym)
+    if any(not isinstance(sym, str) or not re.fullmatch(r"[A-Z0-9.-]{1,20}", sym) for sym in missing):
+        return None
+    omitted = set(missing)
+    if (len(omitted) != len(missing) or symbols & omitted
+            or coverage.get("inherited_ref_count") != 0
+            or coverage.get("symbols_requested_in_increment") != len(symbols | omitted)
+            or coverage.get("symbols_available_in_increment") != len(symbols)
+            or coverage.get("symbols_missing_in_increment") != len(omitted)
+            or coverage.get("total_ref_count") != len(symbols)):
+        return None
+    return symbols, omitted
+
+
+def _premarket_downgrade(root: Path, directory: Path, latest: Mapping[str, Any],
+                         current: Mapping[str, Any]) -> bool:
+    window = {"start": "04:00", "end": "09:30"}
+    if current.get("stage") != "premarket" or current.get("target_window") != window or not current.get("missing"):
+        return False
+    sid = latest.get("snapshot_id")
+    if not isinstance(sid, str) or not re.fullmatch(r"premarket-[0-9]{6}-et", sid):
+        return False
+    relative = directory / f"{sid}.json"
+    if latest.get("snapshot_path") != str(relative):
+        return False
+    try:
+        old_path = root / relative
+        raw = old_path.read_bytes()
+        if git_blob_sha_bytes(raw) != latest.get("snapshot_blob_sha"):
+            return False
+        old = json.loads(raw)
+    except (FileNotFoundError, ValueError):
+        return False
+    if (not isinstance(old, dict) or old.get("schema_version") != SCHEMA_VERSION
+            or old.get("snapshot_id") != sid or old.get("stage") != "premarket"
+            or old.get("trade_date") != current.get("trade_date")
+            or old.get("target_window") != window or old.get("generated_at") != latest.get("generated_at")):
+        return False
+    old_scope, new_scope = _premarket_scope(old), _premarket_scope(current)
+    if old_scope is None or new_scope is None:
+        return False
+    covered, old_missing = old_scope
+    now, missing = new_scope
+    return not old_missing and now < covered and now | missing == covered
+
+
 def write_snapshot(
     root: str | Path,
     *,
@@ -460,6 +523,8 @@ def write_snapshot(
         if current_dt == latest_dt and latest.get("snapshot_id") != snapshot_id:
             raise MarketDataConflict("two snapshots share generated_at but differ in id")
         if current_dt == latest_dt and latest.get("snapshot_id") == snapshot_id:
+            return str(rel), False
+        if _premarket_downgrade(Path(root), rel_dir, latest, doc):
             return str(rel), False
     snapshot_blob = git_blob_sha_bytes(canonical_bytes(doc) + b"\n")
     latest_doc = {
