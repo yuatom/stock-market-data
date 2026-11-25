@@ -315,6 +315,101 @@ def append_daily_bars(
     return WriteResult(True, tuple(changed_paths), len(all_records))
 
 
+def repair_active_daily_gaps(root: Path, *, provider: str, symbol: str, asset_class: str,
+                             identity_effective_from: str | None, execution_date: str,
+                             repairs: list[tuple[dict | None, dict]], verified_gap_sessions: frozenset[str],
+                             evidence_path: str,
+                             evidence_sha256: str) -> WriteResult:
+    """Persist an ordinary gap repair; sealed shard files and old values survive."""
+    sdir = _series_dir(root, provider, symbol)
+    index_path = sdir / "_index.json"
+    before = index_path.read_bytes()
+    index = _load_json(index_path)
+    expect = dict(series_id=f"{provider}:{symbol}:regular:1d", provider=provider, symbol=symbol,
+                  asset_class=asset_class, interval="1d",
+                  session="regular", series_semantics="daily_regular_ohlcv",
+                  adjustment_semantics="provider_reported", identity_effective_from=identity_effective_from)
+    if any(index.get(k) != v for k, v in expect.items()):
+        raise MarketDataConflict("gap repair series identity mismatch")
+    records = _read_all_records(sdir, index)
+    meta = index["shards"][-1]
+    start = meta["start"]
+    if meta["sealed"] is not False or start != len(records) - meta["count"]:
+        raise MarketDataConflict("gap repair requires the active shard")
+    source = root / evidence_path
+    if (not re.fullmatch(r"[0-9a-f]{64}", evidence_sha256) or evidence_path !=
+            f"collector-state/{execution_date[:7]}/price-only-{evidence_sha256}.json"
+            or not source.resolve().is_relative_to(root.resolve()) or source.is_symlink()):
+        raise MarketDataConflict("gap repair response path invalid")
+    payload = source.read_bytes()
+    if hashlib.sha256(payload).hexdigest() != evidence_sha256:
+        raise MarketDataConflict("gap repair response evidence changed")
+    proof = json.loads(payload)
+    if (proof.get("kind"), proof.get("symbol"), proof.get("execution_day")) != (
+            "normalized_daily_price_only_evidence", symbol, execution_date):
+        raise MarketDataConflict("gap repair response identity mismatch")
+    inputs = {r["trade_date"]: r for r in proof["records"]}
+    if len(inputs) != len(proof["records"]):
+        raise MarketDataConflict("gap repair response has duplicate dates")
+    by_day = {r["trade_date"]: r for r in records[start:]}
+    first, last = min(by_day), max(by_day)
+    changes = []
+    inserts = []
+    prices = {"open", "high", "low", "close"}
+    for old, new in repairs:
+        day = new["trade_date"]
+        fields = {k for k in new if old is None or old.get(k) != new[k]} - {"trade_date"}
+        if (not fields or not fields <= prices or by_day.get(day) != old
+                or not first <= day <= last or _date(day) >= _date(execution_date)
+                or (old is None and (day not in verified_gap_sessions or not first < day < last))
+                or (identity_effective_from and day < identity_effective_from)
+                or any(new[k] != inputs.get(day, {}).get(k) for k in fields)
+                or (old is not None and (any(old.get(k) is not None for k in fields)
+                    or set(old) - set(new)))):
+            raise MarketDataConflict("gap repair would change a qualified or unproven value")
+        by_day[day] = new
+        changes.append(dict(trade_date=day, fields=sorted(fields), before=old, after=new))
+        if old is None:
+            inserts.append(day)
+    updated = [by_day[day] for day in sorted(by_day)]
+    doc = _shard_document(index["series_id"], start, updated)
+    if (len(updated) > index["shard_record_limit"]
+            or len(canonical_bytes(doc)) > index["shard_byte_limit"]):
+        raise MarketDataConflict("repaired active shard exceeds configured limits")
+    evidence = dict(schema_version=1, kind="ordinary_missing_price_repair", symbol=symbol,
+                    series_id=index["series_id"], source_path=evidence_path,
+                    source_sha256=evidence_sha256, prior_index_blob=git_blob_sha_bytes(before),
+                    prior_shard_blob=meta["blob_sha"], prior_shard_path=meta["path"], rows=changes)
+    encoded = canonical_bytes(evidence)
+    digest = hashlib.sha256(encoded).hexdigest()
+    relative = Path("collector-state") / execution_date[:7] / ("ordinary-gap-" + digest + ".json")
+    audit = root / relative
+    for seg in index["lineage_segments"]:
+        if (not isinstance(seg, dict) or type(seg.get("start")) is not int or type(seg.get("end")) is not int
+                or not 0 <= seg["start"] <= seg["end"] < len(records)):
+            raise MarketDataConflict("gap repair prior lineage is invalid")
+        for key in ("start", "end"):
+            day = records[seg[key]]["trade_date"]
+            seg[key] += sum(insert < day for insert in inserts)
+    sorted_days = sorted(by_day)
+    for row in changes:
+        pos = start + sorted_days.index(row["trade_date"])
+        index["lineage_segments"].append(dict(ingest_kind="ordinary_missing_price_repair",
+            start=pos, end=pos, normalization_audit_path=relative.as_posix(),
+            normalization_audit_sha256=digest, volume_written=False))
+    index["record_count"] += len(inserts)
+    shard = sdir / meta["path"]
+    index["shards"][-1] = _shard_meta(meta["path"], start, doc, False)
+    if index_path.read_bytes() != before:
+        raise MarketDataConflict("gap repair index moved before write")
+    audit.parent.mkdir(parents=True, exist_ok=True)
+    with audit.open("xb") as handle:
+        handle.write(encoded)
+    _write_json(shard, doc)
+    _write_json(index_path, index)
+    return WriteResult(True, tuple(map(str, (audit, shard, index_path))), index["record_count"])
+
+
 def quarantine_daily_volume(root: str | Path, *, provider: str, symbol: str,
                             evidence_path: str, evidence_sha256: str,
                             observed_trade_date: str) -> bool:

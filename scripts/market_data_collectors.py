@@ -28,6 +28,7 @@ try:
         MarketDataConflict,
         canonical_bytes,
         append_daily_bars,
+        repair_active_daily_gaps,
         quarantine_daily_volume,
         assert_legacy_basis,
         git_blob_sha_bytes,
@@ -41,6 +42,7 @@ except ImportError:  # pragma: no cover
         MarketDataConflict,
         canonical_bytes,
         append_daily_bars,
+        repair_active_daily_gaps,
         quarantine_daily_volume,
         assert_legacy_basis,
         git_blob_sha_bytes,
@@ -55,6 +57,12 @@ try:
 except ModuleNotFoundError as exc:
     if exc.name != 'scripts': raise
     from eleven_symbol_append import classify_daily_overlap
+
+try:
+    from scripts.normal_daily_missing_repair import OHLC, fill_missing_regular_daily_fields
+except ModuleNotFoundError as exc:
+    if exc.name != 'scripts': raise
+    from normal_daily_missing_repair import OHLC, fill_missing_regular_daily_fields
 
 ET = ZoneInfo("America/New_York")
 TWELVE_PROVIDER = "twelve_data_basic"
@@ -475,12 +483,16 @@ def collect_previous_session_eod(
     completeness: Mapping[str, Any],
     config: Mapping[str, Any],
     access: Mapping[str, Any],
+    verified_gap_sessions: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     # New behavior requires an explicitly deployed policy; absent preserves legacy.
     revision_policy=config['collector']['twelve_data_daily'].get('overlap_revision_policy')
     if revision_policy not in (None,'price_only_volume_blocked_v1'):
         raise ValueError('unsupported daily revision policy')
     price_only=revision_policy=='price_only_volume_blocked_v1'
+    gap_policy=config['collector']['twelve_data_daily'].get('ordinary_missing_repair_policy')
+    if gap_policy not in (None, 'active_shard_gap_fill_v1') or (gap_policy and not price_only):
+        raise ValueError('unsupported ordinary missing repair policy')
     key = os.environ.get("TWELVE_DATA_API_KEY")
     if not key:
         return {
@@ -562,6 +574,7 @@ def collect_previous_session_eod(
             overlap_classifications=[]
             index_path = _series_index_path(store_root, TWELVE_PROVIDER, symbol)
             existing: list[dict[str, Any]] = []
+            repairs: list[tuple[dict | None, dict]] = []
             if index_path.exists():
                 phase = "stored_series_read"
                 existing = read_daily_series(store_root, provider=TWELVE_PROVIDER, symbol=symbol)
@@ -577,6 +590,11 @@ def collect_previous_session_eod(
                 existing_by_date = {row["trade_date"]: row for row in existing}
                 phase = "historical_overlap_comparison"
                 has_conflict = False
+                active_dates = set()
+                if gap_policy:
+                    shards = json.loads(index_path.read_bytes())['shards']
+                    if shards and shards[-1]['sealed'] is False:
+                        active_dates = {r['trade_date'] for r in existing[shards[-1]['start']:]}
                 for row in eligible:
                     old = existing_by_date.get(row["trade_date"])
                     if old is not None:
@@ -589,6 +607,14 @@ def collect_previous_session_eod(
                             representation_only_count += 1
                     rejected=(old is not None and
                               (not classification['price_eligible'] if price_only else canonical_bytes(old)!=canonical_bytes(row)))
+                    if gap_policy and old is not None and row['trade_date'] in active_dates and any(old.get(k) is None for k in OHLC):
+                        filled, detail = fill_missing_regular_daily_fields(old, row)
+                        if detail['filled']:
+                            repairs.append((old, filled))
+                            rejected = False
+                    if (old is None and active_dates and row['trade_date'] in verified_gap_sessions
+                            and min(active_dates) < row['trade_date'] < max(active_dates)):
+                        repairs.append((None, {k: row[k] for k in ('trade_date', *OHLC)}))
                     if rejected:
                         has_conflict = True
                         conflict_record_count += 1
@@ -623,6 +649,16 @@ def collect_previous_session_eod(
 
             last_date = existing[-1]["trade_date"] if existing else None
             new_rows = [row for row in eligible if last_date is None or row["trade_date"] > last_date]
+            if repairs:
+                phase = "active_daily_gap_fill"
+                result = repair_active_daily_gaps(
+                    store_root, provider=TWELVE_PROVIDER, symbol=symbol, asset_class=asset_class,
+                    identity_effective_from=effective, execution_date=trade_date,
+                    repairs=repairs, verified_gap_sessions=verified_gap_sessions,
+                    evidence_path=evidence_path, evidence_sha256=evidence_digest,
+                )
+                if result.changed:
+                    changed_series += 1
             if not new_rows:
                 continue
 
@@ -646,7 +682,7 @@ def collect_previous_session_eod(
                 lineage=lineage,
             )
             if result.changed:
-                changed_series += 1
+                changed_series += int(not repairs)
                 if not existing:
                     bootstrapped_series += 1
         except BudgetExceeded:
