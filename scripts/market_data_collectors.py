@@ -418,7 +418,7 @@ def _conflict_record(
 
 def _write_private_eod_diagnostic(
     *, store_root: Path, trade_date: str, result: dict[str, Any], diagnostics: list[dict[str, Any]],
-    conflict_count: int,
+    conflict_count: int, price_packet_candidates: Mapping[str, str] | None = None,
 ) -> None:
     request_id = os.environ.get("MARKET_DATA_REQUEST_ID", "")
     invocation_id = "-".join(filter(None, (
@@ -449,6 +449,8 @@ def _write_private_eod_diagnostic(
         "conflict_diagnostics_truncated": conflict_count > len(diagnostics),
         "conflicts": diagnostics,
     }
+    if price_packet_candidates:
+        payload["retained_price_packet_candidates"] = dict(price_packet_candidates)
     destination = store_root / relative
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
@@ -504,6 +506,7 @@ def collect_previous_session_eod(
     volume_blocked_symbols: list[str] = []
     volume_quarantined_series = 0
     representation_only_count = 0
+    price_packet_candidates: dict[str, str] = {}
     universe = _daily_universe(watchlist, completeness)
     daily_basis_owner = _load_daily_basis_owner(store_root, trade_date)
     delegated_daily_symbols = []
@@ -559,6 +562,9 @@ def collect_previous_session_eod(
                 phase='price_only_quality_validation'
                 if any(not classify_daily_overlap(dict(row),dict(row))['price_eligible'] for row in eligible):
                     raise MarketDataConflict('price-only daily response quality invalid')
+                # Discovery only. The consumer must still prove the exact
+                # previous exchange session and original durable publication.
+                price_packet_candidates[symbol] = evidence_path
             overlap_classifications=[]
             index_path = _series_index_path(store_root, TWELVE_PROVIDER, symbol)
             existing: list[dict[str, Any]] = []
@@ -689,6 +695,7 @@ def collect_previous_session_eod(
         result=result,
         diagnostics=conflict_diagnostics,
         conflict_count=conflict_record_count,
+        price_packet_candidates=price_packet_candidates,
     )
     return result
 
