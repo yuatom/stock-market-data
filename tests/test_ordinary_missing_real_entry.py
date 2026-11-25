@@ -208,3 +208,11 @@ class OrdinaryMissingProductionEntry(unittest.TestCase):
         self.assertRegex(result['verified_local_remote_sha'],r'^[0-9a-f]{40}$')
         _,rejected=run_scenario([a,c],[a,b,c],remote_drift=True,**common)
         self.assertNotIn('verified_local_remote_sha',rejected)
+
+    def test_common_feed_gap_is_not_inferred_from_weekday_or_new_batch(self):
+        a,b,c=[bar(day) for day in ('2026-11-20','2026-11-23','2026-11-24')]
+        out,result=run_scenario([a,c],[a,b,c],permitted=None,
+                               witnesses={'SPY':[a['trade_date'],c['trade_date']],
+                                          'QQQ':[a['trade_date'],c['trade_date']]})
+        self.assertEqual(out,[a,c])
+        self.assertEqual(result['repair_audits'],[])
