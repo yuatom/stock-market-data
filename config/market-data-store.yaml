@@ -54,6 +54,16 @@ series:
     target_record_count_source: maximum_of_series_analysis_windows_may_read_last_sessions
     normal_mode: verified_prefix_extension_then_append_only
     normal_mode_provider_revision_behavior: fail_closed_and_require_explicit_rebase
+    ordinary_collection_missing_field_repair:
+      status: preparation_only_until_guarded_writer_is_enabled
+      preparation_helper: scripts/normal_daily_missing_repair.py
+      allow_only_absent_or_null_fields_in_same_identity_session_and_adjustment_basis: true
+      keep_existing_valid_fields_even_when_incoming_source_differs: true
+      independently_block_intentionally_quarantined_or_unqualified_volume: true
+      require_valid_combined_ohlc_and_authoritative_missing_session_dates: true
+      do_not_treat_non_null_malformed_rows_or_zero_volume_as_missing: true
+      preserve_preimage_and_exact_field_diff_before_any_publication: true
+      verify_same_series_and_publish_by_exact_current_store_compare_and_swap: true
     retained_candidate_reconciliation:
       mode: retained_daily_append
       trigger: separate_explicit_workflow_dispatch_only
