@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 from scripts import market_data_collectors as c
-from scripts.build_store_publication_manifest import build_manifest, PublicationManifestError
+from scripts.build_store_publication_manifest import build_manifest
 
 class NormalEodLocator(unittest.TestCase):
     def test_normal_run_locates_same_packet_no_extra_call_and_keeps_history(self):
@@ -46,9 +46,39 @@ class NormalEodLocator(unittest.TestCase):
             self.assertNotIn('retained_price_packet_candidates',result)
             out=p/'collector-result';out.write_text(json.dumps(result)+'\n')
             kwargs=dict(store_root=data,result_file=out,request_id='',trade_date='2026-11-24',stage='previous_session_eod')
-            manifest=json.loads(build_manifest(**kwargs).read_bytes())
+            m=build_manifest(**kwargs)
+            manifest=json.loads(m.read_bytes())
             self.assertIn(packet,{x['path'] for x in manifest['required_outputs']})
-            diag['retained_price_packet_candidates']={'WRONG':packet}
-            (data/result['result_state_path']).write_text(json.dumps(diag))
-            with self.assertRaises(PublicationManifestError):
-                build_manifest(**kwargs)
+            m.unlink()
+            good=data/'healthy.json';good.write_text('valid separate production output')
+            dp=data/result['result_state_path']
+            bad_digest='collector-state/2026-11/price-only-'+'e'*64+'.json'
+            (data/bad_digest).write_bytes(raw)
+            for candidate in ({'WRONG':packet}, {'ABC':packet,'MISSING':packet.replace('price-only-', 'price-only-0',1)[:-1]},
+                              {'ABC':'collector-state/2026-11/price-only-'+'f'*64+'.json'},
+                              {'ABC':bad_digest},
+                              {f'S{i}':packet for i in range(201)}, [], {'ABC':'../../outside'}):
+                with self.subTest(candidate_type=type(candidate),size=len(candidate)):
+                    bad=dict(diag,retained_price_packet_candidates=candidate)
+                    dp.write_text(json.dumps(bad))
+                    m=build_manifest(**kwargs)
+                    published=json.loads(m.read_bytes())
+                    current=json.loads(dp.read_bytes())
+                    self.assertIn('healthy.json',{x['path'] for x in published['required_outputs']})
+                    self.assertEqual(current['conflicts'],diag['conflicts'])
+                    self.assertNotIn('WRONG',current.get('retained_price_packet_candidates',{}))
+                    self.assertEqual(current.get('retained_price_packet_candidates'),
+                                     {'ABC':packet} if isinstance(candidate,dict) and 'MISSING' in candidate else None)
+                    self.assertEqual(current.get('retained_price_packet_locator_status'),'partial_or_unavailable')
+                    m.unlink()
+
+            # A path from a previous commit is not a same-run postimage, even
+            # if its bytes happen to be a well-formed provider packet.
+            subprocess.run(['git','-C',p,'add',str((data/packet).relative_to(p))],check=True)
+            subprocess.run(['git','-C',p,'-c','user.name=fixture','-c','user.email=none@example.invalid',
+                            'commit','-qm','prior retained packet'],check=True)
+            dp.write_text(json.dumps(diag))
+            m=build_manifest(**kwargs)
+            now=json.loads(dp.read_bytes())
+            self.assertNotIn('retained_price_packet_candidates',now)
+            self.assertIn('healthy.json',{x['path'] for x in json.loads(m.read_bytes())['required_outputs']})

@@ -61,6 +61,34 @@ def _declared_paths(value: Any) -> set[str]:
     return found
 
 
+def _verified_optional_price_locator(
+    store_root: Path, trade_date: str, actual: set[str], candidates: Any
+) -> dict[str, str]:
+    """Keep exact same-publication paths only; never expand acquisition or scope."""
+    if type(candidates) is not dict or len(candidates) > 200:
+        return {}
+    syntax = re.compile(rf"collector-state/{re.escape(trade_date[:7])}/price-only-[0-9a-f]{{64}}\.json")
+    valid = {}
+    for symbol, path in candidates.items():
+        if (not re.fullmatch(r"[A-Z0-9][A-Z0-9.-]{0,19}", symbol)
+                or not isinstance(path, str) or not syntax.fullmatch(path) or path not in actual):
+            continue
+        source = store_root / path
+        if source.is_symlink():
+            continue
+        try:
+            raw = source.read_bytes()
+            packet = json.loads(raw)
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            continue
+        digest = hashlib.sha256(raw).hexdigest()
+        if (isinstance(packet, dict) and packet.get("kind") == "normalized_daily_price_only_evidence"
+                and packet.get("symbol") == symbol and packet.get("execution_day") == trade_date
+                and path.endswith(f"/price-only-{digest}.json")):
+            valid[symbol] = path
+    return valid
+
+
 def build_manifest(
     *,
     store_root: Path,
@@ -76,7 +104,7 @@ def build_manifest(
         raise PublicationManifestError("store_root must equal repository data/market-data root")
 
     result = _last_json(result_file)
-    candidate_symbols: dict[str, str] = {}
+    eod_diagnostic: tuple[str, dict[str, Any]] | None = None
     if stage == "previous_session_eod" and not result.get("result_state_path"):
         raise PublicationManifestError("ordinary EOD result is missing required private diagnostic output")
     if stage == "previous_session_eod":
@@ -123,16 +151,7 @@ def build_manifest(
         expected_token = hashlib.sha256(invocation["invocation_id"].encode("utf-8")).hexdigest()[:16]
         if not relative.endswith(f"{expected_token}-conflicts.json"):
             raise PublicationManifestError("ordinary EOD diagnostic path does not match invocation identity")
-        candidates = diagnostic.get("retained_price_packet_candidates", {})
-        pattern = rf"collector-state/{re.escape(trade_date[:7])}/price-only-[0-9a-f]{{64}}\.json"
-        if not isinstance(candidates, dict) or len(candidates) > 200:
-            raise PublicationManifestError("invalid ordinary EOD retained candidate locator")
-        for symbol, path in candidates.items():
-            if (not re.fullmatch(r"[A-Z0-9][A-Z0-9.-]{0,19}", symbol)
-                    or not isinstance(path, str) or not re.fullmatch(pattern, path)
-                    or path in candidate_symbols):
-                raise PublicationManifestError("invalid ordinary EOD retained candidate locator")
-            candidate_symbols[path] = symbol
+        eod_diagnostic = (relative, diagnostic)
     declared: set[str] = set()
     for path in _declared_paths(result):
         if path.startswith("data/market-data/"):
@@ -161,8 +180,23 @@ def build_manifest(
         if candidate.is_file():
             actual.add(relative)
 
-    if not candidate_symbols.keys() <= actual:
-        raise PublicationManifestError("ordinary EOD locator is not part of this publication")
+    if eod_diagnostic is not None:
+        relative, diagnostic = eod_diagnostic
+        # Optional discovery must never stop publication of valid ordinary rows.
+        # Restrict cleanup to the diagnostic written by this invocation; never
+        # rewrite an unchanged prior diagnostic merely to add a locator status.
+        if relative in actual and "retained_price_packet_candidates" in diagnostic:
+            candidates = diagnostic["retained_price_packet_candidates"]
+            valid = _verified_optional_price_locator(store_root, trade_date, actual, candidates)
+            if type(candidates) is not dict or candidates != valid:
+                diagnostic.pop("retained_price_packet_candidates")
+                if valid:
+                    diagnostic["retained_price_packet_candidates"] = valid
+                diagnostic["retained_price_packet_locator_status"] = "partial_or_unavailable"
+                (store_root / relative).write_text(
+                    json.dumps(diagnostic, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+                    encoding="utf-8",
+                )
     outputs = sorted(actual | declared)
     if not outputs:
         return None
@@ -170,16 +204,6 @@ def build_manifest(
     refs = []
     for relative in outputs:
         raw = (store_root / relative).read_bytes()
-        if relative in candidate_symbols:
-            try:
-                packet = json.loads(raw)
-            except (UnicodeError, json.JSONDecodeError) as exc:
-                raise PublicationManifestError("invalid retained candidate packet") from exc
-            digest = hashlib.sha256(raw).hexdigest()
-            if (not isinstance(packet, dict) or packet.get("kind") != "normalized_daily_price_only_evidence"
-                    or packet.get("symbol") != candidate_symbols[relative] or packet.get("execution_day") != trade_date
-                    or not relative.endswith(f"/price-only-{digest}.json")):
-                raise PublicationManifestError("retained candidate packet does not match locator")
         refs.append({"path": relative, "blob_sha": _git_blob_sha(raw)})
 
     stable_request_id = request_id.strip() or f"scheduled-{trade_date}-{stage}"
