@@ -6,6 +6,7 @@ import market_data_collectors as c
 import market_data_store as s
 from build_store_publication_manifest import build_manifest
 from verify_store_publication import _verify_required_manifest
+from push_proof_store_commit import StorePushError, verify_exact_output_closure
 
 def bar(day,**kw):
     return dict(dict(trade_date=day,open=10.,high=12.,low=9.,close=11.,volume=100.),**kw)
@@ -61,7 +62,22 @@ def run_scenario(rows, incoming, make_partial=False, permitted=(), policy=True, 
             out['publication_files']={r['path'] for r in json.loads(manifest.read_text())['required_outputs']}
             git('add','data/market-data')
             git('commit','-qm','repair')
-            _verify_required_manifest(repo,git('rev-parse','HEAD'),manifest.relative_to(repo).as_posix())
+            candidate=git('rev-parse','HEAD')
+            base=env['MARKET_DATA_STORE_INPUT_SHA']
+            manifest_path=manifest.relative_to(repo).as_posix()
+            _verify_required_manifest(repo,candidate,manifest_path)
+            verify_exact_output_closure(repo,base,candidate,manifest_path)
+            # An unmanifested output is disallowed, even if the original manifest is still intact.
+            (root/'unexpected.json').write_text('{}')
+            git('add','data/market-data')
+            git('commit','-qm','unexpected unmanifested change')
+            try:
+                verify_exact_output_closure(repo,base,git('rev-parse','HEAD'),manifest_path)
+            except StorePushError as exc:
+                if str(exc)!='STORE_MANIFEST_OUTPUT_SCOPE_MISMATCH':
+                    raise
+            else:
+                raise AssertionError('unmanifested output passed the exact closure')
         out['repair_audits']=[json.loads(p.read_bytes()) for p in root.glob('collector-state/*/ordinary-gap-*.json')]
         return c.read_daily_series(root,provider=c.TWELVE_PROVIDER,symbol='AAA'),out
 
