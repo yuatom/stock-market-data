@@ -79,7 +79,9 @@ def _verified_optional_price_locator(
         try:
             raw = source.read_bytes()
             packet = json.loads(raw)
-        except (OSError, UnicodeError, json.JSONDecodeError):
+        except (OSError, ValueError, RecursionError):
+            # Even a bounded-size JSON packet may exceed decoder limits.
+            # That invalidates the optional locator, not healthy EOD outputs.
             continue
         digest = hashlib.sha256(raw).hexdigest()
         if (isinstance(packet, dict) and packet.get("kind") == "normalized_daily_price_only_evidence"

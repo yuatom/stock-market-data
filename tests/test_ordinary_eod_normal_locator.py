@@ -54,9 +54,18 @@ class NormalEodLocator(unittest.TestCase):
             dp=data/result['result_state_path']
             bad_digest='collector-state/2026-11/price-only-'+'e'*64+'.json'
             (data/bad_digest).write_bytes(raw)
+            parser_traps = []
+            for wire in (
+                b'[' * 10_000 + b'0' + b']' * 10_000,
+                b'{"value":' + b'9' * 5_000 + b'}',
+            ):
+                trap='collector-state/2026-11/price-only-'+hashlib.sha256(wire).hexdigest()+'.json'
+                (data/trap).write_bytes(wire)
+                parser_traps.append(trap)
             for candidate in ({'WRONG':packet}, {'ABC':packet,'MISSING':packet.replace('price-only-', 'price-only-0',1)[:-1]},
                               {'ABC':'collector-state/2026-11/price-only-'+'f'*64+'.json'},
                               {'ABC':bad_digest},
+                              *({'ABC':path} for path in parser_traps),
                               {f'S{i}':packet for i in range(201)}, [], {'ABC':'../../outside'}):
                 with self.subTest(candidate_type=type(candidate),size=len(candidate)):
                     bad=dict(diag,retained_price_packet_candidates=candidate)
