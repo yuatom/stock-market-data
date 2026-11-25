@@ -315,6 +315,10 @@ def append_daily_bars(
     return WriteResult(True, tuple(changed_paths), len(all_records))
 
 
+class GapRepairRollbackError(MarketDataError):
+    """Loss of local write integrity; the collector must abort publication."""
+
+
 def repair_active_daily_gaps(root: Path, *, provider: str, symbol: str, asset_class: str,
                              identity_effective_from: str | None, execution_date: str,
                              repairs: list[tuple[dict | None, dict]], verified_gap_sessions: frozenset[str],
@@ -402,11 +406,35 @@ def repair_active_daily_gaps(root: Path, *, provider: str, symbol: str, asset_cl
     index["shards"][-1] = _shard_meta(meta["path"], start, doc, False)
     if index_path.read_bytes() != before:
         raise MarketDataConflict("gap repair index moved before write")
+    original_shard = shard.read_bytes()
+    if git_blob_sha_bytes(original_shard) != meta["blob_sha"] or shard.is_symlink():
+        raise MarketDataConflict("gap repair shard bytes changed")
+    pending_paths = [p.with_name(p.name + ".tmp") for p in (shard, index_path)]
+    if any(os.path.lexists(p) for p in pending_paths) or audit.exists():
+        raise MarketDataConflict("unresolved ordinary repair output already exists")
     audit.parent.mkdir(parents=True, exist_ok=True)
-    with audit.open("xb") as handle:
-        handle.write(encoded)
-    _write_json(shard, doc)
-    _write_json(index_path, index)
+    created = False
+    try:
+        with audit.open("xb") as handle:
+            created = True
+            handle.write(encoded)
+        _write_json(shard, doc)
+        _write_json(index_path, index)
+    except OSError:
+        try:
+            if index_path.read_bytes() != before:
+                _write_json(index_path, json.loads(before))
+            if shard.read_bytes() != original_shard:
+                _write_json(shard, json.loads(original_shard))
+            if index_path.read_bytes() != before or shard.read_bytes() != original_shard:
+                raise OSError("repair preimage restoration mismatch")
+            if created:
+                audit.unlink()
+            for pending in pending_paths:
+                pending.unlink(missing_ok=True)
+        except OSError as rollback_failure:
+            raise GapRepairRollbackError("ordinary repair could not restore original Store bytes") from rollback_failure
+        raise
     return WriteResult(True, tuple(map(str, (audit, shard, index_path))), index["record_count"])
 
 

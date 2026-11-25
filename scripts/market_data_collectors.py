@@ -25,6 +25,7 @@ import yaml
 
 try:
     from market_data_store import (
+        GapRepairRollbackError,
         MarketDataConflict,
         canonical_bytes,
         append_daily_bars,
@@ -39,6 +40,7 @@ try:
     )
 except ImportError:  # pragma: no cover
     from scripts.market_data_store import (
+        GapRepairRollbackError,
         MarketDataConflict,
         canonical_bytes,
         append_daily_bars,
@@ -685,7 +687,7 @@ def collect_previous_session_eod(
                 changed_series += int(not repairs)
                 if not existing:
                     bootstrapped_series += 1
-        except BudgetExceeded:
+        except (BudgetExceeded, GapRepairRollbackError):
             raise
         except Exception as exc:
             failure = {"symbol": symbol, "reason": type(exc).__name__, "detail": str(exc)[:240]}

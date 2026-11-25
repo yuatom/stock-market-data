@@ -10,7 +10,7 @@ from verify_store_publication import _verify_required_manifest
 def bar(day,**kw):
     return dict(dict(trade_date=day,open=10.,high=12.,low=9.,close=11.,volume=100.),**kw)
 
-def run_scenario(rows, incoming, make_partial=False, permitted=(), policy=True, record_limit=512, verify_publication=False):
+def run_scenario(rows, incoming, make_partial=False, permitted=(), policy=True, record_limit=512, verify_publication=False, fail_index_write=False, fail_rollback=False):
     with tempfile.TemporaryDirectory() as temp, ExitStack() as stack:
         repo=Path(temp).resolve()
         root=repo / "data/market-data" if verify_publication else repo
@@ -38,6 +38,17 @@ def run_scenario(rows, incoming, make_partial=False, permitted=(), policy=True, 
         cfg={'collector':{'budgets':{'twelve_data_basic':{'hard_credits_per_day':200,'hard_credits_per_minute':8}},'twelve_data_daily':{'history_outputsize':64,'bootstrap_minimum_records':1,'overlap_revision_policy':'price_only_volume_blocked_v1'}}}
         if policy: cfg['collector']['twelve_data_daily']['ordinary_missing_repair_policy']='active_shard_gap_fill_v1'
         access={'twelve_data_basic':{'base_url':'https://example.invalid','time_series_path':'/time_series','interval_daily':'1day'}}
+        if fail_index_write:
+            original_write=s._write_json
+            def fail_only_repair_index(path,value):
+                if path.name=='_index.json' and any(seg.get('ingest_kind')=='ordinary_missing_price_repair'
+                                                   for seg in value.get('lineage_segments',[])):
+                    raise OSError('synthetic repair index failure')
+                if (fail_rollback and path.name=='000000.json'
+                        and len(value.get('records',[]))==len(rows)):
+                    raise OSError('synthetic preimage restoration failure')
+                return original_write(path,value)
+            stack.enter_context(patch.object(s,'_write_json',side_effect=fail_only_repair_index))
         out=c.collect_previous_session_eod(trade_date='2026-11-25',store_root=root,watchlist={},completeness={},config=cfg,access=access,verified_gap_sessions=frozenset(permitted))
         if verify_publication:
             result_file=repo/'collector-result.txt'
@@ -94,3 +105,15 @@ class OrdinaryMissingProductionEntry(unittest.TestCase):
         self.assertIn('series/daily/twelve_data_basic/AAA/_index.json',paths)
         self.assertIn('series/daily/twelve_data_basic/AAA/000000.json',paths)
         self.assertTrue(any('/ordinary-gap-' in p for p in paths))
+
+    def test_interrupted_index_write_discards_repair_and_leaves_index_readable(self):
+        a,b,c=[bar(day) for day in ('2026-11-20','2026-11-23','2026-11-24')]
+        out, result=run_scenario([a,c],[a,b,c],permitted={b['trade_date']},fail_index_write=True)
+        self.assertEqual(out,[a,c])
+        self.assertEqual(result['repair_audits'],[])
+        self.assertEqual(result['changed_series'],0)
+
+    def test_failed_preimage_restoration_aborts_entire_collector(self):
+        a,b,c=[bar(day) for day in ('2026-11-20','2026-11-23','2026-11-24')]
+        with self.assertRaises(s.GapRepairRollbackError):
+            run_scenario([a,c],[a,b,c],permitted={b['trade_date']},fail_index_write=True,fail_rollback=True)
