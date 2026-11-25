@@ -10,11 +10,14 @@ from verify_store_publication import _verify_required_manifest
 def bar(day,**kw):
     return dict(dict(trade_date=day,open=10.,high=12.,low=9.,close=11.,volume=100.),**kw)
 
-def run_scenario(rows, incoming, make_partial=False, permitted=(), policy=True, record_limit=512, verify_publication=False, fail_index_write=False, fail_rollback=False):
+def run_scenario(rows, incoming, make_partial=False, permitted=(), policy=True, record_limit=512, verify_publication=False, fail_index_write=False, fail_rollback=False, witnesses=None, trade_date="2026-11-25"):
     with tempfile.TemporaryDirectory() as temp, ExitStack() as stack:
         repo=Path(temp).resolve()
         root=repo / "data/market-data" if verify_publication else repo
         c.append_daily_bars(root,provider=c.TWELVE_PROVIDER,symbol='AAA',asset_class='stocks',bars=rows,series_semantics='daily_regular_ohlcv',shard_record_limit=record_limit)
+        for symbol, days in (witnesses or {}).items():
+            c.append_daily_bars(root,provider=c.TWELVE_PROVIDER,symbol=symbol,asset_class='etf',
+                                bars=[bar(day) for day in days],series_semantics='daily_regular_ohlcv')
         if make_partial:
             idx=c._series_index_path(root,c.TWELVE_PROVIDER,'AAA')
             index=json.loads(idx.read_bytes()); old=index['shards'][0]
@@ -49,7 +52,7 @@ def run_scenario(rows, incoming, make_partial=False, permitted=(), policy=True, 
                     raise OSError('synthetic preimage restoration failure')
                 return original_write(path,value)
             stack.enter_context(patch.object(s,'_write_json',side_effect=fail_only_repair_index))
-        out=c.collect_previous_session_eod(trade_date='2026-11-25',store_root=root,watchlist={},completeness={},config=cfg,access=access,verified_gap_sessions=frozenset(permitted))
+        out=c.collect_previous_session_eod(trade_date=trade_date,store_root=root,watchlist={},completeness={},config=cfg,access=access,verified_gap_sessions=None if permitted is None else frozenset(permitted))
         if verify_publication:
             result_file=repo/'collector-result.txt'
             result_file.write_text(json.dumps(out))
@@ -117,3 +120,18 @@ class OrdinaryMissingProductionEntry(unittest.TestCase):
         a,b,c=[bar(day) for day in ('2026-11-20','2026-11-23','2026-11-24')]
         with self.assertRaises(s.GapRepairRollbackError):
             run_scenario([a,c],[a,b,c],permitted={b['trade_date']},fail_index_write=True,fail_rollback=True)
+
+    def test_runtime_uses_schedule_and_preexisting_both_witnesses_without_date_input(self):
+        a,b,c=[bar(day) for day in ('2026-11-20','2026-11-23','2026-11-24')]
+        out, _=run_scenario([a,c],[a,b,c],permitted=None,
+                            witnesses={'SPY':[b['trade_date']],'QQQ':[b['trade_date']]})
+        self.assertEqual([row['trade_date'] for row in out],
+                         [row['trade_date'] for row in [a,b,c]])
+        out, _=run_scenario([a,c],[a,b,c],permitted=None,witnesses={'SPY':[b['trade_date']]})
+        self.assertEqual(out,[a,c])
+
+    def test_market_holiday_not_filled_even_when_both_witnesses_have_false_row(self):
+        a,b,c=[bar(day) for day in ('2026-11-25','2026-11-26','2026-11-27')]
+        out, _=run_scenario([a,c],[a,b,c],permitted=None,trade_date='2026-11-30',
+                            witnesses={'SPY':[b['trade_date']],'QQQ':[b['trade_date']]})
+        self.assertEqual(out,[a,c])

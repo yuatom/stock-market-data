@@ -62,9 +62,11 @@ except ModuleNotFoundError as exc:
 
 try:
     from scripts.normal_daily_missing_repair import OHLC, fill_missing_regular_daily_fields
+    from scripts.reviewed_equity_calendar import missing_repair_sessions
 except ModuleNotFoundError as exc:
     if exc.name != 'scripts': raise
     from normal_daily_missing_repair import OHLC, fill_missing_regular_daily_fields
+    from reviewed_equity_calendar import missing_repair_sessions
 
 ET = ZoneInfo("America/New_York")
 TWELVE_PROVIDER = "twelve_data_basic"
@@ -485,7 +487,7 @@ def collect_previous_session_eod(
     completeness: Mapping[str, Any],
     config: Mapping[str, Any],
     access: Mapping[str, Any],
-    verified_gap_sessions: frozenset[str] = frozenset(),
+    verified_gap_sessions: frozenset[str] | None = None,
 ) -> dict[str, Any]:
     # New behavior requires an explicitly deployed policy; absent preserves legacy.
     revision_policy=config['collector']['twelve_data_daily'].get('overlap_revision_policy')
@@ -521,6 +523,21 @@ def collect_previous_session_eod(
     universe = _daily_universe(watchlist, completeness)
     daily_basis_owner = _load_daily_basis_owner(store_root, trade_date)
     delegated_daily_symbols = []
+    if gap_policy and verified_gap_sessions is None:
+        # Planned sessions alone cannot rule out unscheduled market closures.
+        # Require a usable pre-existing daily fact from both index ETFs; this
+        # function takes no extra quote requests and never uses the batch's new rows.
+        planned = missing_repair_sessions(trade_date)
+        witnesses = []
+        for benchmark in ('SPY', 'QQQ') if planned else ():
+            try:
+                rows = read_daily_series(store_root, provider=TWELVE_PROVIDER, symbol=benchmark, last_sessions=80)
+                witnesses.append({row['trade_date'] for row in rows
+                    if row['trade_date'] in planned and classify_daily_overlap(row, row)['price_eligible']})
+            except (OSError, ValueError, TypeError, MarketDataConflict):
+                witnesses.append(set())
+        verified_gap_sessions = frozenset(set.intersection(*witnesses)) if witnesses else frozenset()
+    verified_gap_sessions = verified_gap_sessions or frozenset()
 
     for symbol, asset_class in universe:
         if symbol in daily_basis_owner:
