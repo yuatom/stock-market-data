@@ -1,17 +1,21 @@
-from contextlib import ExitStack
+from contextlib import ExitStack, redirect_stdout
+from datetime import datetime
+from io import StringIO
 import json,os,subprocess,tempfile,unittest
 from pathlib import Path
 from unittest.mock import patch
+import collect_market_data as entrypoint
+import yaml
 import market_data_collectors as c
 import market_data_store as s
 from build_store_publication_manifest import build_manifest
 from verify_store_publication import _verify_required_manifest
-from push_proof_store_commit import StorePushError, verify_exact_output_closure
+from push_proof_store_commit import StorePushError, push_exact, verify_exact_output_closure
 
 def bar(day,**kw):
     return dict(dict(trade_date=day,open=10.,high=12.,low=9.,close=11.,volume=100.),**kw)
 
-def run_scenario(rows, incoming, make_partial=False, permitted=(), policy=True, record_limit=512, verify_publication=False, fail_index_write=False, fail_rollback=False, witnesses=None, trade_date="2026-11-25"):
+def run_scenario(rows, incoming, make_partial=False, permitted=(), policy=True, record_limit=512, verify_publication=False, fail_index_write=False, fail_rollback=False, witnesses=None, trade_date="2026-11-25", actual_cli=False, remote_drift=False):
     with tempfile.TemporaryDirectory() as temp, ExitStack() as stack:
         repo=Path(temp).resolve()
         root=repo / "data/market-data" if verify_publication else repo
@@ -36,6 +40,11 @@ def run_scenario(rows, incoming, make_partial=False, permitted=(), policy=True, 
             git('add','data/market-data')
             git('commit','-qm','seed')
             env.update(MARKET_DATA_COMPUTE_SHA='1'*40, MARKET_DATA_STORE_INPUT_SHA=git('rev-parse','HEAD'))
+            if actual_cli:
+                bare = Path(stack.enter_context(tempfile.TemporaryDirectory()))/'origin.git'
+                git('init','-q','--bare',str(bare))
+                git('remote','add','origin',str(bare))
+                git('push','origin','HEAD:refs/heads/main')
         replacements={'_daily_universe':[('AAA','stocks')],'_load_daily_basis_owner':{},'_identity_effective_date':None,'wait_for_twelve_budget':None,'consume_twelve_credit':None,'fetch_twelve_daily':incoming}
         stack.enter_context(patch.dict(os.environ,env))
         for name,val in replacements.items():stack.enter_context(patch.object(c,name,return_value=val))
@@ -53,7 +62,28 @@ def run_scenario(rows, incoming, make_partial=False, permitted=(), policy=True, 
                     raise OSError('synthetic preimage restoration failure')
                 return original_write(path,value)
             stack.enter_context(patch.object(s,'_write_json',side_effect=fail_only_repair_index))
-        out=c.collect_previous_session_eod(trade_date=trade_date,store_root=root,watchlist={},completeness={},config=cfg,access=access,verified_gap_sessions=None if permitted is None else frozenset(permitted))
+        if actual_cli:
+            source=Path(__file__).resolve().parents[1]/'config'
+            config_path=repo/'fixture-config.yaml'
+            config=yaml.safe_load((source/'market-data-store.yaml').read_text())
+            daily=config['collector']['twelve_data_daily']
+            if policy:
+                daily['ordinary_missing_repair_policy']='active_shard_gap_fill_v1'
+            config_path.write_text(yaml.safe_dump(config))
+            now=datetime.fromisoformat(trade_date+'T07:05:00-05:00')
+            gate=entrypoint._settlement_gate_result
+            output=StringIO()
+            with patch.object(entrypoint,'_settlement_gate_result',side_effect=lambda args:gate(args,now_et=now)), redirect_stdout(output):
+                rc=entrypoint.cli(['--mode','previous_session_eod','--trade-date',trade_date,
+                    '--store-root',str(root),'--config',str(config_path),
+                    '--universe',str(source/'collection-universe.json'),
+                    '--access-config',str(source/'market-data-collector-access.yaml')])
+            if rc:
+                raise AssertionError('the configured collection CLI returned an error')
+            out=json.loads(output.getvalue().strip().splitlines()[-1])
+            config_path.unlink()  # Data commits do not include execution fixture files.
+        else:
+            out=c.collect_previous_session_eod(trade_date=trade_date,store_root=root,watchlist={},completeness={},config=cfg,access=access,verified_gap_sessions=None if permitted is None else frozenset(permitted))
         if verify_publication:
             result_file=repo/'collector-result.txt'
             result_file.write_text(json.dumps(out))
@@ -67,6 +97,23 @@ def run_scenario(rows, incoming, make_partial=False, permitted=(), policy=True, 
             manifest_path=manifest.relative_to(repo).as_posix()
             _verify_required_manifest(repo,candidate,manifest_path)
             verify_exact_output_closure(repo,base,candidate,manifest_path)
+            result_file.unlink()
+            if actual_cli and remote_drift:
+                tree=git('rev-parse',base+'^{tree}')
+                concurrent=git('commit-tree',tree,'-p',base,'-m','concurrent advance')
+                git('push','origin',concurrent+':refs/heads/main')
+                try:
+                    push_exact(repo,base,candidate)
+                except StorePushError as exc:
+                    if str(exc)!='STORE_REMOTE_MAIN_ADVANCED':
+                        raise
+                else:
+                    raise AssertionError('repair was published despite a concurrent advance')
+                if git('ls-remote','origin','refs/heads/main').split()[0]!=concurrent:
+                    raise AssertionError('the concurrent remote HEAD changed')
+            elif actual_cli:
+                out['verified_local_remote_sha']=push_exact(repo,base,candidate)['remote_main_sha']
+                _verify_required_manifest(repo,out['verified_local_remote_sha'],manifest_path)
             # An unmanifested output is disallowed, even if the original manifest is still intact.
             (root/'unexpected.json').write_text('{}')
             git('add','data/market-data')
@@ -151,3 +198,13 @@ class OrdinaryMissingProductionEntry(unittest.TestCase):
         out, _=run_scenario([a,c],[a,b,c],permitted=None,trade_date='2026-11-30',
                             witnesses={'SPY':[b['trade_date']],'QQQ':[b['trade_date']]})
         self.assertEqual(out,[a,c])
+
+    def test_configured_entrypoint_exact_local_remote_and_concurrent_base_rejection(self):
+        a,b,c=[bar(day) for day in ('2026-11-20','2026-11-23','2026-11-24')]
+        common=dict(permitted=None,witnesses={'SPY':[b['trade_date']],'QQQ':[b['trade_date']]},
+                    actual_cli=True,verify_publication=True)
+        out,result=run_scenario([a,c],[a,b,c],**common)
+        self.assertEqual(len(out),3)
+        self.assertRegex(result['verified_local_remote_sha'],r'^[0-9a-f]{40}$')
+        _,rejected=run_scenario([a,c],[a,b,c],remote_drift=True,**common)
+        self.assertNotIn('verified_local_remote_sha',rejected)
