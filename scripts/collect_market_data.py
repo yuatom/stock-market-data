@@ -33,6 +33,7 @@ import build_deterministic_metric_proof as metric_proof
 import collection_universe as collection
 import market_data_collectors as base
 import market_data_collection as runtime
+from close_session_window import candidate_close_window
 
 ET = ZoneInfo("America/New_York")
 
@@ -85,6 +86,10 @@ def regular_stage_cutoff_wait_seconds(
     closed rather than silently sleeping or collecting premature facts.
     """
     cutoff = REGULAR_STAGE_CUTOFF_ET.get(mode)
+    if mode in {"close", "close_retry", "close_final"}:
+        end = candidate_close_window(trade_date)["end"]
+        if end == "13:00":
+            cutoff = (13, 0)
     if cutoff is None:
         return 0.0
     if now_et.tzinfo is None:
@@ -114,7 +119,7 @@ def _wait_until_regular_stage_cutoff(
     argv: list[str], *, now_et: datetime | None = None
 ) -> None:
     mode = str(_arg_value(argv, "--mode") or "")
-    if mode not in REGULAR_STAGE_CUTOFF_ET:
+    if mode not in REGULAR_STAGE_CUTOFF_ET and mode not in {"close", "close_retry", "close_final"}:
         return
     now = (now_et or datetime.now(ET)).astimezone(ET)
     trade_date = str(_arg_value(argv, "--trade-date") or now.date().isoformat())
@@ -251,6 +256,7 @@ def _live_close_retry_symbols(
     Keep the existing missing-vs-partial boundary: one qualified Close-window
     fact is sufficient here; this does not assert full-window readiness.
     """
+    window = candidate_close_window(trade_date)
     required = {symbol for symbol, _asset in eligible}
     refs, prior_missing = base._load_prior_snapshot(store_root, trade_date, "close")
     # Match the coverage owner's symbol identity before scope/overlap checks.
@@ -265,7 +271,7 @@ def _live_close_retry_symbols(
         symbol for symbol in required
         if any(
             fact.get("session") == "regular"
-            and runtime._fact_timestamp(fact, trade_date, "15:45", "16:00") is not None
+            and runtime._fact_timestamp(fact, trade_date, window["start"], window["end"]) is not None
             for fact in facts.get(symbol, [])
         )
     }
@@ -291,6 +297,7 @@ def _run_live_close(argv: list[str]) -> int | None:
     config = base.load_yaml(config_path)
     access = base.load_yaml(access_path)
     eligible = _live_close_universe(universe_config)
+    window = candidate_close_window(trade_date)
 
     symbols_override = None
     if mode in {"close_retry", "close_final"}:
@@ -303,8 +310,8 @@ def _run_live_close(argv: list[str]) -> int | None:
         mode=mode,
         stage="close",
         trade_date=trade_date,
-        start_et="15:45",
-        end_et="16:00",
+        start_et=window["start"],
+        end_et=window["end"],
         store_root=store_root,
         universe_config=universe_config,
         config=config,

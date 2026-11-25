@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "year": 2026,
+  "scope": "US-listed equities regular session, America/New_York",
+  "sources": [
+    "https://ir.theice.com/press/news-details/2025/NYSE-Group-Announces-2026-2027-and-2028-Holiday-and-Early-Closings-Calendar/",
+    "https://www.nasdaq.com/market-activity/stock-market-holiday-schedule"
+  ],
+  "scheduled_closed": ["2026-01-01","2026-01-19","2026-02-16","2026-04-03","2026-05-25","2026-06-19","2026-07-03","2026-09-07","2026-11-26","2026-12-25"],
+  "scheduled_early_close": ["2026-11-27","2026-12-24"]
+}
