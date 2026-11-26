@@ -472,8 +472,32 @@ jobs:
               sys.exit(2)
           PYTHON
 
+      - name: Reuse a verified prior early Close publication
+        id: close_reuse
+        if: inputs.trigger_kind == 'schedule' && inputs.schedule == '6 16 * * 1-5' && steps.invocation.outputs.mode == 'close'
+        working-directory: store
+        shell: bash
+        env:
+          MARKET_DATA_STORE_TOKEN: ${{ secrets.MARKET_DATA_STORE_TOKEN }}
+          CLOSE_REUSE_DATE: ${{ steps.invocation.outputs.trade_date }}
+          CLOSE_REUSE_COMPUTE: ${{ steps.invocation.outputs.market_data_contract_sha }}
+        run: |
+          set -euo pipefail
+          python -B ../compute/scripts/quiet_private_store.py run --repo . <<'PRIVATE_SCRIPT'
+          python -B ../compute/scripts/close_publication_reuse.py \
+            --repo . --trade-date "$CLOSE_REUSE_DATE" --compute "$CLOSE_REUSE_COMPUTE" \
+            --pin "$(cat "$RUNNER_TEMP/market-data-store-input-sha")" \
+            --universe ../compute/config/collection-universe.json --result "$RUNNER_TEMP/close-reuse-result"
+          PRIVATE_SCRIPT
+          decision="$(cat "$RUNNER_TEMP/close-reuse-result")"
+          case "$decision" in true|false) ;; *) exit 2 ;; esac
+          printf 'reuse=%s\n' "$decision" >> "$GITHUB_OUTPUT"
+          if [[ "$decision" == 'true' ]]; then
+            echo '{"status":"reused_existing_qualified_close"}'
+          fi
+
       - name: Collect qualified facts into private Store checkout
-        if: steps.invocation.outputs.mode != 'smoke_readonly'
+        if: steps.invocation.outputs.mode != 'smoke_readonly' && steps.close_reuse.outputs.reuse != 'true'
         working-directory: compute
         shell: bash
         env:
@@ -614,7 +638,7 @@ jobs:
           PY
 
       - name: Rebuild private Store inventory
-        if: steps.invocation.outputs.mode != 'smoke_readonly'
+        if: steps.invocation.outputs.mode != 'smoke_readonly' && steps.close_reuse.outputs.reuse != 'true'
         working-directory: compute
         run: >-
           python scripts/build_market_data_inventory.py
@@ -624,7 +648,7 @@ jobs:
 
       - name: Build Store publication manifest
         id: publication
-        if: steps.invocation.outputs.mode != 'smoke_readonly'
+        if: steps.invocation.outputs.mode != 'smoke_readonly' && steps.close_reuse.outputs.reuse != 'true'
         working-directory: compute
         shell: bash
         run: |
@@ -638,7 +662,7 @@ jobs:
           echo "publication_manifest_path=$manifest_path" >> "$GITHUB_OUTPUT"
 
       - name: Persist private Store only
-        if: steps.invocation.outputs.mode != 'smoke_readonly'
+        if: steps.invocation.outputs.mode != 'smoke_readonly' && steps.close_reuse.outputs.reuse != 'true'
         working-directory: store
         shell: bash
         env:
@@ -704,7 +728,7 @@ jobs:
           PRIVATE_SCRIPT
 
       - name: Verify durable Store publication
-        if: steps.invocation.outputs.mode != 'smoke_readonly'
+        if: steps.invocation.outputs.mode != 'smoke_readonly' && steps.close_reuse.outputs.reuse != 'true'
         working-directory: store
         shell: bash
         env:
