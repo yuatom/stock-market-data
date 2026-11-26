@@ -14,6 +14,52 @@ def test_hosted_route_has_bounded_owner_and_private_grant_entrypoints():
     assert callable(H.run_route) and callable(H.validate_runtime_surface)
 
 
+@pytest.mark.parametrize('scenario', ['split', 'source-denied', 'authority-absent'])
+def test_scheduled_release_reader_routes_only_dairy_and_preserves_holds(tmp_path, scenario):
+    H,store,api,env,_,_,_,commitment,now,capture=hosted_case(tmp_path)
+    calls=[]; release_get=[]; readership=[]; actions=api.request
+    output=tmp_path/'owner.json'
+    head=store.head()
+    def actions_without_release(method,path,payload=None,**kwargs):
+        assert path!=H.REPORT_RELEASE_PATH
+        return actions(method,path,payload,**kwargs)
+    api.request=actions_without_release
+    if scenario=='authority-absent':
+        original=store.remote_ref
+        store.remote_ref=lambda ref:None if '/basis-daily-authority/' in ref else original(ref)
+    class ReleaseOnly:
+        def request(self,method,path):
+            assert (method,path)==('GET',H.REPORT_RELEASE_PATH)
+            release_get.append(path)
+            if scenario=='source-denied':raise PermissionError('synthetic source access denied')
+            return actions(method,path)
+    def make_release_reader():
+        readership.append(True)
+        return ReleaseOnly()
+    # A valid grant without today's slot still exercises full readiness
+    # but must not acquire data, debit Store, or dispatch a private job.
+    day='2026-11-10'
+    if scenario=='split':
+        day='2026-11-11'
+        now=datetime(2026,11,11,12,0,5,tzinfo=timezone.utc)
+    kwargs=dict(store=store,api=api,compute=tmp_path,compute_sha='a'*40,commitment=commitment,
+        trade_date=day,env=env,key='unused',access={},delegation_output=output,
+        clock=lambda:now,capture=capture(calls=calls),release_reader_factory=make_release_reader)
+    if scenario=='source-denied':
+        with pytest.raises(H.HostedDailyError):H.run_route(**kwargs)
+        assert readership==[True] and release_get==[H.REPORT_RELEASE_PATH]
+        assert not calls and not api.posts and not output.exists() and store.head()==head
+    elif scenario=='authority-absent':
+        assert H.run_route(**kwargs)=='FINITE_DAILY_BASIS_HELD'
+        assert not readership and not release_get and not calls and not api.posts and store.head()==head
+        assert B._parse(output.read_bytes())['status']=='ACQUISITION_HELD_AUTHORITY_UNAVAILABLE'
+    else:
+        assert H.run_route(**kwargs)=='FINITE_DAILY_BASIS_HELD'
+        assert readership==[True] and release_get==[H.REPORT_RELEASE_PATH]
+        assert not calls and not api.posts and store.head()==head
+        assert B._parse(output.read_bytes())['status']=='ACQUISITION_HELD_REVIEW_REQUIRED'
+
+
 def test_existing_collector_delegates_only_soxx_and_keeps_other_symbols(tmp_path):
     import market_data_collectors as C
     config={'collector':{'budgets':{'twelve_data_basic':{'hard_credits_per_day':200,'hard_credits_per_minute':8}},'twelve_data_daily':{'history_outputsize':500,'bootstrap_minimum_records':256}}}
@@ -123,6 +169,8 @@ def test_shared_workflow_runs_daily_owner_before_legacy_collection():
     assert 'DAILY_BASIS_DELEGATION_FILE:' in text
     assert 'DAILY_BASIS_GRANT_COMMITMENT:' in text
     assert 'name: Materialize verified daily Store base' in text
+    scheduled_step=text.split('name: Run finite daily basis owner',1)[1].split('name: Materialize verified daily Store base',1)[0]
+    assert 'MARKET_DATA_SOURCE_TOKEN: ${{ secrets.MARKET_DATA_SOURCE_TOKEN }}' in scheduled_step
 
 
 def test_real_module_cli_imports_without_test_only_scripts_pythonpath():
