@@ -132,13 +132,34 @@ def push_exact(root: Path, base: str, candidate: str, *, attempts: int = 3,
     raise StorePushError(last_error)
 
 
+def verify_exact_output_closure(root: Path, base: str, candidate: str, manifest_path: str) -> None:
+    """Ordinary repairs cannot proceed with missing or unbound candidate artifacts."""
+    from verify_store_publication import StorePublicationError, _verify_required_manifest
+    if not SHA.fullmatch(base) or not SHA.fullmatch(candidate):
+        raise StorePushError("STORE_INVALID_EXACT_IDENTITY")
+    if (not manifest_path.startswith("data/market-data/collector-state/")
+            or ".." in Path(manifest_path).parts):
+        raise StorePushError("STORE_MANIFEST_PATH_INVALID")
+    try:
+        required = _verify_required_manifest(root, candidate, manifest_path)
+    except StorePublicationError as exc:
+        raise StorePushError("STORE_MANIFEST_OUTPUT_INVALID") from exc
+    changed = git_command(root, "diff", "--name-only", "-z", base, candidate)
+    paths = {p for p in changed.stdout.split("\0") if p}
+    if changed.returncode != 0 or paths != {manifest_path, *(r["path"] for r in required)}:
+        raise StorePushError("STORE_MANIFEST_OUTPUT_SCOPE_MISMATCH")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--store-root", type=Path, required=True)
     parser.add_argument("--base", required=True)
     parser.add_argument("--candidate", required=True)
+    parser.add_argument("--required-manifest")
     args = parser.parse_args()
     try:
+        if args.required_manifest is not None:
+            verify_exact_output_closure(args.store_root, args.base, args.candidate, args.required_manifest)
         result = push_exact(args.store_root, args.base, args.candidate)
     except StorePushError as exc:
         # Do not leak private payloads, credential URLs or raw git output.
