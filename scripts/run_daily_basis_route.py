@@ -24,6 +24,7 @@ import urllib.request
 from scripts import provider_basis_snapshot as B
 from scripts.daily_basis_updates import DailyUpdater,GrantAuthority,Candidate,provider_capture
 from scripts.daily_basis_delivery import verify_daily_delivery
+from scripts.scheduled_basis_readiness import probe as scheduled_readiness_probe, validate_scope as validate_scheduled_readiness
 from scripts.run_private_authority_route import _quiet,_source,_environment,SAFETY
 
 STORE='yuatom/stock-market-data-store'
@@ -33,6 +34,7 @@ DOMAIN=b'finite-daily-basis-authority:v1\0'
 CALLER='.github/workflows/market-data-collector.yml'
 VERIFIER='.github/workflows/basis-consumer-delivery.yml'
 STOP='FINITE_DAILY_BASIS_STOPPED_INSPECT_NO_RETRY'
+SCOPED_MIN_CAPTURE_RUNWAY=timedelta(seconds=120)
 
 
 class HostedDailyError(RuntimeError):pass
@@ -152,13 +154,18 @@ def validate_authority_receipt(raw,commitment,compute_sha,*,now,allow_expired_ho
     value=B._parse(raw)
     B._closed(value,('schema_version','kind','compute_sha','consumer_sha','workflow_source_sha','grant_ref',
         'calendar_ref','nonce','valid_from','valid_until','actions_free_until','readiness_run_id',
-        'repository_id','owner_id','runtime_workflow_id','trigger_kind','schedule','old_writers_drained'))
+        'repository_id','owner_id','runtime_workflow_id','trigger_kind','schedule','old_writers_drained')+(('readiness',) if 'readiness' in value else ()))
     need(value['schema_version']==1 and value['kind']=='finite_daily_basis_authority' and
          authority_commitment(raw)==B._hex(commitment,64) and value['compute_sha']==B._hex(compute_sha))
     for key in ('consumer_sha','workflow_source_sha'):B._hex(value[key])
     B._hex(value['nonce'],64);need(value['nonce']!='0'*64)
     need(value['trigger_kind']=='schedule' and value['schedule']=='5 7 * * 1-5' and value['old_writers_drained'] is True)
-    for key in ('readiness_run_id','repository_id','owner_id','runtime_workflow_id'):need(type(value[key]) is int and value[key]>0)
+    for key in ('repository_id','owner_id','runtime_workflow_id'):need(type(value[key]) is int and value[key]>0)
+    if 'readiness' in value:
+        need(value['readiness_run_id'] is None)
+        ready_until=validate_scheduled_readiness(value['readiness'])
+        need(B._stamp(value['valid_from'])<ready_until<=B._stamp(value['valid_until']))
+    else:need(type(value['readiness_run_id']) is int and value['readiness_run_id']>0)
     instant=B._stamp(now)
     need(type(allow_expired_hold) is bool and B._stamp(value['valid_from'])<=instant and B._stamp(value['valid_from'])<B._stamp(value['valid_until'])<=B._stamp(value['actions_free_until']))
     need(instant<B._stamp(value['valid_until']) or allow_expired_hold)
@@ -220,7 +227,7 @@ def report_release_reader(env):
     return ReportReleaseReader(env.get('MARKET_DATA_SOURCE_TOKEN',''))
 
 
-def check_private_readiness(api,store,authority,grant,*,now,release_api=None):
+def validate_private_target(api,store,authority,grant,*,now,release_api=None,verify_ready=False):
     repository=readiness_call('READINESS_REPOSITORY',api.request,'GET','/repos/'+STORE)
     need(repository.get('private') is True and repository.get('id')==grant['repository_id']==authority['repository_id'] and
          repository.get('full_name')==STORE and repository['owner']['id']==grant['owner_id']==authority['owner_id'])
@@ -228,15 +235,16 @@ def check_private_readiness(api,store,authority,grant,*,now,release_api=None):
     # This does not expand scopes. A fine-grained token lacking dispatch access
     # remains a deployment blocker, not a reason to provision a new credential.
     need(readiness_call('READINESS_TOKEN_IDENTITY',api.request,'GET','/user')['id']==grant['owner_id'])
-    need(readiness_call('READINESS_DISPATCH_CAPABILITY',api.dispatch_capability,grant['workflow_id']))
+    if verify_ready:need(readiness_call('READINESS_DISPATCH_CAPABILITY',api.dispatch_capability,grant['workflow_id']))
     workflow=readiness_call('READINESS_WORKFLOW',api.request,'GET','/repos/'+STORE+'/actions/workflows/'+str(grant['workflow_id']))
     need(workflow.get('id')==grant['workflow_id'] and workflow.get('path')==VERIFIER and workflow.get('state')=='active')
     need(readiness_call('READINESS_SOURCE_REF',store.remote_ref,'refs/heads/basis-consumer-delivery/'+grant['workflow_source_sha'])==grant['workflow_source_sha'])
-    ready=readiness_call('READINESS_SUCCESS_RUN',api.request,'GET','/repos/'+STORE+'/actions/runs/'+str(authority['readiness_run_id']))
-    need(ready.get('workflow_id')==grant['workflow_id'] and ready.get('head_sha')==grant['workflow_source_sha'] and
-         ready.get('path')==VERIFIER and ready.get('status')=='completed' and ready.get('conclusion')=='success' and
-         ready.get('run_attempt')==1 and ready.get('event')=='workflow_dispatch' and
-         ready['actor']['id']==ready['triggering_actor']['id']==grant['owner_id'])
+    if verify_ready:
+        ready=readiness_call('READINESS_SUCCESS_RUN',api.request,'GET','/repos/'+STORE+'/actions/runs/'+str(authority['readiness_run_id']))
+        need(ready.get('workflow_id')==grant['workflow_id'] and ready.get('head_sha')==grant['workflow_source_sha'] and
+             ready.get('path')==VERIFIER and ready.get('status')=='completed' and ready.get('conclusion')=='success' and
+             ready.get('run_attempt')==1 and ready.get('event')=='workflow_dispatch' and
+             ready['actor']['id']==ready['triggering_actor']['id']==grant['owner_id'])
     release=readiness_call('READINESS_CONSUMER_RELEASE',(api if release_api is None else release_api).request,'GET',REPORT_RELEASE_PATH)
     need(release.get('type')=='file' and release.get('path')=='state/runtime-release.json' and release.get('encoding')=='base64')
     raw=base64.b64decode(release['content'].replace('\n',''),validate=True)
@@ -245,14 +253,20 @@ def check_private_readiness(api,store,authority,grant,*,now,release_api=None):
     return repository
 
 
-def fetch_delivery(api,updater,candidate,run_id,*,now,repository,runner_expectation=None):
+def check_private_readiness(api,store,authority,grant,*,now,release_api=None):
+    return validate_private_target(api,store,authority,grant,now=now,release_api=release_api,verify_ready=True)
+
+
+def fetch_delivery(api,updater,candidate,run_id,*,now,repository,runner_expectation=None,read_only=False):
     run=api.request('GET','/repos/'+STORE+'/actions/runs/'+str(run_id))
     jobs=api.request('GET','/repos/'+STORE+'/actions/runs/'+str(run_id)+'/jobs?per_page=2')
     need(jobs.get('total_count')==1 and len(jobs.get('jobs',[]))==1)
     if runner_expectation is not None:
         B._closed(runner_expectation,('runner_id','runner_name','labels','expires'))
         job=jobs['jobs'][0]
-        need(job['runner_id']==runner_expectation['runner_id'] and job['runner_name']==runner_expectation['runner_name'] and set(job['labels'])==set(runner_expectation['labels']) and B._stamp(now)<B._stamp(runner_expectation['expires']))
+        expires=B._stamp(runner_expectation['expires'])
+        need(job['runner_id']==runner_expectation['runner_id'] and job['runner_name']==runner_expectation['runner_name'] and set(job['labels'])==set(runner_expectation['labels']))
+        need(B._stamp(job['completed_at'])<expires and (read_only or B._stamp(now)<expires))
     log=api.job_log(jobs['jobs'][0]['id'])
     expectation=updater.delivery_expectation(candidate,run_id=run_id,for_read=True)
     return verify_daily_delivery(expectation,repository,run,jobs,log,now=now)
@@ -356,8 +370,10 @@ def run_route(*,store,api,compute,compute_sha,commitment,trade_date,env,key,acce
             # Do not require or construct the isolated reader for an absent or
             # exhausted optional authority. Once authorized, fail closed on
             # the fixed Diary GET; never retry it with the Store/Actions token.
-            release_api=release_reader_factory() if release_reader_factory is not None else None
-            repository=check_private_readiness(api,store,authority,grant,now=clock().isoformat(),release_api=release_api)
+            scoped='readiness' in authority
+            if not scoped:
+                release_api=release_reader_factory() if release_reader_factory is not None else None
+                repository=check_private_readiness(api,store,authority,grant,now=clock().isoformat(),release_api=release_api)
             auth=GrantAuthority(B.sha(grant_raw),compute_sha,authority['consumer_sha'],authority['workflow_source_sha'],B.sha(calendar_raw))
             updater=DailyUpdater(store,grant_raw,calendar_raw,auth,clock=clock)
             request_id=env['GITHUB_RUN_ID']+'-1'
@@ -374,10 +390,33 @@ def run_route(*,store,api,compute,compute_sha,commitment,trade_date,env,key,acce
                 except Exception:
                     _save_private(delegation_output,_delegation(updater,binding,trade_date=trade_date,request_id=request_id,status='ACQUISITION_HELD_PENDING_INITIAL_BASIS',selector=None))
                     return 'FINITE_DAILY_BASIS_HELD'
+            runner_expectation=None
+            def hold_before_provider():
+                state='ACQUISITION_HELD_GRANT_EXHAUSTED' if clock()>=B._stamp(authority['valid_until']) else 'ACQUISITION_HELD_REVIEW_REQUIRED'
+                return scope_hold(state,binding=binding,grant_digest=updater.digest)
+            if scoped:
+                try:
+                    release_api=release_reader_factory() if release_reader_factory is not None else None
+                    repository=validate_private_target(api,store,authority,grant,now=clock().isoformat(),release_api=release_api)
+                    _,head,_,prior,_=updater.preflight_slot(slot['slot_id'],request_id)
+                    ready_id,runner_expectation=scheduled_readiness_probe(api=api,store=store,
+                        scope=authority['readiness'],grant=grant,slot=slot,prior=prior,head=head,
+                        request_id=request_id,repository=repository,compute_sha=compute_sha,clock=clock)
+                    repository=check_private_readiness(api,store,{**authority,'readiness_run_id':ready_id},
+                        grant,now=clock().isoformat(),release_api=release_api)
+                    need(store.head()==head and clock()+SCOPED_MIN_CAPTURE_RUNWAY<B._stamp(runner_expectation['expires']))
+                except Exception:
+                    # The proof path does not debit or request the provider. A
+                    # scoped failure delegates only SOXX to hold, never fallback.
+                    return hold_before_provider()
             if source_check:source_check()
             wait_for_daily_budget_window(updater,slot,clock=clock)
+            if scoped and (store.head()!=head or clock()+SCOPED_MIN_CAPTURE_RUNWAY>=B._stamp(runner_expectation['expires'])):
+                return hold_before_provider()
             candidate=updater.run_slot(slot['slot_id'],request_id,capture=capture or provider_capture(key,access))
-            verified=dispatch_verify_once(api,updater,candidate,repository=repository,clock=clock)
+            verified=dispatch_verify_once(api,updater,candidate,repository=repository,clock=clock,
+                **({'runner_expectation':runner_expectation} if scoped else {}))
+            if scoped:need(clock()<B._stamp(runner_expectation['expires']))
             if source_check:source_check()
             updater.promote(candidate,verified);updater.read_current(verified,fields=('close',))
             _save_private(delegation_output,_delegation(updater,binding,trade_date=trade_date,request_id=request_id,status='OWNED_IMMUTABLE_DAILY',selector=candidate.selector))
@@ -385,7 +424,7 @@ def run_route(*,store,api,compute,compute_sha,commitment,trade_date,env,key,acce
     except Exception:raise HostedDailyError(STOP) from None
 
 
-def current_delivery(*,store,api,compute_sha,commitment,clock=lambda:datetime.now(timezone.utc)):
+def current_delivery(*,store,api,compute_sha,commitment,clock=lambda:datetime.now(timezone.utc),release_api=None):
     """Read-only current mapping for the actual consumer, no provider/dispatch.
 
     Every invocation freshly authenticates repository/run/jobs/log responses and
@@ -393,7 +432,13 @@ def current_delivery(*,store,api,compute_sha,commitment,clock=lambda:datetime.no
     """
     with store.lock():
         authority,gr,cal,binding=read_authority(store,commitment,compute_sha,now=clock().isoformat())
-        g=B._parse(gr);repository=check_private_readiness(api,store,authority,g,now=clock().isoformat())
+        g=B._parse(gr); scoped='readiness' in authority
+        # Readers don't prove Actions write or replay readiness; the exact,
+        # independently authenticated final verification below is the proof.
+        if scoped:
+            repository=validate_private_target(api,store,authority,g,now=clock().isoformat(),release_api=release_api)
+        else:
+            repository=check_private_readiness(api,store,authority,g,now=clock().isoformat(),release_api=release_api)
         updater=DailyUpdater(store,gr,cal,GrantAuthority(B.sha(gr),compute_sha,g['consumer_sha'],g['workflow_source_sha'],B.sha(cal)),clock=clock)
         catalog=B._parse(store.read(store.head(),'data/market-data/series-active/daily/twelve_data_basic/SOXX.json'))
         found=[]
@@ -412,7 +457,12 @@ def current_delivery(*,store,api,compute_sha,commitment,clock=lambda:datetime.no
         store.g.single_addition(oid,candidate.selector['read_sha'],mapping_path,store.g.normal_blob_identity(oid,mapping_path))
         need(B._stamp(slot['valid_from'])<=B._stamp(mapping['dispatched_at'])<B._stamp(slot['valid_until']))
         for ref in (updater._candidate_ref(slot),updater._attempt_ref(slot),updater._verification_ref(slot),candidate.receipt_ref):store.materialize_ref(ref)
-        verified=fetch_delivery(api,updater,candidate,mapping['run_id'],now=clock().isoformat(),repository=repository)
+        final_gate={}
+        if scoped:
+            readiness=authority['readiness']
+            final_gate={'runner_expectation':{key:readiness[key] for key in ('runner_id','runner_name','labels','expires')},
+                'read_only':True}
+        verified=fetch_delivery(api,updater,candidate,mapping['run_id'],now=clock().isoformat(),repository=repository,**final_gate)
         need(B._stamp(mapping['dispatched_at'])<=B._stamp(verified.verified_at))
         view=updater.read_current(verified,fields=tuple(B.PRICE_FIELDS))
         return dict(selector=dict(candidate.selector,read_sha=view['read_sha']),admitted_selector=candidate.selector,receipt_commitment=candidate.receipt_commitment,compute_sha=compute_sha,consumer_sha=g['consumer_sha'],grant_sha256=updater.digest,slot_id=candidate.slot_id,receipt_ref=candidate.receipt_ref,receipt_commit=candidate.receipt_commit,receipt_blob_sha=candidate.receipt_blob_sha,grant_ref=authority['grant_ref'],calendar_ref=authority['calendar_ref'],authority_binding=binding,grant_raw=gr,calendar_raw=cal,verified_run_id=verified.run_id,verified_at=verified.verified_at,valid_until=candidate.receipt_until,current_store_sha=store.head(),calendar=B._parse(cal),view=view,volume_policy='BLOCKED_UNRESOLVED')
