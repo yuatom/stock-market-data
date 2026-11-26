@@ -322,7 +322,8 @@ def wait_for_daily_budget_window(updater,slot,*,clock,sleep=time.sleep,monotonic
 
 
 def run_route(*,store,api,compute,compute_sha,commitment,trade_date,env,key,access,
-              delegation_output,clock=lambda:datetime.now(timezone.utc),capture=None,source_check=None):
+              delegation_output,clock=lambda:datetime.now(timezone.utc),capture=None,source_check=None,
+              release_reader_factory=None):
     """One finite approved slot inside the existing shared collector owner.
 
     store is the concrete RemoteGitStore in the official CLI. Injected local
@@ -352,7 +353,11 @@ def run_route(*,store,api,compute,compute_sha,commitment,trade_date,env,key,acce
             validate_runtime_surface(env,authority,run,compute_sha=compute_sha,trade_date=trade_date)
             if clock()>=B._stamp(authority['valid_until']):
                 return scope_hold('ACQUISITION_HELD_GRANT_EXHAUSTED',binding=binding,grant_digest=B.sha(grant_raw))
-            repository=check_private_readiness(api,store,authority,grant,now=clock().isoformat())
+            # Do not require or construct the isolated reader for an absent or
+            # exhausted optional authority. Once authorized, fail closed on
+            # the fixed Diary GET; never retry it with the Store/Actions token.
+            release_api=release_reader_factory() if release_reader_factory is not None else None
+            repository=check_private_readiness(api,store,authority,grant,now=clock().isoformat(),release_api=release_api)
             auth=GrantAuthority(B.sha(grant_raw),compute_sha,authority['consumer_sha'],authority['workflow_source_sha'],B.sha(calendar_raw))
             updater=DailyUpdater(store,grant_raw,calendar_raw,auth,clock=clock)
             request_id=env['GITHUB_RUN_ID']+'-1'
@@ -436,7 +441,9 @@ def main(argv=None):
                 need(run['actor']['id']==run['triggering_actor']['id']==repository['owner']['id'] and run['head_sha']==args.compute_sha and run['path']==CALLER and run['event']=='schedule' and run['run_attempt']==1 and run['status']=='in_progress')
             platform_guard()
             store=RemoteGitStore(Path(args.store),token,source_recheck=source_check,platform_guard=platform_guard)
-            status=run_route(store=store,api=api,compute=compute,compute_sha=args.compute_sha,commitment=commitment,trade_date=args.trade_date,env=dict(os.environ),key=key,access=yaml.safe_load((compute/'config/market-data-collector-access.yaml').read_text()),delegation_output=args.delegation_output,source_check=source_check)
+            status=run_route(store=store,api=api,compute=compute,compute_sha=args.compute_sha,commitment=commitment,trade_date=args.trade_date,env=dict(os.environ),key=key,access=yaml.safe_load((compute/'config/market-data-collector-access.yaml').read_text()),
+                delegation_output=args.delegation_output,source_check=source_check,
+                release_reader_factory=lambda:report_release_reader(os.environ))
         print(status);return 0
     except Exception:print(STOP);return 2
 
