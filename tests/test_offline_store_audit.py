@@ -34,6 +34,111 @@ class OfflineAuditTest(unittest.TestCase):
         subprocess.run(['/usr/bin/git','-C',str(self.repo),'add','.'],check=True)
         subprocess.run(['/usr/bin/git','-C',str(self.repo),'-c','user.name=fixture','-c','user.email=fixture@example.invalid','commit','-qm','fixture'],check=True)
         self.sha=subprocess.check_output(['/usr/bin/git','-C',str(self.repo),'rev-parse','HEAD'],text=True).strip()
+    def test_deferred_conflict_split_validates_immutable_evidence_without_failure(self):
+        import offline_store_audit as audit
+        old = {'trade_date':'2026-11-03','open':1,'high':2,'low':1,'close':2,'volume':5}
+        revised = dict(old, high=2.001)
+        target = dict(old, trade_date='2026-11-04')
+        trade_date = '2026-11-05'
+        root = self.repo/'data/market-data'
+        packet = {'kind':'normalized_daily_price_only_evidence','symbol':'AMD',
+                  'execution_day':trade_date,'volume_policy':'BLOCKED_UNRESOLVED',
+                  'records':[revised,target]}
+        payload = store.canonical_bytes(packet)
+        digest = hashlib.sha256(payload).hexdigest()
+        rel = 'collector-state/2026-11/price-only-'+digest+'.json'
+        (root/rel).write_bytes(payload)
+        access={'twelve_data_basic':{'base_url':'https://example.invalid',
+                                    'time_series_path':'/time_series','interval_daily':'1day'}}
+        record=collectors._conflict_record(store_root=root, symbol='AMD',old=old,new=revised,
+            outputsize=10,effective_date=None,trade_date=trade_date,access=access)
+        record.update(disposition='deferred_preserve_prior_prices',appended_trade_date=target['trade_date'],
+                      normalized_evidence_path=rel,normalized_evidence_sha256=digest)
+        path=self.conflict.replace('2026-11-04-previous_session','2026-11-05-previous_session')
+        diagnostic=dict(self.diagnostic,trade_date=trade_date,failure_target_count=0,
+                        conflicts=[record],deferred_historical_revision_count=1,
+                        unresolved_historical_revision_count=0)
+        def validate():
+            (self.repo/path).write_text(json.dumps(diagnostic))
+            self.commit()
+            return audit.audit(self.repo,self.sha,trade_date,target['trade_date'],['AMD'],path)
+        with self.assertRaisesRegex(audit.AuditError, 'published deferral'):
+            validate()
+        store.append_daily_bars(root,provider='twelve_data_basic',symbol='AMD',asset_class='stocks',
+                                series_semantics='daily_regular_ohlcv',bars=[target])
+        out=validate()
+        self.assertEqual((out['deferred_conflict_count'],out['unresolved_conflict_count']),(1,0))
+        self.assertNotIn('records',out)
+        self.assertNotIn('normalized_evidence_path',json.dumps(out))
+        # Recompute the shard/index hashes, so these are semantically wrong
+        # committed rows rather than generic untrusted-object rejections.
+        series = root/'series/daily/twelve_data_basic/AMD'
+        idxpath = series/'_index.json'
+        idx0 = json.loads(idxpath.read_bytes())
+        shard = series/idx0['shards'][0]['path']
+        doc0 = json.loads(shard.read_bytes())
+        def rewrite_row(number, **changes):
+            idx = json.loads(json.dumps(idx0))
+            doc = json.loads(json.dumps(doc0))
+            doc['records'][number].update(changes)
+            store._write_json(shard, doc)
+            oldmeta = idx['shards'][0]
+            idx['shards'][0] = store._shard_meta(oldmeta['path'], oldmeta['start'], doc, oldmeta['sealed'])
+            store._write_json(idxpath, idx)
+        rewrite_row(1, close=1.5)
+        with self.assertRaisesRegex(audit.AuditError, 'published deferral'):
+            validate()
+        rewrite_row(0, high=2.01)
+        with self.assertRaisesRegex(audit.AuditError, 'published deferral'):
+            validate()
+        rewrite_row(1, volume=99)  # Target volume independently blocked and not audited as price.
+        self.assertEqual(validate()['deferred_conflict_count'], 1)
+        diagnostic['deferred_historical_revision_count']=0
+        with self.assertRaises(audit.AuditError): validate()
+        diagnostic['deferred_historical_revision_count']=1
+        record['normalized_evidence_sha256']='0'*64
+        with self.assertRaises(audit.AuditError): validate()
+
+    def test_real_daily_writer_positive_audits_symbol_outside_display_scope(self):
+        import os
+        from unittest.mock import patch
+        import yaml
+        import offline_store_audit as audit
+        trade_date = '2026-11-26'
+        days = ['2026-11-18','2026-11-19','2026-11-20','2026-11-23','2026-11-24','2026-11-25']
+        values = lambda day: {'trade_date':day,'open':10.0,'high':12.0,'low':9.0,'close':11.0,'volume':100.0}
+        old = [values(d) for d in days[:-1]]
+        root = self.repo/'data/market-data'
+        store.append_daily_bars(root,provider='twelve_data_basic',symbol='META',asset_class='stocks',
+                                series_semantics='daily_regular_ohlcv',bars=old)
+        self.commit()
+        source_sha = self.diagnostic['compute_sha']
+        config = yaml.safe_load((ROOT/'config/market-data-store.yaml').read_text())
+        access = yaml.safe_load((ROOT/'config/market-data-collector-access.yaml').read_text())
+        rows = [dict(old[0], high=12.01), *old[1:], values(days[-1])]
+        response = {'meta':{'symbol':'META','exchange':'NASDAQ','mic_code':'XNGS','type':'Common stock',
+                             'currency':'USD','interval':'1day','exchange_timezone':'America/New_York'},
+                    'values':[{'datetime':r['trade_date'], **{k:v for k,v in r.items() if k!='trade_date'}}
+                              for r in rows]}
+        with (patch.dict(os.environ, {'TWELVE_DATA_API_KEY':'fixture-only',
+                                     'MARKET_DATA_COMPUTE_SHA':source_sha,
+                                     'MARKET_DATA_STORE_INPUT_SHA':self.sha}, clear=True),
+              patch.object(collectors, '_daily_universe', return_value=[('META','stocks')]),
+              patch.object(collectors, '_http_json', return_value=response) as transport,
+              patch.object(collectors, 'wait_for_twelve_budget'),
+              patch.object(collectors, 'consume_twelve_credit')):
+            outcome=collectors.collect_previous_session_eod(trade_date=trade_date,store_root=root,
+                watchlist={},completeness={},config=config,access=access,verified_gap_sessions=frozenset())
+        self.assertEqual(transport.call_count, 1)
+        self.assertEqual(outcome['deferred_historical_revision_count'], 1)
+        self.commit()
+        path='data/market-data/'+outcome['result_state_path']
+        out=audit.audit(self.repo,self.sha,trade_date,days[-1],['AMD'],path)
+        self.assertEqual([entry['symbol'] for entry in out['series']], ['AMD'])
+        self.assertEqual(out['deferred_conflict_count'], 1)
+        with self.assertRaises(audit.AuditError):
+            audit.audit(self.repo,self.sha,trade_date,days[-2],['AMD'],path)
+
     def test_local_audit_positive_and_wrong_shard(self):
         import offline_store_audit as audit
         out=audit.audit(self.repo,self.sha,'2026-11-04','2026-11-03',['AMD'],self.conflict)
