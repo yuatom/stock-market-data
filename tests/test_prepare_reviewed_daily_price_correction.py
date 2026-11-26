@@ -8,6 +8,8 @@ import unittest
 from scripts import market_data_store as S
 from scripts import retained_verified_price_correction as P
 from scripts import prepare_reviewed_daily_price_correction as C
+from scripts.verify_store_publication import verify_publication
+from push_proof_store_commit import StorePushError, push_exact, verify_exact_output_closure
 
 
 def git(repo, *args):
@@ -141,3 +143,42 @@ class ReviewedCorrection(unittest.TestCase):
         pinned = self.evidence_source('twelve_data',revised)
         with self.assertRaisesRegex(P.CorrectionError,'unreviewed price revision'):
             self.candidate(replace(self.scope,retained=pinned))
+
+    def local_transport(self):
+        bare = self.repo.parent / 'synthetic-local-origin.git'
+        bare.mkdir()
+        git(bare, 'init', '--bare', '-q')
+        git(self.repo, 'remote', 'add', 'origin', str(bare))
+        git(self.repo, 'push', 'origin', self.base + ':refs/heads/main')
+        return bare
+
+    def test_shared_publisher_accepts_exact_candidate_and_authentic_store_reader(self):
+        bare = self.local_transport()
+        candidate,manifest = self.candidate()
+        git(self.repo,'checkout','--quiet','--detach',candidate)
+        self.assertEqual(C.verify_candidate(self.repo,self.evidence,self.scope,candidate,
+                                           authenticate=lambda s: s==self.scope),manifest)
+        verify_exact_output_closure(self.repo,self.base,candidate,manifest)
+        result = push_exact(self.repo,self.base,candidate,attempts=1)
+        self.assertEqual(result['status'],'store_push_verified')
+        self.assertEqual(result['push_attempts'],1)
+        receipt = verify_publication(self.repo,candidate,required_manifest=manifest)
+        self.assertEqual(receipt['status'],'durability_verified')
+        self.assertEqual(receipt['verified_changed_paths'],6)
+        self.assertEqual(len(receipt['verified_required_outputs']),5)
+        self.assertEqual(git(bare,'rev-parse','refs/tags/market-data-read/'+candidate).decode(),candidate)
+        self.assertEqual(S.read_daily_series(self.repo/C.ROOT,provider=C.VENDOR,symbol='AAA'),
+                         self.rows[:-1]+[dict(self.rows[-1],high=13.0)])
+
+    def test_shared_publisher_does_not_write_after_concurrent_main_advances(self):
+        bare = self.local_transport()
+        candidate,manifest = self.candidate()
+        tree = git(self.repo,'rev-parse',self.base+'^{tree}').decode()
+        concurrent = git(self.repo,'commit-tree',tree,'-p',self.base,'-m','external advancement').decode()
+        git(self.repo,'push','origin',concurrent+':refs/heads/main')
+        git(self.repo,'checkout','--quiet','--detach',candidate)
+        verify_exact_output_closure(self.repo,self.base,candidate,manifest)
+        with self.assertRaisesRegex(StorePushError,'STORE_REMOTE_MAIN_ADVANCED'):
+            push_exact(self.repo,self.base,candidate,attempts=1)
+        self.assertEqual(git(bare,'rev-parse','refs/heads/main').decode(),concurrent)
+        self.assertEqual(git(bare,'for-each-ref','--format=%(refname)','refs/tags'),b'')

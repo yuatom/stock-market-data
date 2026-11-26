@@ -35,3 +35,16 @@ current production ref and verified candidate; do not publish this candidate
 using special-case operators, cleartext provider labels, or direct file
 uploads. Publication requires exact CAS semantics at the original base,
 manifest and durable Store readback, and runtime consumer verification.
+
+## Reusable publisher boundary
+
+The existing `push_proof_store_commit` and `verify_store_publication` can
+transport this exact format; they do not authenticate the operator or the
+evidence. In an isolated owner checkout, first authenticate the actual
+execution surface and repository, verify the approved candidate with the
+immutable scope, check out that exact commit with no edits, check the exact
+output closure, and use `push_exact(..., attempts=1)` followed by
+`verify_publication(..., required_manifest=...)`. A differing live base,
+unconfirmed receipt, or changed source stops the attempt; do not repin,
+force-push or retry automatically. This composition is tested with temporary
+local Git repositories only. No production caller is included in this draft.
