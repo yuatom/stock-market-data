@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+from datetime import date
 import json
 import os
 import re
@@ -229,6 +231,85 @@ def _verify_required_manifest(root: Path, commit: str, manifest_path: str) -> li
     return verified
 
 
+def _compute_checkout_sha() -> str | None:
+    """Read actual Compute checkout identity and require exact executed source bytes."""
+    try:
+        compute = Path(__file__).resolve().parents[1]
+        commit = _git(compute, "rev-parse", "--verify", "HEAD^{commit}").stdout.strip()
+        if not SHA_RE.fullmatch(commit):
+            return None
+        for name in ("scripts/verify_store_publication.py", "scripts/push_proof_store_commit.py"):
+            path = compute / name
+            if path.is_symlink() or path.stat().st_size > 256 * 1024:
+                return None
+            raw = path.read_bytes()
+            blob = hashlib.sha1(b"blob " + str(len(raw)).encode("ascii") + b"\0" + raw).hexdigest()
+            if _git(compute, "rev-parse", f"{commit}:{name}").stdout.strip() != blob:
+                return None
+        return commit
+    except (OSError, StorePublicationError):
+        return None
+
+
+def _capture_availability_commitment(
+    root: Path, commit: str, durable_ref: str, manifest_path: str | None,
+    verified_outputs: list[dict[str, str]], changed: list[tuple[str, str]], status: str,
+    compute_checkout: str,
+) -> str | None:
+    """Optional success-only egress value; runner environment is not a signature."""
+    if (status != "store_persisted" or manifest_path is None or not verified_outputs
+            or changed.count(("A", manifest_path)) != 1):
+        return None
+    keys = ("GITHUB_REPOSITORY", "GITHUB_EVENT_NAME", "GITHUB_REF", "GITHUB_SHA",
+            "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_JOB")
+    host = {key: os.environ.get(key, "") for key in keys}
+    if (os.environ.get("GITHUB_ACTIONS") != "true"
+            or host["GITHUB_REPOSITORY"] != "yuatom/stock-market-data"
+            or host["GITHUB_EVENT_NAME"] != "push"
+            or host["GITHUB_REF"] != "refs/heads/collector-requests"
+            or host["GITHUB_JOB"] != "collect"
+            or not SHA_RE.fullmatch(host["GITHUB_SHA"])
+            or any(not re.fullmatch(r"[1-9][0-9]{0,19}", host[key])
+                   for key in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"))):
+        return None
+    try:
+        blob = _git(root, "rev-parse", f"{commit}:{manifest_path}").stdout.strip()
+        if not SHA_RE.fullmatch(blob):
+            return None
+        raw = _git(root, "cat-file", "blob", blob).stdout.encode("utf-8")
+        if hashlib.sha1(b"blob " + str(len(raw)).encode("ascii") + b"\0" + raw).hexdigest() != blob:
+            return None  # do not hash a translated or otherwise incomplete representation
+        def no_duplicates(pairs):
+            keys = [name for name, _ in pairs]
+            if len(keys) != len(set(keys)):
+                raise ValueError("duplicate keys")
+            return dict(pairs)
+        manifest = json.loads(raw, object_pairs_hook=no_duplicates)
+        request = manifest["request_id"]
+        day = date.fromisoformat(manifest["trade_date"]).isoformat()
+        if (not isinstance(request, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", request)
+                or manifest["stage"] != "premarket"):
+            return None
+        prefix = f"data/market-data/collector-state/{day[:7]}/{day}-premarket-"
+        token = hashlib.sha256(request.encode("ascii")).hexdigest()[:16]
+        if manifest_path != prefix + token + "-publication.json":
+            return None
+        snap_prefix = f"data/market-data/snapshots/{day[:7]}/{day}/premarket/"
+        immutable_snapshot = [item for item in verified_outputs if re.fullmatch(
+            re.escape(snap_prefix) + r"premarket-[0-9]{6}-et[.]json", item["path"])]
+        if len(immutable_snapshot) != 1:
+            return None
+        proof = dict(store_commit=commit, retention_ref=durable_ref, request_id=request,
+                     manifest_path=manifest_path, manifest_blob=blob,
+                     manifest_sha256=hashlib.sha256(raw).hexdigest(), snapshot=immutable_snapshot[0],
+                     compute_checkout=compute_checkout,
+                     workflow_attempt=host)
+        material = json.dumps(proof, sort_keys=True, separators=(",", ":")).encode("ascii")
+        return hashlib.sha256(b"stock-market-data/capture-availability/v2\0" + material).hexdigest()
+    except (StorePublicationError, UnicodeError, ValueError, TypeError, KeyError):
+        return None  # Optional proof must never cause a second attempt or change native outcome.
+
+
 def verify_publication(
     root: Path,
     expected_commit: str,
@@ -236,10 +317,12 @@ def verify_publication(
     remote: str = "origin",
     status: str = "store_persisted",
     required_manifest: str | None = None,
+    capture_availability_commitment: bool = False,
 ) -> dict[str, object]:
     if not SHA_RE.fullmatch(expected_commit):
         raise StorePublicationError("expected commit must be 40-char lowercase hex")
 
+    compute_checkout = _compute_checkout_sha() if capture_availability_commitment and remote == "origin" else None
     local_head = _git(root, "rev-parse", "HEAD").stdout.strip()
     if local_head != expected_commit:
         raise StorePublicationError(
@@ -290,7 +373,7 @@ def verify_publication(
     _ensure_retention_ref(root, remote, expected_commit, durable_ref, transport)
     transport.remaining()
 
-    return {
+    receipt: dict[str, object] = {
         "status": "durability_verified",
         "writer_status": status,
         "store_commit_sha": expected_commit,
@@ -300,6 +383,13 @@ def verify_publication(
         "verified_non_deleted_blob_paths": verified_blob_count,
         "verified_required_outputs": verified_required_outputs,
     }
+    if compute_checkout is not None and compute_checkout == _compute_checkout_sha():
+        proof = _capture_availability_commitment(
+            root, expected_commit, durable_ref, required_manifest, verified_required_outputs, changed, status,
+            compute_checkout)
+        if proof is not None:
+            receipt["capture_availability_commitment"] = proof
+    return receipt
 
 
 def main() -> int:
@@ -309,6 +399,7 @@ def main() -> int:
     parser.add_argument("--remote", default="origin")
     parser.add_argument("--writer-status", default="store_persisted")
     parser.add_argument("--required-manifest")
+    parser.add_argument("--emit-capture-availability-commitment", action="store_true")
     args = parser.parse_args()
 
     try:
@@ -318,11 +409,17 @@ def main() -> int:
             remote=args.remote,
             status=args.writer_status,
             required_manifest=args.required_manifest,
+            capture_availability_commitment=args.emit_capture_availability_commitment,
         )
     except StorePublicationError as exc:
         print(json.dumps({"status": "store_publication_failed", "reason": safe_failure_reason(str(exc))}), file=sys.stderr)
         return 1
-    print(json.dumps(receipt, sort_keys=True))
+    if args.emit_capture_availability_commitment:
+        proof = receipt.get("capture_availability_commitment")
+        if isinstance(proof, str) and re.fullmatch(r"[0-9a-f]{64}", proof):
+            print("CAPTURE_AVAILABILITY_V2 " + proof)
+    else:
+        print(json.dumps(receipt, sort_keys=True))
     return 0
 
 

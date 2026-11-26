@@ -52,21 +52,95 @@ def clone_private_store(destination,token):
     if raw.returncode or b'extraheader' in raw.stdout.lower() or token.encode() in raw.stdout:raise ValueError()
 
 
+def verify_capture_availability(path, manifest, env):
+    """Only fixed native Verify may pass one opaque line; no general stdout."""
+    expected_host={
+        'GITHUB_ACTIONS':'true','GITHUB_REPOSITORY':'yuatom/stock-market-data',
+        'GITHUB_EVENT_NAME':'push','GITHUB_REF':'refs/heads/collector-requests','GITHUB_JOB':'collect',
+    }
+    if (any(env.get(k)!=v for k,v in expected_host.items())
+            or not re.fullmatch('[0-9a-f]{40}',env.get('GITHUB_SHA',''))
+            or any(not re.fullmatch('[1-9][0-9]{0,19}',env.get(k,''))
+                   for k in ('GITHUB_RUN_ID','GITHUB_RUN_ATTEMPT'))
+            or not re.fullmatch(r'collector-state/[0-9]{4}-[0-9]{2}/'
+                                r'[0-9]{4}-[0-9]{2}-[0-9]{2}-premarket-[0-9a-f]{16}-publication[.]json',
+                                manifest)):
+        raise ValueError()
+    head=subprocess.run(['git','rev-parse','HEAD'],cwd=path,capture_output=True,env=env,timeout=30)
+    if head.returncode or not re.fullmatch(rb'[0-9a-f]{40}\n',head.stdout):
+        raise ValueError()
+    command=[sys.executable,'-B',str(ROOT/'scripts/verify_store_publication.py'),
+             '--store-root','.','--expected-commit',head.stdout.strip().decode('ascii'),
+             '--writer-status','store_persisted','--required-manifest','data/market-data/'+manifest,
+             '--emit-capture-availability-commitment']
+    with tempfile.TemporaryFile(mode='w+b') as stdout, tempfile.TemporaryFile(mode='w+b') as stderr:
+        result=subprocess.run(command,cwd=path,env=env,stdin=subprocess.DEVNULL,
+                              stdout=stdout,stderr=stderr,timeout=600)
+        if result.returncode:
+            raise ValueError()
+        if stderr.tell():
+            return None
+        stdout.seek(0)
+        size=len(b'CAPTURE_AVAILABILITY_V2 ')+64+1
+        line=stdout.read(size+1)
+        if re.fullmatch(rb'CAPTURE_AVAILABILITY_V2 [0-9a-f]{64}\n',line):
+            return spool_capture_availability(line, env)
+    return False
+
+
+def spool_capture_availability(line, env):
+    """Create one fixed raw artifact only; unknown or stale files never qualify."""
+    if not re.fullmatch(rb'CAPTURE_AVAILABILITY_V2 [0-9a-f]{64}\n',line):
+        return False
+    run, attempt = env.get('GITHUB_RUN_ID',''), env.get('GITHUB_RUN_ATTEMPT','')
+    if any(not re.fullmatch('[1-9][0-9]{0,19}',v) for v in (run,attempt)):
+        return False
+    temp=env.get('RUNNER_TEMP','')
+    if not os.path.isabs(temp):
+        return False
+    filename=f'capture-availability-v2-{run}-{attempt}-collect.txt'
+    try:
+        directory=os.open(temp,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+        try:
+            fd=os.open(filename,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=directory)
+            try:
+                return os.write(fd,line)==len(line)
+            finally:
+                os.close(fd)
+        finally:
+            os.close(directory)
+    except OSError:
+        return False
+
+
+class _QuietCaptureBridgeParser(argparse.ArgumentParser):
+    def error(self, message):
+        raise ValueError()  # argparse's default output can echo the private argv.
+
+
 def main(argv=None):
     try:
         os.umask(0o077)
-        parser=argparse.ArgumentParser();sub=parser.add_subparsers(dest='mode',required=True)
+        argv=sys.argv[1:] if argv is None else argv
+        cls=_QuietCaptureBridgeParser if argv[:1]==['verify-capture-availability'] else argparse.ArgumentParser
+        parser=cls();sub=parser.add_subparsers(dest='mode',required=True)
         clone=sub.add_parser('clone');clone.add_argument('--destination',required=True)
         run=sub.add_parser('run');run.add_argument('--repo',required=True)
+        verify=sub.add_parser('verify-capture-availability');verify.add_argument('--repo',required=True)
+        verify.add_argument('--manifest',required=True)
         args=parser.parse_args(argv);token=os.environ.get('MARKET_DATA_STORE_TOKEN','')
         if args.mode=='clone':clone_private_store(args.destination,token)
         else:
             path=Path(args.repo).resolve();env=git_environment(token)
             origin=subprocess.run(['git','-C',str(path),'remote','get-url','--all','origin'],capture_output=True,env=env,timeout=30)
             if origin.returncode or origin.stdout.decode().strip()!=STORE_URL:raise ValueError()
-            script=sys.stdin.buffer.read(65537)
-            if not 0<len(script)<=65536:raise ValueError()
-            quiet_call(['bash','-euo','pipefail'],env=env,stdin=script,cwd=path,timeout=600)
+            if args.mode=='verify-capture-availability':
+                if verify_capture_availability(path,args.manifest,env):
+                    print('CAPTURE_AVAILABILITY_ARTIFACT_READY');return 0
+            else:
+                script=sys.stdin.buffer.read(65537)
+                if not 0<len(script)<=65536:raise ValueError()
+                quiet_call(['bash','-euo','pipefail'],env=env,stdin=script,cwd=path,timeout=600)
         print('PRIVATE_STORE_OPERATION_COMPLETE');return 0
     except Exception:print('PRIVATE_STORE_OPERATION_STOPPED');return 2
 
