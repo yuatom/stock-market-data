@@ -119,7 +119,11 @@ def _record(repo,pin,day,required,sources):
         pairs=set()
         for entry in refs:
             _require(type(entry) is dict and set(entry)=={'path','blob_sha'} and type(entry['path']) is str)
-            pairs.add((DATA+entry['path'],_sha(entry['blob_sha'])))
+            relative=entry['path']
+            _require(re.fullmatch('[A-Za-z0-9._/-]+',relative) and
+                     all(part not in ('','.','..') for part in relative.split('/')))
+            pairs.add((DATA+relative,_sha(entry['blob_sha'])))
+        _require(len({name for name,_ in pairs})==len(refs))
         if not required <= pairs or any(not choices & pairs for choices in sources.values()):continue
         history=_git(repo,'log','--first-parent','-n','2','--diff-filter=A','--format=%H',pin,'--',p).stdout.splitlines()
         _require(len(history)==1)
@@ -128,13 +132,21 @@ def _record(repo,pin,day,required,sources):
         verified=_verify_required_manifest(repo,producer,p)
         _require({(x['path'],x['blob_sha']) for x in verified}==pairs)
         accepted.append(producer)
-    _require(len(accepted)==1)
+    _require(len(accepted)<=1)
+    if not accepted:
+        _require(_one_remote_ref(repo,'origin','refs/heads/main')==pin)
+        return False
     producer=accepted[0]
-    for oid in {pin,producer}:
+    found={}
+    for oid in sorted({pin,producer}):
         tag=f'refs/tags/market-data-read/{oid}'
-        _require(_one_remote_ref(repo,'origin',tag)==oid)
+        found[oid]=_one_remote_ref(repo,'origin',tag)
+        # Only a successful exact absent lookup can allow fallback. A wrong
+        # tag always stops, even when another tag was genuinely absent.
+        _require(found[oid] in (None,oid))
         _require(_git(repo,'cat-file','-t',oid).stdout.strip()=='commit')
     _require(_one_remote_ref(repo,'origin','refs/heads/main')==pin)
+    return all(target is not None for target in found.values())
 
 
 def decide(repo:Path,day:str,compute:str,pin:str,universe_path:Path,*,now=None)->bool:
@@ -177,8 +189,7 @@ def decide(repo:Path,day:str,compute:str,pin:str,universe_path:Path,*,now=None)-
     _require(monitor==(path,blob))
     required={(pointer_path,pointer_blob),(DATA+rel,snap_blob),(DATA+path,blob),
               (DATA+pr+'/latest.json',pointer_proof_blob)}
-    _record(repo,pin,day,required,sources)
-    return True
+    return _record(repo,pin,day,required,sources)
 
 
 def main(argv=None):

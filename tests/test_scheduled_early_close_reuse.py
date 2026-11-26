@@ -103,9 +103,16 @@ class TestRealGitEarlyClose(unittest.TestCase):
                 decide(repo,day,compute,pin,universe_path,now=datetime.fromisoformat(f'{day}T12:58:00-05:00'))
             with patch.object(reuse,'_full_window_from_one_provider',return_value=False):
                 self.assertFalse(decide(repo,day,compute,pin,universe_path,now=now))
-            with patch.object(reuse,'_one_remote_ref',return_value=None):
-                with self.assertRaises(ReuseEvidenceError):
+            lookup=reuse._one_remote_ref
+            with patch.object(reuse,'_one_remote_ref',
+                              side_effect=lambda repo,remote,ref: None if ref.startswith('refs/tags/') else lookup(repo,remote,ref)):
+                self.assertFalse(decide(repo,day,compute,pin,universe_path,now=now))
+            with patch.object(reuse,'_one_remote_ref',side_effect=TimeoutError()):
+                with self.assertRaises(TimeoutError):
                     decide(repo,day,compute,pin,universe_path,now=now)
             self.assertEqual(files_before,{p.relative_to(data):hashlib.sha256(p.read_bytes()).hexdigest() for p in data.rglob('*') if p.is_file()})
             self.assertEqual(tags_before,git('ls-remote','--tags','origin'))
             self.assertEqual(git('status','--porcelain'),'')
+            git('rm',str(output.relative_to(repo))); git('commit','-qm','fixture confirms prior manifest absent')
+            without=git('rev-parse','HEAD'); git('push','-q','origin','main')
+            self.assertFalse(decide(repo,day,compute,without,universe_path,now=now))
