@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 import market_data_store as store_integrity
+from close_session_window import candidate_close_window
 
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 PROVIDER = "twelve_data_basic"
@@ -340,11 +341,16 @@ def _target_observations(
     if stage_window is None:
         raise MetricProofError(f"unsupported metric-proof stage: {stage}")
     close_stage = stage == "close"
+    trade_date = str(snapshot.get("trade_date") or "")
+    if close_stage:
+        try:
+            stage_window = candidate_close_window(trade_date)
+        except ValueError as exc:
+            raise MetricProofError("close calendar window is unavailable") from exc
     if snapshot.get("target_window") != stage_window:
         if close_stage:
             raise MetricProofError("close snapshot target window does not match owner")
         raise MetricProofError(f"{stage} snapshot target window does not match owner")
-    trade_date = str(snapshot.get("trade_date") or "")
     stage_start = time.fromisoformat(stage_window["start"])
     stage_end = time.fromisoformat(stage_window["end"])
 
