@@ -211,11 +211,12 @@ class RemoteGitStore(LocalGitStore):
         main = ref == 'refs/heads/main'
         attempt = re.fullmatch(r'refs/heads/basis-daily-attempts/[0-9a-f]{64}/[A-Za-z0-9_-]{1,64}', ref)
         immutable = re.fullmatch(r'refs/heads/basis-daily-(?:candidates|verification|deliveries)/[0-9a-f]{64}/[A-Za-z0-9_-]{1,64}', ref)
+        readiness = re.fullmatch(r'refs/heads/basis-daily-readiness-attempt/[0-9a-f]{40}/[0-9a-f]{64}', ref)
         receipt = re.fullmatch(r'refs/heads/basis-read-receipts/[0-9a-f]{40}/[0-9a-f]{64}', ref)
         authority = re.fullmatch(r'refs/heads/basis-daily-authority/[0-9a-f]{40}/[0-9a-f]{64}', ref)
         retention = re.fullmatch(r'refs/tags/market-data-read/[0-9a-f]{40}', ref)
         verifier = re.fullmatch(r'refs/heads/basis-consumer-delivery/[0-9a-f]{40}', ref)
-        _need(main or attempt or immutable or receipt or not write and (authority or retention or verifier))
+        _need(main or attempt or immutable or readiness or receipt or not write and (authority or retention or verifier))
         path = self.g.gitdir / ref
         _need(not any(p.is_symlink() for p in (path, *path.parents)))
         return 'mutable' if main or attempt else 'immutable'

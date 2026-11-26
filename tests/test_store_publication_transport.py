@@ -387,7 +387,12 @@ class TransportOwnerTests(unittest.TestCase):
         import yaml
         owner = yaml.safe_load((ROOT / "config/store-publication-durability.yaml").read_text())
         contract = owner["verification_transport"]
-        self.assertEqual(owner["contract_version"], 4)
+        self.assertEqual(owner["contract_version"], 6)
+        reuse = owner["existing_publication_reuse"]
+        self.assertTrue(reuse["exact_existing_retention_for_producer_and_current_store_required"])
+        self.assertTrue(reuse["no_provider_requests_budget_debits_new_tags_or_store_writes_when_reused"])
+        self.assertTrue(reuse["terminal_status_is_not_a_new_durability_receipt"])
+        self.assertEqual(reuse["ambiguous_integrity_or_unreadable_proof"], "fail_closed")
         self.assertEqual(V.REMOTE_ATTEMPTS, contract["max_attempts_per_operation"])
         self.assertEqual(V.REMOTE_COMMAND_TIMEOUT_SECONDS, contract["command_timeout_seconds"])
         self.assertEqual(V.REMOTE_BUDGET_SECONDS, contract["shared_elapsed_budget_seconds"])

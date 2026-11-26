@@ -48,6 +48,17 @@ class DailyBasisError(RuntimeError):
         super().__init__(message)
 
 
+class ScopedRequestExpired(RuntimeError):
+    """Internal, local-only guard stop before the provider transport."""
+
+
+class ScopedProviderHold(DailyBasisError):
+    """No provider send; any existing debit and stopped terminal are confirmed."""
+
+    def __init__(self):
+        super().__init__('DAILY_BASIS_SCOPED_PROVIDER_HELD')
+
+
 def _capture_detail(error):
     from scripts.rebase_market_data_baseline import CaptureOnlyError
     # Match the concrete owner error and complete fixed tuple, not arbitrary
@@ -61,6 +72,8 @@ def _capture_detail(error):
 def guarded(function):
     def call(*args,**kwargs):
         try:return function(*args,**kwargs)
+        except ScopedProviderHold:
+            raise
         except Exception as exc:
             detail=exc.safe_capture_detail if type(exc) is DailyBasisError else _capture_detail(exc)
             raise DailyBasisError('DAILY_BASIS_STOPPED_INSPECT_NO_RETRY',safe_capture_detail=detail) from None
@@ -261,20 +274,32 @@ class DailyUpdater:
         return slot,head,prefix,previous,old
 
     @guarded
-    def run_slot(self,slot_id,request_id,*,capture):
+    def run_slot(self,slot_id,request_id,*,capture,request_guard=None):
         slot,head,prefix,previous,old=self.preflight_slot(slot_id,request_id)
+        if request_guard is not None:
+            try:request_guard()
+            except ScopedRequestExpired:raise ScopedProviderHold() from None
         head,minute,budget_path,budget_blob=self._debit(slot,request_id,head,previous)
         evidence_head=head
         evidence_ref_expected='0'*40
         request=dict(self.grant['request_template'],end_date=slot['cutoff'])
         guarded_once=False
+        scope_stopped=False
         def before_request():
-            nonlocal guarded_once
+            nonlocal guarded_once,scope_stopped
             B._need(not guarded_once);guarded_once=True
             self._fresh(slot);B._need(self.store.head()==head)
             B._need(self.store.g.normal_blob_identity(head,budget_path)==budget_blob)
             now=self.clock().astimezone(timezone.utc)
             B._need(now.strftime('%Y-%m-%dT%H:%MZ')==minute and now.second<58)
+            # Last guard immediately before capture transport crosses into the provider.
+            if request_guard is not None:
+                try:request_guard()
+                except ScopedRequestExpired:
+                    # capture_daily_response sanitizes callback exceptions. The
+                    # local latch proves only this callback blocked the send.
+                    scope_stopped=True
+                    raise
         retained={}
         publication_uncertain=False
         def retain(name,raw):
@@ -293,11 +318,18 @@ class DailyUpdater:
             result=capture(request=request,before_request=before_request,
                 retain_raw=lambda raw:retain('response.raw',raw),
                 retain_envelope=lambda raw:retain('envelope.json',raw),clock=self.clock)
-        except Exception:
+        except Exception as exc:
             # Only confirmed retained-ref state permits a separate terminal.
             # Never write another ref after an uncertain evidence publication.
             if guarded_once and not publication_uncertain and self.clock()<B._stamp(slot['cleanup_until']):
                 retain('terminal.json',B.encode(dict(schema_version=1,status='CAPTURE_STOPPED_INSPECT_NO_RETRY',grant_sha256=self.digest,slot_id=slot_id,request_id=request_id,market_qualified=False,production_activation=False)))
+                # Only a positively retained stopped result and the confirmed
+                # post-debit Store head permit continuation of unrelated symbols.
+                if scope_stopped and self.store.head()==head:
+                    raise ScopedProviderHold() from None
+            # The recoverable transition originates here, never in transport.
+            if isinstance(exc,ScopedProviderHold):
+                raise DailyBasisError('DAILY_BASIS_STOPPED_INSPECT_NO_RETRY') from None
             raise
         B._need(guarded_once and set(retained)=={'response.raw','envelope.json'})
         envelope=retained['envelope.json'];verified=verify_envelope(envelope,B.sha(envelope))
