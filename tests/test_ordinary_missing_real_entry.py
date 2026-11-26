@@ -64,12 +64,11 @@ def run_scenario(rows, incoming, make_partial=False, permitted=(), policy=True, 
             stack.enter_context(patch.object(s,'_write_json',side_effect=fail_only_repair_index))
         if actual_cli:
             source=Path(__file__).resolve().parents[1]/'config'
-            config_path=repo/'fixture-config.yaml'
-            config=yaml.safe_load((source/'market-data-store.yaml').read_text())
-            daily=config['collector']['twelve_data_daily']
-            if policy:
-                daily['ordinary_missing_repair_policy']='active_shard_gap_fill_v1'
-            config_path.write_text(yaml.safe_dump(config))
+            # Exercise the same checked-in config the scheduled collector reads;
+            # an enabled fixture cannot establish that the rollout is enabled.
+            if not policy:
+                raise AssertionError('actual CLI scenario uses production configuration')
+            config_path=source/'market-data-store.yaml'
             now=datetime.fromisoformat(trade_date+'T07:05:00-05:00')
             gate=entrypoint._settlement_gate_result
             output=StringIO()
@@ -81,7 +80,6 @@ def run_scenario(rows, incoming, make_partial=False, permitted=(), policy=True, 
             if rc:
                 raise AssertionError('the configured collection CLI returned an error')
             out=json.loads(output.getvalue().strip().splitlines()[-1])
-            config_path.unlink()  # Data commits do not include execution fixture files.
         else:
             out=c.collect_previous_session_eod(trade_date=trade_date,store_root=root,watchlist={},completeness={},config=cfg,access=access,verified_gap_sessions=None if permitted is None else frozenset(permitted))
         if verify_publication:
@@ -129,6 +127,29 @@ def run_scenario(rows, incoming, make_partial=False, permitted=(), policy=True, 
         return c.read_daily_series(root,provider=c.TWELVE_PROVIDER,symbol='AAA'),out
 
 class OrdinaryMissingProductionEntry(unittest.TestCase):
+    def test_enabled_production_policy_keeps_corporate_action_series_out_of_legacy_writes(self):
+        source = Path(__file__).resolve().parents[1] / 'config' / 'market-data-store.yaml'
+        config = yaml.safe_load(source.read_text())
+        self.assertEqual(config['collector']['twelve_data_daily']['ordinary_missing_repair_policy'],
+                         'active_shard_gap_fill_v1')
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+            root = Path(tmp)
+            owner = root / 'series-active/daily/twelve_data_basic/SOXX.json'
+            owner.parent.mkdir(parents=True)
+            owner.write_text('{}')
+            stack.enter_context(patch.dict(os.environ, {'TWELVE_DATA_API_KEY': 'SYNTHETIC'}))
+            stack.enter_context(patch.object(c, '_daily_universe', return_value=[('SOXX','etf')]))
+            stack.enter_context(patch.object(c, '_load_daily_basis_owner', return_value={}))
+            wait, debit, fetch = [stack.enter_context(patch.object(c, name)) for name in
+                                  ('wait_for_twelve_budget','consume_twelve_credit','fetch_twelve_daily')]
+            result = c.collect_previous_session_eod(trade_date='2026-11-25', store_root=root,
+                watchlist={}, completeness={}, config=config, access={}, verified_gap_sessions=frozenset())
+            self.assertEqual(result['changed_series'], 0)
+            self.assertEqual([row['symbol'] for row in result['failures']], ['SOXX'])
+            self.assertEqual(owner.read_text(), '{}')
+            for action in (wait, debit, fetch):
+                action.assert_not_called()
+
     def test_missing_internal_session(self):
         dates=['2026-11-20','2026-11-23','2026-11-24']
         old=[bar(dates[0]),bar(dates[2])]

@@ -244,6 +244,8 @@ collector:
   twelve_data_daily:
     # Daily conflicts are quarantined per symbol; price/metadata revisions still reject.
     overlap_revision_policy: price_only_volume_blocked_v1
+    # EOD may fill missing prices within the same existing basis; validated prices and volume are unchanged.
+    ordinary_missing_repair_policy: active_shard_gap_fill_v1
     bounded_overlap_revision_policy: price_only_volume_blocked_v1
     history_outputsize: 64
     bootstrap_minimum_records: 20
