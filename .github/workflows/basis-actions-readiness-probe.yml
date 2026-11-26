@@ -2,72 +2,99 @@ name: Isolated Basis Actions Readiness
 on:
   workflow_dispatch:
     inputs:
-      compute_sha:
-        type: string
+      expected_sha:
         required: true
-      receipt_commitment:
         type: string
-        required: true
-      expected_runner_id:
-        type: string
-        required: true
-      expected_runner_name:
-        type: string
-        required: true
-      expires:
-        type: string
-        required: true
-permissions:
-  contents: read
+permissions: {}
 concurrency:
-  group: market-data-collector
+  group: diagnostic-readiness-20261126
   cancel-in-progress: false
-  queue: max
 jobs:
-  probe:
+  token_read:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 2
     steps:
-      - name: Exact owner manual invocation
-        env:
-          COMPUTE: ${{ inputs.compute_sha }}
+      - name: Record bounded read-only result
         shell: python
-        run: |
-          import os,re
-          assert os.environ['GITHUB_EVENT_NAME']=='workflow_dispatch'
-          assert os.environ['GITHUB_REF']=='refs/heads/main'
-          assert os.environ['GITHUB_RUN_ATTEMPT']=='1'
-          assert os.environ['GITHUB_ACTOR']==os.environ['GITHUB_TRIGGERING_ACTOR']=='yuatom'
-          assert re.fullmatch('[0-9a-f]{40}',os.environ['COMPUTE'])
-          assert os.environ['GITHUB_SHA']==os.environ['COMPUTE']
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.compute_sha }}
-          fetch-depth: 0
-          persist-credentials: false
-          path: compute
-      - uses: actions/checkout@v4
-        with:
-          repository: yuatom/stock-market-data-store
-          ref: main
-          token: ${{ secrets.MARKET_DATA_STORE_TOKEN }}
-          fetch-depth: 0
-          persist-credentials: false
-          path: store
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - run: python -m pip install --disable-pip-version-check PyYAML==6.0.3
-      - name: One private verifier dispatch, zero provider
-        working-directory: compute
         env:
-          MARKET_DATA_BASIS_ACTIONS_TOKEN: ${{ secrets.MARKET_DATA_BASIS_ACTIONS_TOKEN || secrets.MARKET_DATA_STORE_TOKEN }}
-          COMPUTE: ${{ inputs.compute_sha }}
-          RECEIPT: ${{ inputs.receipt_commitment }}
-          EXPECTED_RUNNER_ID: ${{ inputs.expected_runner_id }}
-          EXPECTED_RUNNER_NAME: ${{ inputs.expected_runner_name }}
-          EXPIRES: ${{ inputs.expires }}
-        run: >-
-          python -B -m scripts.run_basis_actions_readiness_probe
-          --store ../store --compute-sha "$COMPUTE" --receipt-commitment "$RECEIPT"
-          --expected-runner-id "$EXPECTED_RUNNER_ID" --expected-runner-name "$EXPECTED_RUNNER_NAME" --expires "$EXPIRES"
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          MARKET_DATA_BASIS_ACTIONS_TOKEN: ${{ secrets.MARKET_DATA_BASIS_ACTIONS_TOKEN }}
+          MARKET_DATA_STORE_TOKEN: ${{ secrets.MARKET_DATA_STORE_TOKEN }}
+        run: |
+          """Read-only test of the current workflow's classic-token readiness condition."""
+          import json
+          import os
+          import re
+          import urllib.request
+
+          USER = '/user'
+          TARGET = '/repos/yuatom/stock-market-data-store/actions/workflows/415302427'
+
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+           def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+
+          def classify(read):
+           try:
+            actor, _ = read(USER)
+            if actor.get('id') != 10399225:
+             return 'CHECK_C'
+            workflow, scopes = read(TARGET)
+            if workflow.get('id') != 415302427 or workflow.get('state') != 'active':
+             return 'CHECK_D'
+            return 'CHECK_A' if 'repo' in {part.strip() for part in scopes.split(',')} else 'CHECK_B'
+           except Exception:
+            return 'CHECK_E'
+
+          def inspect(token):
+           if not re.fullmatch(r'[A-Za-z0-9_.-]{8,4096}', token):
+            return 'CHECK_E'
+           opener = urllib.request.build_opener(NoRedirect())
+           def read(path):
+            if path not in (USER, TARGET):
+             raise ValueError()
+            url = 'https://api.github.com' + path
+            req = urllib.request.Request(url, headers={'Authorization': 'Bearer ' + token,
+             'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2026-03-10',
+             'User-Agent': 'market-data-permission-readiness'}, method='GET')
+            with opener.open(req, timeout=12) as response:
+             if response.status != 200 or response.geturl() != url:
+              raise ValueError()
+             data = response.read(65537)
+             if len(data) > 65536:
+              raise ValueError()
+             return json.loads(data), response.headers.get('X-OAuth-Scopes', '')
+           return classify(read)
+
+
+          PUBLIC_KEY='-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAx0t+yMSXFt9HBbUx/lK/\nTmmux8m1eG/lT36QIJ/10/f4JI6JksOHMZH+FDbfH0r7kPTp+8Gqv1gEPJPJefVx\nb6kCrxvlRmhgis38588U67RDHwNsOZLYcUuRhnsUgYBj90oVGCUaUFPuu0l3G79p\nlOUXoPUAsE4SwGmm4q1AyMk4uaVm2DpgWDc2isW4OmFAF6cHGWfqUrm47CVtM+Ap\nPt+/SQRzz6IebeZScAPxT1P8BySUisX3KjuuImCCfPbpMdpYW7x8yCrjlHGXr6//\n5IP4+t9kDY7b+U2qhLrFAcObVz+82S6u3jqpAUcQX27JbFibD9yPB06MO7hsVZcp\nkQIDAQAB\n-----END PUBLIC KEY-----\n'
+
+          from datetime import datetime, timezone
+          import base64, subprocess, tempfile
+          from pathlib import Path
+
+          def run():
+           env = os.environ
+           assert env.get('GITHUB_EVENT_NAME') == 'workflow_dispatch'
+           assert env.get('GITHUB_RUN_ATTEMPT') == '1'
+           assert env.get('GITHUB_REPOSITORY') == 'yuatom/stock-market-data'
+           assert env.get('GITHUB_ACTOR') == env.get('GITHUB_TRIGGERING_ACTOR') == 'yuatom'
+           assert env.get('GITHUB_REF') == 'refs/heads/diagnostic/readiness-20261126-0250'
+           assert re.fullmatch('[0-9a-f]{40}', env.get('EXPECTED_SHA',''))
+           assert env.get('GITHUB_SHA') == env['EXPECTED_SHA']
+           assert datetime(2026,11,26,2,48,tzinfo=timezone.utc) <= datetime.now(timezone.utc) < datetime(2026,11,26,3,18,tzinfo=timezone.utc)
+           result = inspect(env.get('MARKET_DATA_BASIS_ACTIONS_TOKEN') or env.get('MARKET_DATA_STORE_TOKEN',''))
+           with tempfile.TemporaryDirectory() as tmp:
+            f = Path(tmp)/'public.pem'
+            f.write_text(PUBLIC_KEY)
+            cmd = ['/usr/bin/openssl','pkeyutl','-encrypt','-pubin','-inkey',str(f),
+                   '-pkeyopt','rsa_padding_mode:oaep','-pkeyopt','rsa_oaep_md:sha256']
+            ciphertext = subprocess.run(cmd, input=result.encode('ascii'), capture_output=True,
+                                        check=True, timeout=5).stdout
+            assert len(ciphertext) == 256
+            print('SEALED_READINESS=' + base64.b64encode(ciphertext).decode('ascii'))
+          try:
+           run()
+          except Exception:
+           print('READINESS_NOT_RECORDED')
+           raise SystemExit(1)
