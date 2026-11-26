@@ -645,6 +645,7 @@ jobs:
           MODE: ${{ steps.invocation.outputs.mode }}
           TRADE_DATE: ${{ steps.invocation.outputs.trade_date }}
           MARKET_DATA_CONTRACT_SHA: ${{ steps.invocation.outputs.market_data_contract_sha }}
+          PUBLICATION_MANIFEST_PATH: ${{ steps.publication.outputs.publication_manifest_path }}
         run: |
           python -B ../compute/scripts/quiet_private_store.py run --repo . <<'PRIVATE_SCRIPT'
           set -euo pipefail
@@ -676,6 +677,17 @@ jobs:
               --store-root . \
               --base "$store_base_sha" \
               --candidate "$(git rev-parse HEAD)"
+            exit 0
+          fi
+
+          changed_paths="$(git diff --name-only "$store_base_sha" HEAD -- data/market-data)"
+          if [[ "$MODE" == 'previous_session_eod' ]] && grep -Eq '^data/market-data/collector-state/[0-9]{4}-[0-9]{2}/ordinary-gap-[0-9a-f]{64}\.json$' <<< "$changed_paths"; then
+            test -n "$PUBLICATION_MANIFEST_PATH"
+            python ../compute/scripts/push_proof_store_commit.py \
+              --store-root . \
+              --base "$store_base_sha" \
+              --candidate "$(git rev-parse HEAD)" \
+              --required-manifest "data/market-data/$PUBLICATION_MANIFEST_PATH"
             exit 0
           fi
 

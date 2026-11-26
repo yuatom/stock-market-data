@@ -54,6 +54,16 @@ series:
     target_record_count_source: maximum_of_series_analysis_windows_may_read_last_sessions
     normal_mode: verified_prefix_extension_then_append_only
     normal_mode_provider_revision_behavior: fail_closed_and_require_explicit_rebase
+    ordinary_collection_missing_field_repair:
+      status: preparation_only_until_guarded_writer_is_enabled
+      preparation_helper: scripts/normal_daily_missing_repair.py
+      allow_only_absent_or_null_fields_in_same_identity_session_and_adjustment_basis: true
+      keep_existing_valid_fields_even_when_incoming_source_differs: true
+      independently_block_intentionally_quarantined_or_unqualified_volume: true
+      require_valid_combined_ohlc_and_authoritative_missing_session_dates: true
+      do_not_treat_non_null_malformed_rows_or_zero_volume_as_missing: true
+      preserve_preimage_and_exact_field_diff_before_any_publication: true
+      verify_same_series_and_publish_by_exact_current_store_compare_and_swap: true
     retained_candidate_reconciliation:
       mode: retained_daily_append
       trigger: separate_explicit_workflow_dispatch_only
@@ -119,6 +129,20 @@ series:
       replacement_record_count_target_uses_same_target_record_count_source: true
       post_rebase_collection_returns_to_append_only: true
       automatic_rebase_during_normal_collection_forbidden: true
+      retained_verified_price_correction:
+        status: preparation_only_until_formally_reviewed_writer_exists
+        preparation_helper: scripts/retained_verified_price_correction.py
+        permitted_invocation: explicit_repair_only
+        provider_requests_during_preparation_allowed: false
+        require_same_identity_session_currency_and_adjustment_basis: true
+        require_exact_retained_packet_and_existing_index_git_identities: true
+        require_independent_corroboration_for_every_changed_price_field: true
+        preserve_old_row_digest_and_exact_changed_field_audit: true
+        preserve_unapproved_fields_and_volume: true
+        normal_collection_uses_correction_preparation: false
+        missing_dates_must_use_separate_qualified_append_path: true
+        safe_when_only_prepared_not_admitted_or_published: true
+        before_publication_require_review_archive_and_exact_current_store_compare_and_swap: true
   source_affinity:
     provider_identity_must_match_series: true
     session_semantics_must_match_series: true
@@ -220,6 +244,8 @@ collector:
   twelve_data_daily:
     # Daily conflicts are quarantined per symbol; price/metadata revisions still reject.
     overlap_revision_policy: price_only_volume_blocked_v1
+    # EOD may fill missing prices within the same existing basis; validated prices and volume are unchanged.
+    ordinary_missing_repair_policy: active_shard_gap_fill_v1
     bounded_overlap_revision_policy: price_only_volume_blocked_v1
     history_outputsize: 64
     bootstrap_minimum_records: 20
