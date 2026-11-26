@@ -191,9 +191,11 @@ def _scoped_git_case(tmp_path, mode):
         store.cas(f'refs/heads/basis-read-receipts/{compute}/{receipt_id}',receipt_pin,'0'*40)
 
     posted=[]
+    proof_checks=[]
     class Api:
         def has_recent_dispatch_proof(self,workflow):
-            return workflow==WORKFLOW_ID and len(posted)==1
+            proof_checks.append(workflow)
+            return workflow==WORKFLOW_ID and len(posted)==1 and (mode!='late' or len(proof_checks)<4)
         dispatch_capability=has_recent_dispatch_proof
         def request(self,method,path,payload=None):
             if method=='POST':
@@ -237,8 +239,20 @@ def _scoped_git_case(tmp_path, mode):
         from scripts import daily_basis_delegation as DD
         assert result=='FINITE_DAILY_BASIS_HELD' and not calls and posted==[receipt_id]
         assert store.ref(f'refs/heads/basis-daily-readiness-attempt/{compute}/{receipt_id}')
-        assert store.head()==root
-        owner=B._parse(out.read_bytes()); assert owner['store_sha']==root
+        observed=store.head()
+        if mode=='late':
+            s=grant['slots'][0]['slot_id']; gh=B.sha(raw_grant)
+            assert observed!=root and len(proof_checks)==4
+            path=f'capture-evidence/daily-basis/{gh}/{s}'
+            claim=B._parse(store.read(observed,path+'/claim.json'))
+            assert claim['status']=='CLAIMED_NO_REPLAY'
+            attempt=store.ref(f'refs/heads/basis-daily-attempts/{gh}/{s}')
+            terminal=B._parse(store.read(attempt,path+'/terminal.json'))
+            assert terminal['status']=='CAPTURE_STOPPED_INSPECT_NO_RETRY'
+            assert not store.exists(attempt,path+'/response.raw')
+            assert not store.exists(attempt,path+'/envelope.json')
+        else:assert observed==root
+        owner=B._parse(out.read_bytes()); assert owner['store_sha']==observed
         config={'collector':{'budgets':{'twelve_data_basic':{'hard_credits_per_day':200,'hard_credits_per_minute':8}},
                             'twelve_data_daily':{'history_outputsize':500,'bootstrap_minimum_records':256}}}
         env.update(DAILY_BASIS_DELEGATION_FILE=str(out),DAILY_BASIS_GRANT_COMMITMENT=digest,
@@ -270,6 +284,10 @@ def test_denied_private_workflow_does_not_stop_ordinary_eod(tmp_path):
 def test_uncertain_private_workflow_does_not_fall_through_to_legacy_soxx(tmp_path):
     _scoped_git_case(tmp_path,'uncertain')
 
+
+def test_confirmed_late_guard_uses_post_debit_store_head_and_keeps_ordinary_eod(tmp_path):
+    _scoped_git_case(tmp_path,'late')
+
 class TestLastProviderBoundary(TestCase):
     def test_scope_rechecked_after_debit_before_provider_transport(self):
         from scripts import daily_basis_updates as U
@@ -290,3 +308,40 @@ class TestLastProviderBoundary(TestCase):
         with self.assertRaises(U.DailyBasisError):
             u.run_slot('friday','45-1',capture=capture,request_guard=late)
         u._debit.assert_called_once();self.assertEqual(sent,[])
+
+class TestScopedTerminalAtRealCapture(TestCase):
+    def exercise(self, uncertain=False, already_late=False):
+        from scripts import daily_basis_updates as U
+        from test_capture_only_response import access,request
+        u=object.__new__(U.DailyUpdater)
+        u.store=Mock(); u.store.head.return_value='c'*40; u.store.g.normal_blob_identity.return_value='b'*40
+        u.clock=lambda:datetime(2026,11,27,12,5,tzinfo=timezone.utc)
+        u.grant_raw=U.B.encode({'request_template':request()})
+        u.authority=Mock(grant_sha256='1'*64)
+        slot={'cutoff':request()['end_date'],'valid_from':'2026-11-27T12:00:00Z','cleanup_until':'2026-11-27T12:18:00Z'}
+        u.preflight_slot=Mock(return_value=(slot,'a'*40,'claim',{},{}))
+        u._debit=Mock(return_value=('c'*40,'2026-11-27T12:05Z','budget','b'*40))
+        u._fresh=Mock(); u._validate_grant_unchanged=Mock(); u._attempt_ref=Mock(return_value='refs/heads/durable-attempt')
+        u.store.commit.return_value='d'*40; u.store.assert_locked=Mock()
+        if uncertain:u.store.cas.side_effect=TimeoutError()
+        checks=[]
+        def late():
+            checks.append(u._debit.called)
+            if already_late or u._debit.called:raise U.ScopedRequestExpired()
+        with patch('market_data_collectors.urllib.request.build_opener') as opener:
+            cls=U.DailyBasisError if uncertain else U.ScopedProviderHold
+            with self.assertRaises(cls) as error:
+                u.run_slot('friday','45-1',capture=U.provider_capture('synthetic-only',access()),request_guard=late)
+            if uncertain:self.assertNotIsInstance(error.exception,U.ScopedProviderHold)
+            opener.assert_not_called()
+        if already_late:
+            self.assertEqual(checks,[False]);u._debit.assert_not_called();u.store.cas.assert_not_called()
+        else:
+            self.assertEqual(checks,[False,True]);u._debit.assert_called_once()
+            u.store.cas.assert_called_once_with('refs/heads/durable-attempt','d'*40,'0'*40)
+            terminal=H.B._parse(u.store.commit.call_args.args[1]['claim/terminal.json'])
+            self.assertEqual(terminal['status'],'CAPTURE_STOPPED_INSPECT_NO_RETRY')
+
+    def test_late_after_confirmed_debit_keeps_claim_but_emits_typed_hold(self):self.exercise()
+    def test_uncertain_terminal_never_emits_typed_hold(self):self.exercise(uncertain=True)
+    def test_late_before_debit_does_not_spend_it(self):self.exercise(already_late=True)

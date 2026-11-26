@@ -22,7 +22,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from scripts import provider_basis_snapshot as B
-from scripts.daily_basis_updates import DailyUpdater,GrantAuthority,Candidate,provider_capture
+from scripts.daily_basis_updates import (DailyUpdater,GrantAuthority,Candidate,provider_capture,
+    ScopedRequestExpired,ScopedProviderHold)
 from scripts.daily_basis_delivery import verify_daily_delivery
 from scripts.scheduled_basis_readiness import probe as scheduled_readiness_probe, validate_scope as validate_scheduled_readiness
 from scripts.run_private_authority_route import _quiet,_source,_environment,SAFETY
@@ -416,16 +417,20 @@ def run_route(*,store,api,compute,compute_sha,commitment,trade_date,env,key,acce
             if source_check:source_check()
             wait_for_daily_budget_window(updater,slot,clock=clock)
             def scoped_request_guard():
-                need(clock()+SCOPED_MIN_CAPTURE_RUNWAY<B._stamp(runner_expectation['expires']) and
-                     api.has_recent_dispatch_proof(grant['workflow_id']))
+                if not (clock()+SCOPED_MIN_CAPTURE_RUNWAY<B._stamp(runner_expectation['expires']) and
+                        api.has_recent_dispatch_proof(grant['workflow_id'])):raise ScopedRequestExpired()
             if scoped:
                 try:
                     need(store.head()==head)
                     scoped_request_guard()
-                except HostedDailyError:
+                except (HostedDailyError,ScopedRequestExpired):
                     return hold_before_provider()
-            candidate=updater.run_slot(slot['slot_id'],request_id,capture=capture or provider_capture(key,access),
-                **({'request_guard':scoped_request_guard} if scoped else {}))
+            try:
+                candidate=updater.run_slot(slot['slot_id'],request_id,capture=capture or provider_capture(key,access),
+                    **({'request_guard':scoped_request_guard} if scoped else {}))
+            except ScopedProviderHold:
+                need(scoped)
+                return hold_before_provider()
             verified=dispatch_verify_once(api,updater,candidate,repository=repository,clock=clock,
                 **({'runner_expectation':runner_expectation} if scoped else {}))
             if scoped:need(clock()<B._stamp(runner_expectation['expires']))
