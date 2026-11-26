@@ -124,6 +124,10 @@ class GitHubAPI:
         self.request('GET','/repos/'+STORE+'/actions/workflows/'+str(workflow_id))
         scopes=self._last_oauth_scopes
         if type(scopes) is str and 'repo' in {part.strip() for part in scopes.split(',')}:return True
+        return self.has_recent_dispatch_proof(workflow_id)
+
+    def has_recent_dispatch_proof(self,workflow_id):
+        """In-memory proof only; never call GitHub at the last provider boundary."""
         issued=self._dispatch_permission_proofs.get(workflow_id)
         return issued is not None and 0<=time.monotonic()-issued<=300
 
@@ -411,9 +415,17 @@ def run_route(*,store,api,compute,compute_sha,commitment,trade_date,env,key,acce
                     return hold_before_provider()
             if source_check:source_check()
             wait_for_daily_budget_window(updater,slot,clock=clock)
-            if scoped and (store.head()!=head or clock()+SCOPED_MIN_CAPTURE_RUNWAY>=B._stamp(runner_expectation['expires'])):
-                return hold_before_provider()
-            candidate=updater.run_slot(slot['slot_id'],request_id,capture=capture or provider_capture(key,access))
+            def scoped_request_guard():
+                need(clock()+SCOPED_MIN_CAPTURE_RUNWAY<B._stamp(runner_expectation['expires']) and
+                     api.has_recent_dispatch_proof(grant['workflow_id']))
+            if scoped:
+                try:
+                    need(store.head()==head)
+                    scoped_request_guard()
+                except HostedDailyError:
+                    return hold_before_provider()
+            candidate=updater.run_slot(slot['slot_id'],request_id,capture=capture or provider_capture(key,access),
+                **({'request_guard':scoped_request_guard} if scoped else {}))
             verified=dispatch_verify_once(api,updater,candidate,repository=repository,clock=clock,
                 **({'runner_expectation':runner_expectation} if scoped else {}))
             if scoped:need(clock()<B._stamp(runner_expectation['expires']))

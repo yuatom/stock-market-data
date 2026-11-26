@@ -8,12 +8,12 @@ from pathlib import Path
 from scripts import run_daily_basis_route as H
 
 class TestScheduledSameInstance(TestCase):
-    def exercise(self, fail_probe=False, other_day=False, short_window=False):
+    def exercise(self, fail_probe=False, other_day=False, short_window=False, lost_memory_proof=False):
         now=datetime(2026,11,27,12,5,tzinfo=timezone.utc)
         head='d'*40; events=[]
         store=Mock(); store.head.return_value=head; store.lock.return_value=nullcontext()
         store.exists.return_value=False
-        api=Mock(); api.request.return_value={'id':33,'workflow_id':33,'private':True,'full_name':H.STORE,'owner':{'id':12}}
+        api=Mock(); api.has_recent_dispatch_proof.return_value=not lost_memory_proof; api.request.return_value={'id':33,'workflow_id':33,'private':True,'full_name':H.STORE,'owner':{'id':12}}
         updater=Mock(); updater.digest='e'*64; updater.authority.compute_sha="a"*40; updater.store=store
         slot={'slot_id':'friday','execution_day':'2026-11-27','valid_from':'2026-11-27T12:00:00Z','valid_until':'2026-11-27T12:12:00Z'}
         validated_runner=dict(runner_id=45,runner_name='home',labels=['self-hosted','macOS','ARM64','soxx-private-specific'],expires='2026-11-27T12:11:00Z')
@@ -21,7 +21,7 @@ class TestScheduledSameInstance(TestCase):
         prior={'read_sha':head}; updater.preflight_slot.return_value=(slot,head,'claim',prior,{})
         updater.run_slot.side_effect=lambda *a,**k: events.append('capture') or Mock(selector=None)
         authority=dict(valid_until='2026-11-27T13:00:00Z',readiness={'commitment':'1'*64},consumer_sha='b'*40,workflow_source_sha='c'*40)
-        raw=H.B.encode(dict(slots=[slot]))
+        raw=H.B.encode(dict(slots=[slot],workflow_id=415302427))
         def probe(*args, **kwargs):
             assert kwargs['api'] is api
             events.append('probe')
@@ -46,6 +46,9 @@ class TestScheduledSameInstance(TestCase):
 
     def test_late_proof_keeps_single_provider_request_unspent(self):
         self.assertEqual(self.exercise(short_window=True),(['probe','verify_permission'],'FINITE_DAILY_BASIS_HELD','ACQUISITION_HELD_REVIEW_REQUIRED'))
+
+    def test_same_instance_proof_not_present_keeps_soxx_held(self):
+        self.assertEqual(self.exercise(lost_memory_proof=True),(['probe','verify_permission'],'FINITE_DAILY_BASIS_HELD','ACQUISITION_HELD_REVIEW_REQUIRED'))
 
     def test_unmatched_session_cannot_probe(self):
         self.assertEqual(self.exercise(other_day=True),([],'FINITE_DAILY_BASIS_HELD','ACQUISITION_HELD_REVIEW_REQUIRED'))
@@ -189,8 +192,9 @@ def _scoped_git_case(tmp_path, mode):
 
     posted=[]
     class Api:
-        def dispatch_capability(self,workflow):
+        def has_recent_dispatch_proof(self,workflow):
             return workflow==WORKFLOW_ID and len(posted)==1
+        dispatch_capability=has_recent_dispatch_proof
         def request(self,method,path,payload=None):
             if method=='POST':
                 assert path.endswith(f'/workflows/{WORKFLOW_ID}/dispatches')
@@ -265,3 +269,24 @@ def test_denied_private_workflow_does_not_stop_ordinary_eod(tmp_path):
 
 def test_uncertain_private_workflow_does_not_fall_through_to_legacy_soxx(tmp_path):
     _scoped_git_case(tmp_path,'uncertain')
+
+class TestLastProviderBoundary(TestCase):
+    def test_scope_rechecked_after_debit_before_provider_transport(self):
+        from scripts import daily_basis_updates as U
+        u=object.__new__(U.DailyUpdater)
+        u.store=Mock(); u.store.head.return_value='c'*40; u.store.g.normal_blob_identity.return_value='b'*40
+        u.clock=lambda:datetime(2026,11,27,12,5,tzinfo=timezone.utc)
+        u.grant_raw=U.B.encode({'request_template':{}})
+        slot={'cutoff':'2026-11-25','valid_from':'2026-11-27T12:00:00Z','cleanup_until':'2026-11-27T12:18:00Z'}
+        u.preflight_slot=Mock(return_value=(slot,'a'*40,'claim',{},{}))
+        u._debit=Mock(return_value=('c'*40,'2026-11-27T12:05Z','budget','b'*40))
+        u._fresh=Mock();u._validate_grant_unchanged=Mock();u._attempt_ref=Mock()
+        sent=[]
+        def capture(**kwargs):
+            kwargs['before_request']()
+            sent.append(True)
+        def late():
+            if u._debit.called: raise ValueError('synthetic scope expiration')
+        with self.assertRaises(U.DailyBasisError):
+            u.run_slot('friday','45-1',capture=capture,request_guard=late)
+        u._debit.assert_called_once();self.assertEqual(sent,[])

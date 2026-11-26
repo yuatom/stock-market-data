@@ -261,8 +261,9 @@ class DailyUpdater:
         return slot,head,prefix,previous,old
 
     @guarded
-    def run_slot(self,slot_id,request_id,*,capture):
+    def run_slot(self,slot_id,request_id,*,capture,request_guard=None):
         slot,head,prefix,previous,old=self.preflight_slot(slot_id,request_id)
+        if request_guard is not None:request_guard()
         head,minute,budget_path,budget_blob=self._debit(slot,request_id,head,previous)
         evidence_head=head
         evidence_ref_expected='0'*40
@@ -275,6 +276,8 @@ class DailyUpdater:
             B._need(self.store.g.normal_blob_identity(head,budget_path)==budget_blob)
             now=self.clock().astimezone(timezone.utc)
             B._need(now.strftime('%Y-%m-%dT%H:%MZ')==minute and now.second<58)
+            # Last guard immediately before capture transport crosses into the provider.
+            if request_guard is not None:request_guard()
         retained={}
         publication_uncertain=False
         def retain(name,raw):
