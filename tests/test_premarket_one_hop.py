@@ -8,7 +8,7 @@ import soxx_appendix_exact_preflight as P
 from test_private_profile import fixture
 
 class PremarketOneHop(unittest.TestCase):
-    def build(self, actual_date, declared_date='2035-01-25'):
+    def build(self, actual_date, declared_date='2035-01-25', native_selection=False):
         temp=tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         root=Path(temp.name)
@@ -29,6 +29,17 @@ class PremarketOneHop(unittest.TestCase):
         inv='data/market-data/collector-state/market-data-inventory.json'
         write(doc['native_path'],{'synthetic_native':True})
         write(inv,{'old':True})
+        if native_selection:
+            import hashlib
+            fake={'fixture':'native admission'}
+            raw=json.dumps(fake).encode()
+            admission=hashlib.sha1(f'blob {len(raw)}\0'.encode()+raw).hexdigest()
+            path='data/market-data/series-admissions/daily/twelve_data_basic/SOXX/'+admission+'.json'
+            write(path,fake)
+            active='data/market-data/series-active/daily/twelve_data_basic/SOXX.json'
+            blob=git('hash-object',doc['native_path'])
+            write(active,dict(symbol='SOXX',provider='twelve_data_basic',basis_id=doc['native_path'].split('/')[-2],
+                              admission_blob_sha=admission,snapshot_blob_sha=blob))
         doc['evidence_base']=commit('Historical evidence')
         doc['native_blob']=git('rev-parse',doc['evidence_base']+':'+doc['native_path'])
         syn=f'data/market-data/sessions/2035-01/{declared_date}/premarket/0400-0930/nasdaq_public_extended/premarket-test-073500-et.json'

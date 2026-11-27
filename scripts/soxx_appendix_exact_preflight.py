@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Read-only preflight for one exact SOXX prior-close appendix. No publication."""
-from dataclasses import dataclass
+from __future__ import annotations
+from dataclasses import dataclass, replace
 from datetime import date as calendar_date
 from pathlib import Path
 from types import MappingProxyType
@@ -29,6 +30,9 @@ class _Plan:
     trade_dates:tuple
     advance:object=None
     candidate_parents:tuple=()
+    native_selector_blob:str|None=None
+    native_admission_blob:str|None=None
+    frozen_appendix_commit:str|None=None
 
 
 def _git(root,*args):
@@ -73,6 +77,8 @@ def _day(value):
 def load_profile(raw):
     _require(type(raw) is bytes and 0<len(raw)<=16000,'PRIVATE_PROFILE_SIZE')
     doc=_strict_json(raw)
+    if type(doc) is dict and type(doc.get('schema_version')) is int and doc['schema_version']==2:
+        return _load_two_hop(doc)
     _keys(doc,'schema_version','kind','salt','evidence_base','base','head','tree','candidate_parents',
           'native_path','native_blob','manifest','outputs','trade_dates','advance')
     _require(type(doc['schema_version']) is int and doc['schema_version']==1
@@ -173,10 +179,18 @@ def _verify_base_advance(root,evidence_base,native_blob,publication_base,advance
         raise ValueError(str(exc)) from exc
 
 
+def _verify_frozen_outputs(root,plan):
+    if plan.frozen_appendix_commit is None:
+        return
+    _git(root,'merge-base','--is-ancestor',plan.frozen_appendix_commit,plan.head)
+    for path,blob in plan.blobs.items():
+        _require(_git(root,'ls-tree',plan.frozen_appendix_commit,'--',path).decode('ascii').strip()
+                 ==f'100644 blob {blob}\t{path}','FROZEN_APPENDIX_BYTES_CHANGE')
+
 def preflight(root, plan):
     def g(*args):
         return _git(root,*args).decode('ascii').strip()
-    _verify_base_advance(root,plan.evidence_base,plan.native_blob,plan.base,plan.advance,plan.native_path)
+    _verify_plan_advance(root,plan)
     _require(g('rev-parse','HEAD')==plan.head,'STORE_CANDIDATE_DRIFT')
     _require(not g('status','--porcelain','--untracked-files=all'),'STORE_DIRTY_WORKTREE')
     parents=plan.candidate_parents or (plan.base,)
@@ -188,6 +202,7 @@ def preflight(root, plan):
     fields=raw.decode('ascii').split('\0')
     _require(fields[-1]=='' and len(fields)==9,'STORE_NEEDS_EXACT_FOUR_ADDS')
     _require(dict(zip(fields[1::2],fields[::2]))==dict.fromkeys(plan.blobs,'A'),'STORE_NEEDS_EXACT_FOUR_ADDS')
+    _verify_frozen_outputs(root,plan)
     for path,blob in plan.blobs.items():
         _require(g('ls-tree',plan.head,'--',path)==f'100644 blob {blob}\t{path}',
                  'STORE_APPENDIX_BLOB_OR_FILE_MODE_MISMATCH')
@@ -218,3 +233,163 @@ def preflight(root, plan):
              'STORE_APPENDIX_PRICE_ONLY_SCOPE_MISMATCH')
     return {'status':'local_preflight_only','evidence_base':plan.evidence_base,'base':plan.base,'candidate':plan.head,'tree':plan.tree,
             'publication_manifest':plan.manifest,'provider_requests':0,'consumer_authority':False}
+
+@dataclass(frozen=True)
+class _CloseAdvance:
+    publication_base:str
+    tree:str
+    trade_date:str
+    manifest:str
+    paths:object
+    compute_sha:str
+    snapshot_id:str
+    symbols:tuple
+
+def _load_two_hop(doc):
+    _keys(doc,'schema_version','kind','salt','evidence_base','base','head','tree','candidate_parents',
+          'native_path','native_blob','manifest','outputs','trade_dates','advance',
+          'native_selector_blob','native_admission_blob','frozen_appendix_commit')
+    sequence=doc['advance']
+    _require(type(sequence) is list and len(sequence)==2,'PRIVATE_PROFILE_FINITE_SEQUENCE')
+    pre,close=sequence
+    _keys(pre,'stage','commit','tree','trade_date','manifest','paths')
+    _keys(close,'stage','commit','tree','trade_date','manifest','paths','compute_sha','window','snapshot_id','symbols')
+    _require(pre['stage']=='premarket' and close['stage']=='close' and
+             pre['trade_date']==close['trade_date'] and close['window']=={'start':'12:45','end':'13:00'},
+             'PRIVATE_PROFILE_FINITE_STAGE_WINDOW')
+    old={k:v for k,v in doc.items() if k not in ('native_selector_blob','native_admission_blob','frozen_appendix_commit')}
+    # Reuse v1's field and first-hop validators without making the v1 type aware of Close.
+    old.update(schema_version=1,base=pre['commit'],candidate_parents=[pre['commit']],
+               advance={k:v for k,v in pre.items() if k not in ('stage','commit')})
+    plan=load_profile(json.dumps(old).encode())
+    _require(plan.advance is not None,'PRIVATE_PROFILE_FINITE_PRE_REQUIRED')
+    base=_match(OID,doc['base'])
+    _require(base==_match(OID,close['commit']) and len({base,plan.evidence_base,plan.base,plan.head})==4,
+             'PRIVATE_PROFILE_FINITE_OBJECT_SCOPE')
+    parents=doc['candidate_parents']
+    _require(type(parents) is list and 1<=len(parents)<=2,'PRIVATE_PROFILE_PARENT_SHAPE')
+    parents=tuple(_match(OID,p) for p in parents)
+    _require(len(set(parents))==len(parents) and base in parents and plan.head not in parents,'PRIVATE_PROFILE_PARENT_SCOPE')
+    frozen=_match(OID,doc['frozen_appendix_commit'])
+    _require(frozen not in {base,plan.evidence_base,plan.base,plan.head},'PRIVATE_PROFILE_FROZEN_SCOPE')
+    day=_day(close['trade_date']); month=day[:7]
+    m=_match(re.compile(fr'data/market-data/collector-state/{month}/{day}-close-[0-9a-f]{{16}}-publication[.]json'),close['manifest'])
+    sid=_match(re.compile(r'close-[0-9]{6}-et'),close['snapshot_id'])
+    sha=_match(OID,close['compute_sha'])
+    symbols=close['symbols']
+    _require(type(symbols) is list and len(symbols)==33,'PRIVATE_PROFILE_CLOSE_SYMBOL_COUNT')
+    symbols=tuple(_match(re.compile(r'[A-Z0-9]{1,10}'),r) for r in symbols)
+    _require('SOXX' in symbols and len(set(symbols))==33,'PRIVATE_PROFILE_CLOSE_SYMBOLS')
+    rows=close['paths']
+    _require(type(rows) is dict and len(rows)==41,'PRIVATE_PROFILE_CLOSE_PATH_COUNT')
+    paths={}
+    for path,row in rows.items():
+        _keys(row,'status','blob')
+        _require(type(path) is str and len(path)<300 and row['status'] in ('A','M'),'PRIVATE_PROFILE_CLOSE_PATH_SCOPE')
+        paths[path]=(row['status'],_match(OID,row['blob']))
+    advance=_CloseAdvance(base,_match(OID,close['tree']),day,m,MappingProxyType(paths),sha,sid,symbols)
+    _close_paths(advance)
+    return replace(plan,base=base,candidate_parents=parents,advance=(plan.advance,advance),
+                   native_selector_blob=_match(OID,doc['native_selector_blob']),
+                   native_admission_blob=_match(OID,doc['native_admission_blob']),
+                   frozen_appendix_commit=frozen)
+
+def _close_paths(hop):
+    root='data/market-data/'
+    month=hop.trade_date[:7]
+    d=f'{month}/{hop.trade_date}'
+    snaps=f'{root}snapshots/{d}/close/'
+    proofs=f'{root}proofs/deterministic-metrics/{d}/close/'
+    collectors=f'{root}collector-state/{month}/{hop.trade_date}-'
+    session=f'{root}sessions/{d}/regular/1245-1300/twelve_data_basic/'
+    captures={s:f'{session}close-{s.lower()}-{hop.snapshot_id[6:]}.json' for s in hop.symbols}
+    paths=dict(snapshot=snaps+hop.snapshot_id+'.json',snapshot_latest=snaps+'latest.json',
+               proof=proofs+hop.compute_sha+'/'+hop.snapshot_id+'.json',proof_latest=proofs+'latest.json',
+               missing=collectors+'close-missing.json',budget=collectors+'twelve-data-budget.json')
+    inventory=root+'collector-state/market-data-inventory.json'
+    expected=dict.fromkeys([*paths.values(),*captures.values(),hop.manifest],'A')
+    expected[inventory]='M'
+    _require({p:s for p,(s,_) in hop.paths.items()}==expected,'PRIVATE_PROFILE_CLOSE_OBJECT_SCOPE')
+    return paths,captures
+
+def _verify_native_selection(root,commit,plan):
+    r='data/market-data/'
+    active=r+'series-active/daily/twelve_data_basic/SOXX.json'
+    basis=plan.native_path.split('/')[-2]
+    admission=r+'series-admissions/daily/twelve_data_basic/SOXX/'+plan.native_admission_blob+'.json'
+    for path,pin in ((active,plan.native_selector_blob),(admission,plan.native_admission_blob),(plan.native_path,plan.native_blob)):
+        _require(_git(root,'ls-tree',commit,'--',path).decode('ascii').strip()==f'100644 blob {pin}\t{path}',
+                 'FINITE_NATIVE_SELECTOR_OR_ADMISSION_DRIFT')
+    data=_strict_json(_git(root,'show',commit+':'+active))
+    _require(type(data) is dict and all(data.get(k)==v for k,v in dict(symbol='SOXX',provider='twelve_data_basic',
+             basis_id=basis,snapshot_blob_sha=plan.native_blob,admission_blob_sha=plan.native_admission_blob).items()),
+             'FINITE_NATIVE_SELECTOR_INCONSISTENT')
+
+def _verify_plan_advance(root,plan):
+    if not isinstance(plan.advance,tuple):
+        _verify_base_advance(root,plan.evidence_base,plan.native_blob,plan.base,plan.advance,plan.native_path)
+        return
+    pre,close=plan.advance
+    for c in (plan.evidence_base,pre.publication_base,close.publication_base):
+        _verify_native_selection(root,c,plan)
+    _verify_base_advance(root,plan.evidence_base,plan.native_blob,pre.publication_base,pre,plan.native_path)
+    _verify_early_close(root,pre.publication_base,close)
+
+def _verify_early_close(root,parent,hop):
+    """Reconcile previously retained Store drift; never qualify a producer or minute coverage.
+
+    The independently approved private profile pins reviewed retained objects;
+    seeing a per-symbol capture says nothing about complete minute coverage.
+    """
+    commit=hop.publication_base
+    paths,captures=_close_paths(hop)
+    def g(*args): return _git(root,*args).decode('ascii').strip()
+    def load(path): return _strict_json(_git(root,'show',commit+':'+path))
+    def rel(path): return path.removeprefix('data/market-data/')
+    def blob(path): return hop.paths[path][1]
+    def agrees(obj,**expected):
+        return type(obj) is dict and all(obj.get(k)==v for k,v in expected.items())
+    _require(g('rev-list','--parents','-n','1',commit).split()==[commit,parent],'CLOSE_NOT_NEXT_DIRECT_CHILD')
+    _require(g('rev-parse',commit+'^{tree}')==hop.tree,'CLOSE_TREE_DRIFT')
+    observed=_git(root,'diff-tree','-z','-r','--no-renames','--name-status',parent,commit).decode('ascii').split('\0')
+    _require(observed[-1]=='' and len(observed)==2*len(hop.paths)+1 and
+             dict(zip(observed[1::2],observed[::2]))=={k:v[0] for k,v in hop.paths.items()},'CLOSE_DELTA_DRIFT')
+    for path,(_,pin) in hop.paths.items():
+        _require(g('ls-tree',commit,'--',path)==f'100644 blob {pin}\t{path}','CLOSE_PATH_TYPE_OR_BLOB_DRIFT')
+    day=hop.trade_date
+    manifest=load(hop.manifest)
+    _require(agrees(manifest,schema_version=1,stage='close',trade_date=day) and type(manifest['schema_version']) is int
+             and type(manifest.get('request_id')) is str and re.fullmatch(fr"close-{day.replace('-','')}-[0-9]{{6}}-et-01-collector",manifest['request_id']),
+             'CLOSE_TERMINAL_UNRECOGNIZED')
+    try:
+        verify_exact_output_closure(root,parent,commit,hop.manifest)
+    except StorePushError as exc:
+        raise ValueError('CLOSE_TERMINAL_OUTPUT_MISMATCH') from exc
+    win={'start':'12:45','end':'13:00'}
+    snapshot=load(paths['snapshot'])
+    _require(agrees(snapshot,schema_version=1,stage='close',trade_date=day,snapshot_id=hop.snapshot_id,target_window=win,missing=[]),
+             'CLOSE_SNAPSHOT_SCOPE_MISMATCH')
+    coverage=snapshot.get('coverage')
+    _require(agrees(coverage,symbols_requested_in_increment=33,symbols_available_in_increment=33),
+             'CLOSE_COVERAGE_SCOPE_MISMATCH')
+    refs=snapshot.get('data_refs')
+    _require(type(refs) is list and len(refs)==33 and all(type(x) is dict for x in refs) and
+             {x.get('symbol') for x in refs}==set(captures),'CLOSE_SNAPSHOT_SYMBOL_SCOPE_MISMATCH')
+    for ref in refs:
+        symbol=ref['symbol']; path=captures[symbol]
+        _require(agrees(ref,path=rel(path),blob_sha=blob(path),provider='twelve_data_basic',window='12:45-13:00',reason_class='success')
+                 and ref.get('kind') in ('regular_intraday_capture','cross_asset_proxy_capture','sector_context_capture'),
+                 'CLOSE_CAPTURE_REF_MISMATCH')
+        capture=load(path)
+        _require(agrees(capture,schema_version=1,provider='twelve_data_basic',trade_date=day,session='regular',window=win,
+                 capture_id=path.rsplit('/',1)[1][:-5],missing_symbols=[]),'CLOSE_CAPTURE_SCOPE_MISMATCH')
+        facts=capture.get('qualified_facts')
+        _require(type(facts) is list and bool(facts) and all(agrees(f,symbol=symbol) for f in facts),'CLOSE_CAPTURE_SYMBOL_MISMATCH')
+    snap=dict(snapshot_path=rel(paths['snapshot']),snapshot_blob_sha=blob(paths['snapshot']),snapshot_id=hop.snapshot_id,schema_version=1)
+    _require(agrees(load(paths['snapshot_latest']),**snap) and agrees(load(paths['proof_latest']),**snap,
+                     proof_blob_sha=blob(paths['proof']),proof_path=rel(paths['proof'])),'CLOSE_POINTER_MISMATCH')
+    _require(agrees(load(paths['proof']),schema_version=1,proof_kind='stock_dairy_deterministic_metrics',stage='close',trade_date=day,
+                 data_plane_commit_sha=hop.compute_sha,snapshot={'path':snap['snapshot_path'],'blob_sha':snap['snapshot_blob_sha'],
+                                                               'snapshot_id':hop.snapshot_id}),'CLOSE_PROOF_SOURCE_MISMATCH')
+    _require(agrees(load(paths['missing']),schema_version=1,trade_date=day,last_mode='close',missing=[]) and
+             agrees(load(paths['budget']),schema_version=1,trade_date=day),'CLOSE_STATE_SCOPE_MISMATCH')

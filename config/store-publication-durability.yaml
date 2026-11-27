@@ -73,7 +73,9 @@ writer_scope:
       expected_repository: yuatom/stock-market-data-store
       private_runtime_profile_required: true
       independent_run_authority_binds_profile_sha256: true
-      store_base_advance: exact_private_one_hop_premarket_inventory_and_output_closure
+      store_base_advance: v1_exact_private_premarket_or_v2_exact_ordered_premarket_then_early_close
+      store_base_advance_purpose: previously_verified_retained_store_drift_only
+      store_base_advance_never_grants_producer_or_complete_minute_admission: true
       publication_logs: generic_status_only
       exact_four_additions_required: true
       branch_update: github_graphql_createCommitOnBranch_expectedHeadOid_single_post

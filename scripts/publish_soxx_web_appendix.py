@@ -67,12 +67,18 @@ def _require_origins(compute, store):
             if len(observed)!=1 or observed[0] not in allowed:
                 raise ValueError('EXACT_REPOSITORY_ORIGIN_REQUIRED')
 
+def _durable_inputs(exact):
+    refs={exact.evidence_base,exact.base}
+    if isinstance(exact.advance,tuple):
+        refs.add(exact.advance[0].publication_base)
+    return refs
+
 def _require_local_and_remote(compute,store,sha,exact):
     checks=((compute,('rev-parse','HEAD'),sha),
             (compute,('status','--porcelain','--untracked-files=all'),''),
             (compute,('ls-remote','--exit-code','origin','refs/heads/main'),sha+'\trefs/heads/main'),
             (store,('ls-remote','--exit-code','origin','refs/heads/main'),exact.base+'\trefs/heads/main'))
-    for commit in sorted({exact.evidence_base,exact.base}):
+    for commit in sorted(_durable_inputs(exact)):
         ref='refs/tags/market-data-read/'+commit
         checks+=((store,('ls-remote','--exit-code','origin',ref),commit+'\t'+ref),)
     for root,args,expected in checks:
