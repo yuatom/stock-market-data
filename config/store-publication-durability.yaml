@@ -63,6 +63,19 @@ writer_scope:
       publication_helper: scripts/verify_store_publication.py
       separate_request_specific_output_manifest: true
       base_advance_policy: nov10_close_artifacts_only_v1
+      separately_authorized_historical_soxx:
+        job: reconcile_soxx
+        entrypoint: scripts/reconcile_retained_soxx_dispatch.py
+        dispatch: exact_owner_login_and_numeric_actor_manual_main_first_attempt_public_compute_and_opaque_commitment_only
+        authorization_is_owner_selected_independently_verified_bytes_not_separate_issuer_attestation: true
+        private_receipt: immutable_single_addition_off_main_on_exact_store_base
+        private_profile: existing_exact_soxx_price_appendix_contract
+        replay_guard: one_private_create_only_claim_for_entire_approved_frozen_historical_appendix_lane_before_main_cas
+        claim_after_post_attempt_never_retry_or_cleanup: true
+        provider_requests: 0
+        exact_four_additions_required: true
+        branch_update: github_graphql_createCommitOnBranch_expectedHeadOid_single_post
+        unknown_outcome: stop_inspect_no_retry
       exact_actual_base_rechecked_before_single_push: true
     .github/workflows/retained-soxx-web-price-appendix.yml:
       job: publish_exact_appendix
