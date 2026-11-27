@@ -346,7 +346,8 @@ def resolve_tail_targets(h, *, repo, store_sha, universe, execution_date,
 
 def backfill(h, *, compute, compute_sha, repo, store_sha, execution_date, historical_cutoff,
              request_id, config, universe, access, key, fixed_selector=None, dynamic_selector=None, discovery_repo=None, clock=recovery.now_utc,
-             symbol_transaction=None, overall_deadline=None):
+             symbol_transaction=None, overall_deadline=None, request_deadline=None,
+             authorization_valid_until=None):
     a = recovery.admission()
     policy=config['collector']['twelve_data_daily'].get('bounded_overlap_revision_policy')
     if policy not in (None,'price_only_volume_blocked_v1'):
@@ -389,6 +390,9 @@ def backfill(h, *, compute, compute_sha, repo, store_sha, execution_date, histor
     try:
         writer.report(report)
         deadline = min(time.monotonic() + 600, overall_deadline) if overall_deadline is not None else time.monotonic()+600
+        spending_deadline=min(deadline,request_deadline) if request_deadline is not None else deadline
+        spending_options=({'authorization_valid_until': authorization_valid_until}
+                          if authorization_valid_until is not None else {})
         budget = config['collector']['budgets']['twelve_data_basic']
         for offset, item in enumerate(entries):
             recovery.source_guard(compute, compute_sha)
@@ -400,8 +404,8 @@ def backfill(h, *, compute, compute_sha, repo, store_sha, execution_date, histor
                 if len(entries) > per_day - a.read_budget_state(path, execution_date)['credits']:
                     raise RecoveryError('budget_exhausted')
             debit = a.debit_before_request(h, writer, repo / recovery.PREFIX, execution_date, budget, clock=clock,
-                deadline=deadline, maturity='00:00', compute=compute, compute_sha=compute_sha,
-                timing=report['timing_diagnostics'])
+                deadline=spending_deadline, maturity='00:00', compute=compute, compute_sha=compute_sha,
+                timing=report['timing_diagnostics'], **spending_options)
             report['budget_debits'] += 1
             attempted = False
             def before_request():
@@ -409,8 +413,12 @@ def backfill(h, *, compute, compute_sha, repo, store_sha, execution_date, histor
                 if attempted:
                     raise RecoveryError('candidate_invalid')
                 a.guard_provider_request(writer, debit, compute, compute_sha, execution_date, clock=clock,
-                                         deadline=deadline, timing=report['timing_diagnostics'])
+                                         deadline=spending_deadline, timing=report['timing_diagnostics'])
                 validate_dates(execution_date, historical_cutoff, maturity, clock())
+                if authorization_valid_until is not None and (
+                    time.monotonic()>=spending_deadline or clock()>=authorization_valid_until
+                ):
+                    raise RecoveryError('deadline_exceeded')
                 attempted = True
                 report['requests_attempted'] += 1
             fetched = h.rebaser._fetch_replacement_daily(item['symbol'], key, access, outputsize=item['outputsize'],

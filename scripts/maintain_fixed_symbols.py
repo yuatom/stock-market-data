@@ -669,7 +669,8 @@ def _verify_append_terminal(h,repo,*,start,sha,path,day,cutoff,request_id,symbol
 
 
 def maintain_append(h,*,compute,compute_sha,repo,store_sha,execution_date,historical_cutoff,
-                    request_id,config,universe,access,key,fixed_selector,clock=r.now_utc):
+                    request_id,config,universe,access,key,fixed_selector,clock=r.now_utc,
+                    authorization_valid_until=None,authorization_deadline=None):
     """Same fixed-target controller, append transactions only; never r.recover.
 
     Confirmed data rejection is retained and stops; unknown request/publication stops.
@@ -683,6 +684,15 @@ def maintain_append(h,*,compute,compute_sha,repo,store_sha,execution_date,histor
              published_count=0,quarantined_symbols=[],not_attempted_symbols=[],stop=None,
              last_verified_commit_sha=head,production_recovery_accepted=False,automatic_retry_allowed=False)
     try:
+        # Anchor a spending deadline to the verified receipt as well as the
+        # existing stage allowance. Cleanup/readback keep their own deadline.
+        spending_options={}
+        if authorization_valid_until is not None:
+            if authorization_deadline is None:_fail('deadline_exceeded')
+            request_deadline=min(deadline,authorization_deadline)
+            if time.monotonic()>=request_deadline or clock()>=authorization_valid_until:_fail('deadline_exceeded')
+            spending_options=dict(request_deadline=request_deadline, authorization_valid_until=authorization_valid_until)
+        elif authorization_deadline is not None:_fail('deadline_exceeded')
         if config['collector']['twelve_data_daily'].get('bounded_overlap_revision_policy')!='price_only_volume_blocked_v1':_fail('invalid_target')
         if not key or not re.fullmatch(r'\d+-\d+',request_id):_fail('invalid_target')
         maturity=config['collector']['twelve_data_daily']['settlement_maturity']['minimum_next_day_et']
@@ -696,10 +706,14 @@ def maintain_append(h,*,compute,compute_sha,repo,store_sha,execution_date,histor
         plan=dict(out,mode=MODE,trade_date=execution_date,kind='append_only_batch_plan',status='PLANNED',
                   fixed_selection={'schema_version':1,'targets':targets},maximum_provider_requests=len(targets),
                   overall_timeout_seconds=1800,volume_policy_scope='per_symbol')
+        if authorization_valid_until is not None and (time.monotonic()>=request_deadline or clock()>=authorization_valid_until):
+            _fail('deadline_exceeded')
         head,plan_path=_publish_metadata(repo,head,execution_date,request_id,config,plan,deadline=deadline)
         out.update(batch_manifest_commit_sha=head,batch_manifest_path=plan_path,last_verified_commit_sha=head)
         for target in targets:
             if time.monotonic()>deadline:_fail('deadline_exceeded')
+            if authorization_valid_until is not None and (time.monotonic()>=request_deadline or clock()>=authorization_valid_until):
+                _fail('deadline_exceeded')
             r.source_guard(compute,compute_sha);tail.validate_dates(execution_date,historical_cutoff,maturity,clock())
             _adopt(repo,head)
             pending=[t for t in targets if t['symbol'] not in passed]
@@ -711,7 +725,7 @@ def maintain_append(h,*,compute,compute_sha,repo,store_sha,execution_date,histor
                 result=tail.backfill(h,compute=compute,compute_sha=compute_sha,repo=repo,store_sha=head,
                     execution_date=execution_date,historical_cutoff=historical_cutoff,request_id=request_id,
                     config=config,universe=universe,access=access,key=key,fixed_selector=selector,clock=clock,
-                    symbol_transaction=symbol,overall_deadline=deadline)
+                    symbol_transaction=symbol,overall_deadline=deadline,**spending_options)
             except Exception as exc:
                 summary=r.failure_summary(exc)
                 out['requests_attempted']+=summary.get('requests_attempted',0)
