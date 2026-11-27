@@ -79,6 +79,8 @@ def load_profile(raw):
     doc=_strict_json(raw)
     if type(doc) is dict and type(doc.get('schema_version')) is int and doc['schema_version']==2:
         return _load_two_hop(doc)
+    if type(doc) is dict and type(doc.get('schema_version')) is int and doc['schema_version']==3:
+        return _load_isolated_head(doc)
     _keys(doc,'schema_version','kind','salt','evidence_base','base','head','tree','candidate_parents',
           'native_path','native_blob','manifest','outputs','trade_dates','advance')
     _require(type(doc['schema_version']) is int and doc['schema_version']==1
@@ -326,6 +328,9 @@ def _verify_native_selection(root,commit,plan):
              'FINITE_NATIVE_SELECTOR_INCONSISTENT')
 
 def _verify_plan_advance(root,plan):
+    if isinstance(plan.advance,_IsolatedHead):
+        _verify_isolated_head(root,plan)
+        return
     if not isinstance(plan.advance,tuple):
         _verify_base_advance(root,plan.evidence_base,plan.native_blob,plan.base,plan.advance,plan.native_path)
         return
@@ -393,3 +398,132 @@ def _verify_early_close(root,parent,hop):
                                                                'snapshot_id':hop.snapshot_id}),'CLOSE_PROOF_SOURCE_MISMATCH')
     _require(agrees(load(paths['missing']),schema_version=1,trade_date=day,last_mode='close',missing=[]) and
              agrees(load(paths['budget']),schema_version=1,trade_date=day),'CLOSE_STATE_SCOPE_MISMATCH')
+
+
+@dataclass(frozen=True)
+class _IsolatedHead:
+    tree:str
+
+def _load_isolated_head(doc):
+    _keys(doc,'schema_version','kind','salt','evidence_base','base','head','tree','candidate_parents',
+          'native_path','native_blob','manifest','outputs','trade_dates','advance',
+          'native_selector_blob','native_admission_blob','frozen_appendix_commit')
+    advance=doc['advance']
+    _keys(advance,'kind','tree')
+    _require(advance['kind']=='exact_durable_current_head_isolation','ISOLATED_HEAD_TYPE')
+    if not isinstance(doc['candidate_parents'],list) or len(doc['candidate_parents']) not in (1,2):
+        raise ValueError('PRIVATE_PROFILE_PARENT_SHAPE')
+    parents=tuple(_match(OID,i) for i in doc['candidate_parents'])
+    base=_match(OID,doc['base'])
+    frozen=_match(OID,doc['frozen_appendix_commit'])
+    old={k:v for k,v in doc.items() if k not in ('native_selector_blob','native_admission_blob','frozen_appendix_commit')}
+    old.update(schema_version=1,base=doc['evidence_base'],candidate_parents=[doc['evidence_base']],advance=None)
+    plan=load_profile(json.dumps(old).encode())
+    _require(len({base,plan.evidence_base,plan.head,frozen})==4 and len(set(parents))==len(parents)
+             and base in parents and plan.head not in parents,'ISOLATED_EXACT_OBJECT_SCOPE')
+    return replace(plan, base=base,candidate_parents=parents,advance=_IsolatedHead(_match(OID,advance['tree'])),
+                   native_selector_blob=_match(OID,doc['native_selector_blob']),
+                   native_admission_blob=_match(OID,doc['native_admission_blob']),
+                   frozen_appendix_commit=frozen)
+
+def _admission_evidence_refs(root,plan,admission):
+    admitted=_strict_json(_git(root,'show',plan.evidence_base+':'+admission))
+    _require(type(admitted) is dict and type(admitted.get('workflow_evidence')) is dict,
+             'ISOLATED_ADMISSION_SHAPE')
+    refs=(admitted.get('envelope_ref'),admitted['workflow_evidence'].get('terminal_ref'))
+    evidence={}
+    for ref in refs:
+        _keys(ref,'path','blob_sha')
+        path=_match(re.compile(r'capture-evidence/[a-zA-Z0-9_./-]+'),ref['path'])
+        _require(not any(p in ('','.','..') for p in path.split('/')) and path not in evidence,
+                 'ISOLATED_ADMISSION_PATH_SCOPE')
+        evidence[path]=_match(OID,ref['blob_sha'])
+    return evidence
+
+_STORE_INVENTORY='data/market-data/'+'collector-state/market-data-inventory.json'
+
+def _inventory_has_no_appendix_index(root,commit,plan):
+    inventory=_strict_json(_git(root,'show',commit+':'+_STORE_INVENTORY))
+    _keys(inventory,'schema_version','generated_at','market_fact_authority','purpose','daily_series_summary',
+          'session_capture_summary','stage_snapshot_summary','extended_hours_probe_summary')
+    _require(type(inventory['schema_version']) is int and inventory['schema_version']==1 and
+             inventory['market_fact_authority'] is False and type(inventory['session_capture_summary']) is list and
+             type(inventory['stage_snapshot_summary']) is list,'ISOLATED_INVENTORY_SCHEMA')
+    daily=inventory['daily_series_summary']
+    _keys(daily,'series_count','provider_series_counts','series')
+    _require(type(daily['series']) is list and type(daily['series_count']) is int and
+             daily['series_count']==len(daily['series']),'ISOLATED_DAILY_INVENTORY_SHAPE')
+    def records(doc):
+        if isinstance(doc,dict):
+            for key,value in doc.items():
+                yield key
+                yield from records(value)
+        elif isinstance(doc,list):
+            for value in doc:
+                yield from records(value)
+        elif isinstance(doc,str):
+            yield doc
+    _require(not any(any(term in x.lower() for term in ('soxx-prior-close-v1','soxx_public_web_price_appendix',
+                     'supplement','appendix')) for x in records(inventory)),
+                     'ISOLATED_APPENDIX_ALREADY_INDEXED')
+    for row in daily['series']:
+        _require(type(row) is dict and type(row.get('symbol')) is str and type(row.get('index_path')) is str,
+                 'ISOLATED_DAILY_INVENTORY_ROW')
+        if row['symbol'].upper()!='SOXX':
+            _require('/SOXX/' not in row['index_path'].upper(),'ISOLATED_DAILY_TARGET_OR_UNCERTAIN_INDEX')
+            continue
+        provider=row.get('provider')
+        _require(provider in ('twelve_data_basic','stockanalysis_spglobal_historical_html') and
+                 row['index_path']==f'series/daily/{provider}/SOXX/_index.json' and
+                 _day(row.get('first_trade_date'))<=_day(row.get('last_trade_date'))<plan.trade_dates[0],
+                 'ISOLATED_DAILY_TARGET_OR_UNCERTAIN_INDEX')
+
+def _verify_isolated_head(root,plan):
+    """Prove no scoped history drift, without qualifying any unrelated retained change."""
+    base,evidence=plan.base,plan.evidence_base
+    def g(*a): return _git(root,*a).decode('ascii').strip()
+    _require(g('rev-parse',base+'^{tree}')==plan.advance.tree,'ISOLATED_BASE_TREE_DRIFT')
+    _git(root,'merge-base','--is-ancestor',evidence,base)
+    # Production Store's normal writes are single-parent. Reject any ambiguous
+    # merge, missing ancestry or unexpectedly large history instead of trusting it.
+    commits=g('rev-list','--parents','--max-count=257',evidence+'..'+base).splitlines()
+    _require(1<=len(commits)<=256,'ISOLATED_HISTORY_BOUND')
+    cursor=base
+    for row in commits:
+        nodes=row.split()
+        _require(len(nodes)==2 and nodes[0]==cursor,'ISOLATED_NONLINEAR_HISTORY')
+        cursor=nodes[1]
+    _require(cursor==evidence,'ISOLATED_ANCESTRY_INCOMPLETE')
+    for commit in (evidence,base):
+        _verify_native_selection(root,commit,plan)
+    inventory_edits=g('log','--full-history','--format=%H','--no-renames',evidence+'..'+base,'--',_STORE_INVENTORY).splitlines()
+    for commit in sorted({evidence,base,*inventory_edits}):
+        _inventory_has_no_appendix_index(root,commit,plan)
+    prefix='data/market-data/'
+    active=prefix+'series-active/daily/twelve_data_basic/SOXX.json'
+    admissions=prefix+'series-admissions/daily/twelve_data_basic/SOXX'
+    versions=prefix+'series-versions/daily/twelve_data_basic/SOXX'
+    admission=admissions+'/'+plan.native_admission_blob+'.json'
+    linked=_admission_evidence_refs(root,plan,admission)
+    for commit in (evidence,base):
+        for path,blob in linked.items():
+            _require(g('ls-tree',commit,'--',path)==f'100644 blob {blob}\t{path}',
+                     'ISOLATED_NATIVE_EVIDENCE_DRIFT')
+        snapshot=_strict_json(_git(root,'show',commit+':'+plan.native_path))
+        rows=snapshot.get('records') if type(snapshot) is dict else None
+        _require(type(rows) is list and bool(rows) and all(type(x) is dict for x in rows),
+                 'ISOLATED_NATIVE_DATE_SHAPE')
+        dates=[_day(x.get('datetime')) for x in rows]
+        _require(len(set(dates))==len(dates) and not set(plan.trade_dates).intersection(dates),
+                 'ISOLATED_NATIVE_TARGET_OCCUPIED')
+    for p in plan.blobs:
+        _require(not g('ls-tree',evidence,'--',p) and not g('ls-tree',base,'--',p),'ISOLATED_APPENDIX_PATH_OCCUPIED')
+    protected=(active,admissions,versions,*linked,*plan.blobs,
+               ':(icase,glob)'+prefix+'series/daily/*/SOXX/**',
+               ':(icase,glob)'+prefix+'series-active/daily/*/SOXX.json',
+               ':(icase,glob)'+prefix+'series-admissions/daily/*/SOXX/**',
+               ':(icase,glob)'+prefix+'series-versions/daily/*/SOXX/**',
+               ':(icase,glob)'+prefix+'recovery/**/*soxx*',
+               ':(icase,glob)'+prefix+'recovery/**/*soxx*/**')
+    history=g('log','--full-history','--format=%H','--no-renames',evidence+'..'+base,'--',*protected)
+    _require(not history,'ISOLATED_PROTECTED_HISTORY_CHANGED')

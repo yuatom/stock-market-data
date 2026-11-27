@@ -73,7 +73,7 @@ writer_scope:
       expected_repository: yuatom/stock-market-data-store
       private_runtime_profile_required: true
       independent_run_authority_binds_profile_sha256: true
-      store_base_advance: v1_exact_private_premarket_or_v2_exact_ordered_premarket_then_early_close
+      store_base_advance: v1_exact_private_premarket_v2_exact_ordered_premarket_then_early_close_or_v3_exact_durable_current_head_with_no_native_or_appendix_history_drift
       store_base_advance_purpose: previously_verified_retained_store_drift_only
       store_base_advance_never_grants_producer_or_complete_minute_admission: true
       publication_logs: generic_status_only
