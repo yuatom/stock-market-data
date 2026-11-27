@@ -1,0 +1,33 @@
+name: Retained SOXX Web Price Appendix
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: market-data-collector
+  cancel-in-progress: false
+  queue: max
+jobs:
+  publish_exact_appendix:
+    if: github.repository == 'yuatom/stock-market-data' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.actor == 'yuatom' && github.triggering_actor == 'yuatom' && github.run_attempt == 1
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    environment: soxx-web-appendix-exact
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.sha }}
+          path: compute
+      - name: Check independent exact authority before Store credentials
+        working-directory: compute
+        env:
+          SOXX_WEB_APPENDIX_PRIVATE_PROFILE: ${{ secrets.SOXX_WEB_APPENDIX_PRIVATE_PROFILE }}
+          SOXX_WEB_APPENDIX_EXACT_RUN_AUTHORITY: ${{ secrets.SOXX_WEB_APPENDIX_EXACT_RUN_AUTHORITY }}
+        run: python3 -B scripts/publish_soxx_web_appendix.py --check-authority
+      - name: Publish only exact 10-session prior-close appendix
+        working-directory: compute
+        env:
+          SOXX_WEB_APPENDIX_PRIVATE_PROFILE: ${{ secrets.SOXX_WEB_APPENDIX_PRIVATE_PROFILE }}
+          SOXX_WEB_APPENDIX_EXACT_RUN_AUTHORITY: ${{ secrets.SOXX_WEB_APPENDIX_EXACT_RUN_AUTHORITY }}
+          SOXX_WEB_APPENDIX_STORE_WRITER_TOKEN: ${{ secrets.SOXX_WEB_APPENDIX_STORE_WRITER_TOKEN }}
+        run: python3 -B scripts/publish_soxx_web_appendix.py --publish
