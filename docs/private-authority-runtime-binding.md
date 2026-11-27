@@ -39,6 +39,27 @@ No environment variable such as `AUTHORIZED=true` or `LOCK_HELD=true` can grant 
 
 The execution command has the form `python -B -m scripts.run_private_authority_route --route <workflow-fixed-route> --compute-sha <public-approved-sha> --receipt-commitment <public-approved-commitment>`. Both workflows include that command after the exact public-context identity step, with exact source checkout, persistent credentials disabled, Python bytecode disabled, and pinned PyYAML 6.0.3. Failed identity checks stop before checkout or secret access.
 
+## Retained reconciliation is not provider routing
+
+The fixed-route rule above applies to the two provider coordinators. Retained Daily
+Reconciliation may instead choose between two mutually exclusive, statically
+declared hosted jobs: the existing GLD reconciliation and the historical SOXX
+web appendix. The workflow uses a closed choice solely to select the fixed
+job; it never forwards the choice, a caller-supplied path or executable control
+to either coordinator. The SOXX job uses the existing Store credential and
+shared writer lock, without provider access, new credentials or permissions.
+
+The exact authenticated first-attempt owner dispatch selects the opaque commitment
+to already approved, independently read-back private bytes. This identifies the
+authorizer, not an independent reviewer or an additional machine signer. The
+writer only validates and consumes the selected authority, never issues it.
+The exact exchange dates stay private, bound to the independently read-back
+frozen batch; they are never inputs or a way to create a second claim lane.
+The private receipt and stable, whole-batch claim namespaces must be retained
+and immutable under Store rules: only exact create-only writers, no rewrites,
+deletes, cleanup, or replay. If required independent approval or retention
+cannot be established under existing controls, stop before a live invocation.
+
 ## Exact approved operation scope
 
 The consolidated operation must name the final reviewed source/merge and workflow activation; exact private authority, descriptor and receipt creation destinations; independent readback; specific SOXX one-request/one-credit evidence-only scope and eleven-symbol at-most-eleven-request/eleven-credit conditional-append scope; validity window; private retention destination; market-fact change limits; and one-shot execution with no automatic retries. No local test or valid commitment substitutes for that approval.

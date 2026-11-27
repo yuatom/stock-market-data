@@ -16,8 +16,11 @@ def test_manual_only_dedicated_route():
     doc=load();events=doc.get('on',doc.get(True))
     assert set(events)=={'workflow_dispatch'}
     assert doc['name']=='Retained Daily Reconciliation'
-    assert set(events['workflow_dispatch']['inputs'])=={'expected_compute_sha','request_json'}
-    assert all(x['required'] for x in events['workflow_dispatch']['inputs'].values())
+    ins=events['workflow_dispatch']['inputs']
+    assert set(ins)=={'expected_compute_sha','request_json','operation'}
+    assert all(ins[k]['required'] for k in ('expected_compute_sha','request_json'))
+    assert ins['operation']['required'] is False and ins['operation']['default']=='gld'
+    assert ins['operation']['options']==['gld','soxx_web_appendix']
     job=doc['jobs']['reconcile']
     assert "github.event_name == 'workflow_dispatch'" in job['if']
     assert "github.ref == 'refs/heads/main'" in job['if']
