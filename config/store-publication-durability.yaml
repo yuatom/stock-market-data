@@ -70,11 +70,13 @@ writer_scope:
         authorization_is_owner_selected_independently_verified_bytes_not_separate_issuer_attestation: true
         private_receipt: immutable_single_addition_off_main_on_exact_store_base
         private_profile: existing_exact_soxx_price_appendix_contract
-        replay_guard: one_private_create_only_claim_for_entire_approved_frozen_historical_appendix_lane_before_main_cas
-        claim_after_post_attempt_never_retry_or_cleanup: true
+        replay_guard: one_private_create_only_claim_for_entire_approved_frozen_historical_appendix_lane_atomic_with_payload
+        retention_model: trusted_private_store_operating_contract_no_ref_deletion_or_retarget
+        server_enforced_admin_rewrite_protection_claimed: false
+        atomic_attempt_never_retry_or_cleanup: true
         provider_requests: 0
         exact_four_additions_required: true
-        branch_update: github_graphql_createCommitOnBranch_expectedHeadOid_single_post
+        branch_update: one_atomic_exact_direct_child_main_cas_create_only_claim_and_retention
         unknown_outcome: stop_inspect_no_retry
       exact_actual_base_rechecked_before_single_push: true
     .github/workflows/retained-soxx-web-price-appendix.yml:
@@ -91,7 +93,7 @@ writer_scope:
       store_base_advance_never_grants_producer_or_complete_minute_admission: true
       publication_logs: generic_status_only
       exact_four_additions_required: true
-      branch_update: github_graphql_createCommitOnBranch_expectedHeadOid_single_post
+      branch_update: one_atomic_exact_direct_child_main_cas_create_only_claim_and_retention
       store_publication_commit_independently_verified_parent_and_tree: true
       provider_requests: 0
       volume_writes: 0

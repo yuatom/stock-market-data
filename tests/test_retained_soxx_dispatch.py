@@ -97,14 +97,15 @@ class Dispatch(unittest.TestCase):
                     D._materialize_receipt(other,SHA,commitment)
 
     def test_bad_owner_never_accesses_private_read_or_writer(self):
-        with patch.object(D,'_private_metadata') as private,patch.object(D,'_create_exact') as write:
+        with patch.object(D,'_private_metadata') as private,patch.object(D,'publish_atomically') as write:
             with self.assertRaises(ValueError):
                 D.run(Path('/fixture'),Path('/fixture'),Path('/fixture'),dict(env(),GITHUB_ACTOR='other'))
             private.assert_not_called()
             write.assert_not_called()
 
-    def test_create_only_claim_survives_main_rewind_and_new_run_or_nonce(self):
+    def test_atomic_publish_exact_outputs_and_stable_replay_claim(self):
         from types import SimpleNamespace
+        from dataclasses import replace
         import tempfile,subprocess
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp)
@@ -119,33 +120,88 @@ class Dispatch(unittest.TestCase):
             g(repo,'commit','--allow-empty','-m','store base fixture')
             base=g(repo,'rev-parse','HEAD')
             g(repo,'push','origin','main')
-            plan=SimpleNamespace(trade_dates=('2035-01-14','2035-01-15'),base=base,head='3'*40,
-                                 evidence_base='4'*40,tree='5'*40)
-            ref,oid=D.consume_claim(repo,SHA,'19',COMMIT,'6'*40,plan)
-            self.assertEqual(g(remote,'rev-parse',ref),oid)
+            prefix='data/market-data/'
+            manifest=prefix+'collector-state/fixture-publication.json'
+            artifacts=[prefix+'recovery/fixture-'+str(i)+'.json' for i in range(3)]
+            blobs={}
+            for name in artifacts:
+                f=repo/name; f.parent.mkdir(parents=True,exist_ok=True); f.write_text('fixture data')
+                blobs[name]=g(repo,'hash-object',name)
+            f=repo/manifest;f.parent.mkdir(parents=True)
+            f.write_text(json.dumps(dict(schema_version=1,request_id='fixture',trade_date='2035-01-15',stage='soxx_fixture',
+                                        required_outputs=[dict(path=a.removeprefix(prefix),blob_sha=blobs[a]) for a in artifacts])))
+            blobs[manifest]=g(repo,'hash-object',manifest)
+            g(repo,'add','.')
+            g(repo,'commit','-m','four immutable sources')
+            plan=SimpleNamespace(trade_dates=('2035-01-14','2035-01-15'),base=base,head=g(repo,'rev-parse','HEAD'),
+                                 evidence_base=base,tree=g(repo,'rev-parse','HEAD^{tree}'),blobs=blobs,manifest=manifest)
+            # Force time to reach the exact expiry only after slow Git preflight
+            # and after the last authority ref check, with no production write.
+            events=[]
+            old_resolve=D._resolve_ref
+            authority_ref='refs/heads/fixture-authority'
+            expiry=datetime(2035,1,24,0,10,tzinfo=timezone.utc)
+            approved=SimpleNamespace(start=expiry.replace(minute=5),end=expiry)
+            class Clock:
+                @classmethod
+                def now(cls,tz):
+                    events.append('utc')
+                    if events[-2:]!=['receipt-ref','utc']:
+                        raise AssertionError('time check must follow exact late ref check')
+                    return expiry
+            def resolve(where,ref):
+                if ref==authority_ref:
+                    events.append('receipt-ref')
+                    return '6'*40
+                return old_resolve(where,ref)
+            with patch.object(D,'_resolve_ref',side_effect=resolve),patch.object(D,'datetime',Clock):
+                with self.assertRaises(ValueError):
+                    D.publish_atomically(repo,SHA,'19',COMMIT,'6'*40,plan,
+                        before_push=lambda:D.require_current_receipt(repo,authority_ref,'6'*40,approved))
+            self.assertEqual(events,['receipt-ref','utc'])
             self.assertEqual(g(remote,'rev-parse','main'),base)
-            claim=json.loads(g(remote,'show',oid+':claim.json'))
-            self.assertEqual((claim['actor_id'],claim['run_id'],claim['receipt_commitment']),('10399225','19',COMMIT))
-            g(repo,'commit','--allow-empty','-m','advance main fixture')
-            g(repo,'push','origin','main')
-            fresh_base=g(repo,'rev-parse','HEAD')
-            plan.base=fresh_base
+            self.assertEqual(g(remote,'for-each-ref','--format=%(refname)','refs/tags/','refs/heads/reconciliation-claims/'),'')
+            # A rejected branch/ref is an atomic all-or-nothing failure.
+            hook=remote/'hooks/pre-receive'
+            hook.write_text('#!/bin/sh\nexit 1\n');hook.chmod(0o700)
             with self.assertRaises(ValueError):
-                D.consume_claim(repo,SHA,'20','7'*64,'8'*40,plan)
-            plan.base=base
+                D.publish_atomically(repo,SHA,'19',COMMIT,'6'*40,plan,before_push=lambda:None)
+            self.assertEqual(g(remote,'rev-parse','main'),base)
+            self.assertEqual(g(remote,'for-each-ref','--format=%(refname)','refs/tags/','refs/heads/reconciliation-claims/'),'')
+            hook.unlink()
+            # Race an ordinary retained caller into the same claim after the
+            # absence check but before receive-pack. The claim lease must reject
+            # the whole transaction; no data or durable tag may slip through.
+            original=D._output
+            def race(where,*args,**kwargs):
+                if args[0]=='push':
+                    g(repo,'push','origin',base+':'+D.claim_ref())
+                return original(where,*args,**kwargs)
+            with patch.object(D,'_output',side_effect=race),self.assertRaises(ValueError):
+                D.publish_atomically(repo,SHA,'19',COMMIT,'6'*40,plan,before_push=lambda:None)
+            self.assertEqual(g(remote,'rev-parse','main'),base)
+            self.assertEqual(g(remote,'tag','--list'),'')
+            self.assertEqual(g(remote,'rev-parse',D.claim_ref()),base)
+            g(remote,'update-ref','-d',D.claim_ref(),base)  # fixture reset, never in production code
+            result=D.publish_atomically(repo,SHA,'19',COMMIT,'6'*40,plan,before_push=lambda:None)
+            oid=result['store_commit_sha'];claim_ref=D.claim_ref()
+            claim_oid=g(remote,'rev-parse',claim_ref)
+            self.assertEqual(g(remote,'rev-parse','main'),oid)
+            self.assertEqual(g(remote,'rev-parse','refs/tags/market-data-read/'+oid),oid)
+            self.assertEqual(g(remote,'rev-list','--parents','-n','1',oid).split(),[oid,base])
+            self.assertEqual(g(remote,'rev-parse',oid+'^{tree}'),plan.tree)
+            claim=json.loads(g(remote,'show',claim_oid+':claim.json'))
+            self.assertEqual((claim['actor_id'],claim['run_id'],claim['receipt_commitment'],claim['published_store_commit']),
+                             ('10399225','19',COMMIT,oid))
+            # Simulate admin rewind (retained claim is not deleted).
             g(repo,'push','--force','origin',base+':refs/heads/main')
-            with self.assertRaises(ValueError):
-                D.consume_claim(repo,SHA,'20','7'*64,'8'*40,plan)
-            for dates in (('2035-01-15','2035-01-16'),('2035-02-19','2035-02-20')):
-                # Partially overlapping or fully shifted dates must not open a new claim
-                # lane, even if a different independently formed receipt arrives.
-                with self.subTest(dates=dates),self.assertRaises(ValueError):
-                    plan.trade_dates=dates
-                    D.consume_claim(repo,'9'*40,'21','a'*64,'b'*40,plan)
-            self.assertEqual(g(remote,'rev-parse',ref),oid)
+            for dates in (plan.trade_dates,('2035-01-15','2035-01-16')):
+                plan.trade_dates=dates
+                with self.assertRaises(ValueError):
+                    D.publish_atomically(repo,SHA,'20','7'*64,'8'*40,plan,before_push=lambda:None)
+            self.assertEqual(g(remote,'rev-parse',claim_ref),claim_oid)
             self.assertEqual(g(remote,'rev-parse','main'),base)
-
-    def test_uncertain_claim_never_reaches_main_writer(self):
+    def test_uncertain_atomic_attempt_is_not_retried(self):
         from contextlib import nullcontext
         from types import SimpleNamespace
         e=dict(env(),MARKET_DATA_STORE_TOKEN='fake')
@@ -156,9 +212,9 @@ class Dispatch(unittest.TestCase):
              patch.object(D,'_resolve_ref',return_value='synthetic-oid'), \
              patch.object(D,'_quiet_store_checkout'),patch.object(D,'_require_origins'),patch.object(D,'preflight'), \
              patch.object(D,'_require_local_and_remote'),patch.object(D,'bound_receipt'), \
-             patch.object(D,'consume_claim',side_effect=ValueError('uncertain')) as claim, \
-             patch.object(D,'_create_exact') as main_writer:
+             patch.object(D,'publish_atomically',side_effect=ValueError('uncertain')) as claim, \
+             patch.object(D,'_verify_store_publisher') as separately_invoked:
             with self.assertRaises(ValueError):
                 D.run(Path('/fixture'),Path('/fixture'),Path('/fixture'),e)
             claim.assert_called_once()
-            main_writer.assert_not_called()
+            separately_invoked.assert_not_called()
