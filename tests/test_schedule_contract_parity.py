@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import re
 import unittest
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import yaml
 
@@ -66,15 +68,22 @@ class CollectorScheduleContractParityTest(unittest.TestCase):
         daily = self.store["collector"]["twelve_data_daily"]
         eod = self.store["collector"]["schedules_et"]["previous_session_eod"]
 
-        # Fixed 19:30 Asia/Shanghai consumer schedule in stock-dairy@ede8ac0:
-        # 06:30 ET in winter, 07:30 ET in summer.
-        premarket_report_et = {"us_standard": "06:30", "us_daylight": "07:30"}
-        minutes = lambda value: int(value[:2]) * 60 + int(value[3:])
+        # Read-only contract snapshot: stock-dairy@dd363cfe5320047909d7468c9f86e7fa23b5376d,
+        # config/automation-runtime.yaml#stages.premarket. Shanghai is a display projection.
+        premarket_report_et = "07:30"
+        ny = ZoneInfo("America/New_York")
+        shanghai = ZoneInfo("Asia/Shanghai")
+        hour, minute = map(int, premarket_report_et.split(":"))
+        eod_hour, eod_minute = map(int, eod.split(":"))
 
         self.assertEqual(daily["settlement_maturity"]["minimum_next_day_et"], "07:00")
         self.assertEqual(eod, "07:05")
-        self.assertGreater(minutes(eod), minutes(premarket_report_et["us_standard"]))
-        self.assertLess(minutes(eod), minutes(premarket_report_et["us_daylight"]))
+        for day, expected_shanghai in (((2026, 7, 8), "19:30"), ((2026, 11, 27), "20:30")):
+            with self.subTest(day=day):
+                start = datetime(*day, hour, minute, tzinfo=ny)
+                collect = datetime(*day, eod_hour, eod_minute, tzinfo=ny)
+                self.assertEqual(start.astimezone(shanghai).strftime("%H:%M"), expected_shanghai)
+                self.assertEqual((start - collect).total_seconds(), 25 * 60)
 
         self.assertFalse(scheduling["daily_series_maturity_schedule_must_finish_before_premarket_report"])
         self.assertTrue(scheduling["scheduled_collector_is_opportunistic_not_report_sla"])
