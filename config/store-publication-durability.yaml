@@ -1,5 +1,5 @@
 schema_version: 1
-contract_version: 6
+contract_version: 7
 owner: yuatom/stock-market-data
 persisted_store: yuatom/stock-market-data-store
 store_retention_authority: yuatom/stock-market-data-store#README.md-consumer-visible-commit-retention
@@ -64,6 +64,27 @@ writer_scope:
       separate_request_specific_output_manifest: true
       base_advance_policy: nov10_close_artifacts_only_v1
       exact_actual_base_rechecked_before_single_push: true
+    .github/workflows/retained-soxx-web-price-appendix.yml:
+      job: publish_exact_appendix
+      entrypoint: scripts/publish_soxx_web_appendix.py
+      publication_helper: scripts/verify_store_publication.py
+      protected_environment: soxx-web-appendix-exact
+      authorization: independently_bound_exact_compute_source_workflow_run_and_store_candidate
+      expected_repository: yuatom/stock-market-data-store
+      private_runtime_profile_required: true
+      independent_run_authority_binds_profile_sha256: true
+      store_base_advance: v1_exact_private_premarket_v2_exact_ordered_premarket_then_early_close_or_v3_exact_durable_current_head_with_no_native_or_appendix_history_drift
+      store_base_advance_purpose: previously_verified_retained_store_drift_only
+      store_base_advance_never_grants_producer_or_complete_minute_admission: true
+      publication_logs: generic_status_only
+      exact_four_additions_required: true
+      branch_update: github_graphql_createCommitOnBranch_expectedHeadOid_single_post
+      store_publication_commit_independently_verified_parent_and_tree: true
+      provider_requests: 0
+      volume_writes: 0
+      native_receipt_issued: false
+      activation_scope: separately_admitted_prior_close_only
+      unknown_outcome: stop_inspect_no_retry
   all_store_writers_must_share_concurrency_group: market-data-collector
   terminal_success_for_new_or_existing_store_head_requires_durability_pass: true
 

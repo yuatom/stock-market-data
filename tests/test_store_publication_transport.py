@@ -387,7 +387,7 @@ class TransportOwnerTests(unittest.TestCase):
         import yaml
         owner = yaml.safe_load((ROOT / "config/store-publication-durability.yaml").read_text())
         contract = owner["verification_transport"]
-        self.assertEqual(owner["contract_version"], 6)
+        self.assertEqual(owner["contract_version"], 7)
         reuse = owner["existing_publication_reuse"]
         self.assertTrue(reuse["exact_existing_retention_for_producer_and_current_store_required"])
         self.assertTrue(reuse["no_provider_requests_budget_debits_new_tags_or_store_writes_when_reused"])
