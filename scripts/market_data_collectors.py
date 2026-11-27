@@ -544,7 +544,7 @@ def _load_daily_basis_owner(store_root, trade_date):
     return load_daily_basis_owner(store_root, trade_date, filename, dict(os.environ))
 
 
-def _can_defer_daily_revision(existing, eligible, conflict, trade_date, fetched):
+def _can_defer_daily_revision(existing, eligible, conflict, trade_date, fetched, blocked_volume_dates):
     """Permit only one newest session; no retained price changes or basis repair."""
     if not isinstance(fetched, _NormalizedDailyRows) or not fetched.verified_identity:
         return False
@@ -559,7 +559,7 @@ def _can_defer_daily_revision(existing, eligible, conflict, trade_date, fetched)
         return False
     prior = {row['trade_date']: row for row in existing}
     if any(day not in current or day not in prior
-           or not classify_daily_overlap(prior[day], current[day])['price_eligible'] for day in anchors):
+           or not _ordinary_daily_overlap(prior[day], current[day], blocked_old_volume=day in blocked_volume_dates)['price_eligible'] for day in anchors):
         return False
     if len(conflict) != 1:
         return False
@@ -577,6 +577,14 @@ def _can_defer_daily_revision(existing, eligible, conflict, trade_date, fetched)
     # The reviewed calendar selects the only target; the same ticker’s three
     # admitted Store rows establish its axis. Do not assume a corporate action.
     return all(relative(prior[anchors[-1]]["close"], current[target][k]) <= Decimal("0.20") for k in OHLC)
+def _ordinary_daily_overlap(old, new, *, blocked_old_volume):
+    if blocked_old_volume and "volume" not in old and "volume" in new:
+        # Compare OHLC on a temporary copy only. The captured volume is still
+        # validated and kept blocked; it is never restored to stored rows.
+        result = classify_daily_overlap(dict(old, volume=new["volume"]), dict(new))
+        if result["classification"] == "EQUIVALENT":
+            return dict(result, classification="VOLUME_ONLY", changed_fields=["volume"])
+    return classify_daily_overlap(dict(old), dict(new))
 
 
 def collect_previous_session_eod(
@@ -705,12 +713,14 @@ def collect_previous_session_eod(
                     raise MarketDataConflict('price-only daily response quality invalid')
             deferred = False
             overlap_classifications=[]
+            witnessed_blocked_volume_absence = False
             index_path = _series_index_path(store_root, TWELVE_PROVIDER, symbol)
             existing: list[dict[str, Any]] = []
             repairs: list[tuple[dict | None, dict]] = []
             if index_path.exists():
                 phase = "stored_series_read"
                 existing = read_daily_series(store_root, provider=TWELVE_PROVIDER, symbol=symbol)
+                segments = []
                 if price_only:
                     segments = json.loads(index_path.read_text(encoding="utf-8")).get("lineage_segments", [])
                     if not isinstance(segments, list) or any(not isinstance(segment, dict) for segment in segments):
@@ -721,6 +731,16 @@ def collect_previous_session_eod(
                         for segment in segments
                     )
                 existing_by_date = {row["trade_date"]: row for row in existing}
+                blocked_intervals = [
+                    (segment["start"], segment["end"]) for segment in segments
+                    if segment.get("volume_policy") == "BLOCKED_UNRESOLVED"
+                    and type(segment.get("start")) is int and type(segment.get("end")) is int
+                    and 0 <= segment["start"] <= segment["end"] < len(existing)
+                ]
+                blocked_volume_dates = {
+                    row["trade_date"] for i, row in enumerate(existing)
+                    if "volume" not in row and any(start <= i <= end for start, end in blocked_intervals)
+                }
                 phase = "historical_overlap_comparison"
                 unresolved = []
                 diagnostic_start = len(conflict_diagnostics)
@@ -732,7 +752,11 @@ def collect_previous_session_eod(
                 for row in eligible:
                     old = existing_by_date.get(row["trade_date"])
                     if old is not None:
-                        classification=classify_daily_overlap(dict(old),dict(row))
+                        classification = _ordinary_daily_overlap(
+                            old, row, blocked_old_volume=row["trade_date"] in blocked_volume_dates,
+                        )
+                        if row["trade_date"] in blocked_volume_dates and classification["price_eligible"]:
+                            witnessed_blocked_volume_absence = True
                         overlap_classifications.append(dict(trade_date=row['trade_date'],**classification))
                         if price_only and 'volume' in classification['changed_fields']:
                             symbol_volume_blocked = True
@@ -774,7 +798,7 @@ def collect_previous_session_eod(
                         raise _DailyResponseIdentityConflict('explicit daily response identity or adjustment mismatch')
                     if not (defer_policy and len(conflict_diagnostics) > diagnostic_start
                             and _can_defer_daily_revision(
-                            existing, eligible, unresolved, trade_date, fetched)):
+                            existing, eligible, unresolved, trade_date, fetched, blocked_volume_dates)):
                         raise MarketDataConflict("provider historical revision detected")
                     deferred = True
                     repairs.clear()
@@ -810,6 +834,8 @@ def collect_previous_session_eod(
                                volume_policy='BLOCKED_UNRESOLVED',
                                normalized_evidence_path=evidence_path,
                                normalized_evidence_sha256=evidence_digest)
+            if witnessed_blocked_volume_absence:
+                new_rows = [{k: v for k, v in row.items() if k != "volume"} for row in new_rows]
             phase = "immutable_append"
             result = append_daily_bars(
                 store_root,
