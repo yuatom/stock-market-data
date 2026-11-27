@@ -5,11 +5,16 @@ on:
     inputs:
       expected_compute_sha:
         description: Exact current Compute main commit containing this reviewed route
-        required: true
+        required: false
         type: string
       request_json:
         description: Explicit value-free retained GLD append request with reviewed Store anchor and exact source pins
-        required: true
+        required: false
+        type: string
+
+      ordinary_retained_commitment:
+        description: Opaque commitment from the independently approved private issuer
+        required: false
         type: string
 
 permissions:
@@ -17,7 +22,7 @@ permissions:
 
 jobs:
   reconcile:
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.ordinary_retained_commitment == ''
     runs-on: ubuntu-latest
     timeout-minutes: 12
     concurrency:
@@ -116,3 +121,30 @@ jobs:
             --store-repo ../store \
             --candidate-repo ../candidate \
             --request-id "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+
+  ordinary_retained_preflight:
+    # A mixed request goes only to this value-free rejection lane, not GLD.
+    if: >-
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+      && github.repository == 'yuatom/stock-market-data' && github.actor == 'yuatom'
+      && github.triggering_actor == 'yuatom' && github.run_attempt == '1'
+      && inputs.ordinary_retained_commitment != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: market-data-collector
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - name: Checkout exact public Compute event source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check independent ordinary retained authorization availability
+        run: python -B -m scripts.run_ordinary_retained_preflight

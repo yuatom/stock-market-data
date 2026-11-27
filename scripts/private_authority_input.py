@@ -23,6 +23,7 @@ import subprocess
 
 from scripts import eleven_symbol_append as append
 from scripts.raw_response_evidence import validate_request
+from scripts.private_authority_receipt import ORDINARY_RETAINED_ROUTE, verify_receipt
 
 DESCRIPTOR_PATH = 'capture-authority/selection.json'
 ROUTES = frozenset({'soxx_capture_only', 'eleven_symbol_conditional_append'})
@@ -102,14 +103,14 @@ def _day(value):
     return value
 
 
+def _utc_stamp(value):
+    _need(type(value) is str and re.fullmatch(
+        r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:[.][0-9]{1,6})?(?:Z|[+]00:00)', value))
+    return datetime.fromisoformat(value)
+
+
 def _window(approval):
-    stamps = []
-    for name in ('valid_from', 'valid_until'):
-        value = approval[name]
-        _need(type(value) is str and re.fullmatch(
-            r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?(?:Z|\+00:00)', value))
-        stamps.append(datetime.fromisoformat(value))
-    _need(stamps[0] < stamps[1])
+    _need(_utc_stamp(approval['valid_from']) < _utc_stamp(approval['valid_until']))
     _day(approval['execution_day'])
     # Freshness and ET accounting-day checks remain mandatory in the runtime.
 
@@ -214,6 +215,9 @@ class _LocalGit:
 
     def bind_refs(self, route, compute, head, descriptor):
         ref = f'refs/heads/capture-authority/{route}/{compute}'
+        self.bind_exact_ref(ref, head, descriptor)
+
+    def bind_exact_ref(self, ref, head, descriptor):
         _need(self.read('for-each-ref', '--format=%(refname) %(objectname) %(objecttype) %(symref)', ref)
               == (ref + ' ' + descriptor + ' commit \n').encode('ascii'))
         _need(self.text('rev-parse', '--verify', 'HEAD') == head)
@@ -312,4 +316,97 @@ remains at expected_store_head, not at the off-main descriptor commit.
     except Exception:
         pass
     # Outside the except block, even exception context contains no private error.
+    raise PrivateAuthorityError('PRIVATE_AUTHORITY_INVALID')
+
+
+def load_ordinary_retained_selection(store, receipt_raw, expected_commitment, compute_sha, *, expected_review_sha256):
+    """Bind new role's private bytes and graph; not approval, claim or activation.
+
+    The expected review digest must come from the verified private issuer,
+    never the receipt or candidate descriptor. The caller also supplies the
+    independently approved commitment and exact source pin. Provider routes
+    cannot use this role. Before any claim, the separate writer must run its
+    native source/manifest/full-series proof on the selected immutable review.
+    Freshness, durable one-use and publication still require the real authority.
+    """
+    try:
+        receipt = verify_receipt(receipt_raw, expected_commitment, ORDINARY_RETAINED_ROUTE, compute_sha)
+        head, commit = receipt.authority_store_sha, receipt.descriptor_commit
+        ref = f'refs/heads/capture-authority/{ORDINARY_RETAINED_ROUTE}/{compute_sha}/{receipt.nonce}'
+        reader = _LocalGit(store)
+        reader.bind_exact_ref(ref, head, commit)
+        blob, raw = reader.blob(commit, DESCRIPTOR_PATH)
+        desc = _json(raw)
+        _need(type(desc) is dict and set(desc) == DESCRIPTOR_KEYS)
+        _need(type(desc['schema_version']) is int and desc['schema_version'] == 1
+              and desc['kind'] == 'capture_authority_selection' and desc['route'] == ORDINARY_RETAINED_ROUTE
+              and desc['compute_sha'] == compute_sha and desc['authority_store_sha'] == head)
+        reader.single_addition(commit, head, DESCRIPTOR_PATH, blob)
+        approval = desc['approval']
+        _need(type(approval) is dict and set(approval) == {
+            'schema_version', 'mode', 'compute_sha', 'expected_store_sha', 'execution_day',
+            'valid_from', 'valid_until', 'request_limit', 'credit_limit', 'max_attempts',
+            'write_policy', 'review', 'review_sha256',
+        })
+        _need(type(approval['schema_version']) is int and approval['schema_version'] == 1
+              and approval['mode'] == ORDINARY_RETAINED_ROUTE and approval['compute_sha'] == compute_sha
+              and approval['expected_store_sha'] == head
+              and approval['write_policy'] == 'append_ohlc_only_preserve_history_volume_and_budget')
+        for name, expected in (('request_limit', 0), ('credit_limit', 0), ('max_attempts', 1)):
+            _need(type(approval[name]) is int and approval[name] == expected)
+        _window(approval)
+        approval_raw = _encode(approval)
+        _need(hashlib.sha256(approval_raw).hexdigest() == _hex(desc['approval_sha256'], 64))
+        review = approval['review']
+        _need(type(review) is dict and set(review) == {
+            'schema_version', 'mode', 'base', 'source', 'source_input', 'compute', 'run',
+            'observed_at', 'not_before', 'execution_day', 'manifest_path', 'manifest_blob', 'targets',
+        })
+        _need(type(review['schema_version']) is int and review['schema_version'] == 1
+              and review['mode'] == 'retained_price_tail_draft' and review['base'] == head
+              and _day(review['execution_day']) < approval['execution_day'])
+        for key in ('source', 'source_input', 'compute', 'manifest_blob'):
+            _hex(review[key])
+        approved_review = _hex(expected_review_sha256, 64)
+        _need(hashlib.sha256(_encode(review)[:-1]).hexdigest()
+              == _hex(approval['review_sha256'], 64) == approved_review)
+
+        # Finite generic capacity, never an implicit ticker/date authorization.
+        # The independent private review digest binds every exact row scope.
+        targets = review['targets']
+        _need(type(targets) is dict and 1 <= len(targets) <= 4)
+        observed_day = review['execution_day']
+        _need(type(review['run']) is str and re.fullmatch(r'[1-9][0-9]{0,29}-1', review['run']))
+        _need(_utc_stamp(review['not_before']) <= _utc_stamp(review['observed_at']))
+        manifest_pattern = (r'collector-state/' + re.escape(observed_day[:7]) + '/' + re.escape(observed_day)
+                            + r'-previous_session_eod-[0-9a-f]{16}-publication[.]json')
+        _need(type(review['manifest_path']) is str and re.fullmatch(manifest_pattern, review['manifest_path']))
+        packet_pattern = (r'collector-state/' + re.escape(observed_day[:7])
+                          + r'/price-only-[0-9a-f]{64}[.]json')
+        total = 0
+        for symbol, target in targets.items():
+            _need(type(symbol) is str and 1 <= len(symbol) <= 20
+                  and re.fullmatch(r'[A-Z0-9]+(?:[.-][A-Z0-9]+)*', symbol))
+            _need(type(target) is dict and set(target) == {
+                'index_blob', 'tail', 'packet_path', 'packet_blob', 'dates', 'rows_sha256', 'conflict_fields',
+            })
+            tail = _day(target['tail'])
+            _need(type(target['dates']) is list and 1 <= len(target['dates']) <= 7)
+            dates = [_day(value) for value in target['dates']]
+            _need(dates == sorted(set(dates)) and all(tail < value < observed_day for value in dates))
+            total += len(dates)
+            _need(total <= 7)
+            _need(type(target['packet_path']) is str and re.fullmatch(packet_pattern, target['packet_path']))
+            fields = target['conflict_fields']
+            _need(type(fields) is list and len(fields) <= 6
+                  and all(type(field) is str and field in {'open','high','low','close','volume','source_timestamp'}
+                          for field in fields) and fields == sorted(set(fields)))
+            _hex(target['index_blob'])
+            _hex(target['packet_blob'])
+            _hex(target['rows_sha256'], 64)
+        reader.assert_unmodified_graph()
+        reader.bind_exact_ref(ref, head, commit)
+        return PrivateAuthoritySelection(approval_raw, desc['approval_sha256'], head, commit)
+    except Exception:
+        pass
     raise PrivateAuthorityError('PRIVATE_AUTHORITY_INVALID')
