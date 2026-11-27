@@ -10,7 +10,7 @@ from contextlib import ExitStack
 from scripts import market_data_collectors as c
 
 class DailyVolumeIsolationTests(unittest.TestCase):
-    def run_case(self, changes=None, blocked=(), policy=True, no_new=False, other_price=False):
+    def run_case(self, changes=None, blocked=(), policy=True, no_new=False, other_price=False, missing_stored_volume=(), disjoint_volume_lineage=()):
         changes=changes or {}
         old=dict(trade_date='2026-11-04',open=10.,high=12.,low=9.,close=11.,volume=100.)
         with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
@@ -19,7 +19,13 @@ class DailyVolumeIsolationTests(unittest.TestCase):
             for symbol in symbols:
                 lineage={'ingest_kind':'collector_previous_session_eod'}
                 if symbol in blocked:lineage.update(ingest_kind='collector_price_only_revision_v1',volume_policy='BLOCKED_UNRESOLVED')
-                c.append_daily_bars(root,provider=c.TWELVE_PROVIDER,symbol=symbol,asset_class='stocks',bars=initial,series_semantics='daily_regular_ohlcv',lineage=lineage)
+                stored = [{k:v for k,v in row.items() if k != "volume"} for row in initial] if symbol in missing_stored_volume else initial
+                c.append_daily_bars(root,provider=c.TWELVE_PROVIDER,symbol=symbol,asset_class='stocks',bars=stored,series_semantics='daily_regular_ohlcv',lineage=lineage)
+                if symbol in disjoint_volume_lineage:
+                    index_path = c._series_index_path(root,c.TWELVE_PROVIDER,symbol)
+                    index = json.loads(index_path.read_text())
+                    index['lineage_segments'][-1]['end'] = 0
+                    index_path.write_text(json.dumps(index))
                 before[symbol]=c.read_daily_series(root,provider=c.TWELVE_PROVIDER,symbol=symbol)
             config={'collector':{'budgets':{'twelve_data_basic':{'hard_credits_per_day':200,'hard_credits_per_minute':8}},'twelve_data_daily':{'history_outputsize':64,'bootstrap_minimum_records':1}}}
             if policy:config['collector']['twelve_data_daily']['overlap_revision_policy']='price_only_volume_blocked_v1'
@@ -100,3 +106,37 @@ class DailyVolumeIsolationTests(unittest.TestCase):
         self.assertEqual(len(rows['AAA']),1)
         self.assertEqual(indexes['AAA']['lineage_segments'][-1].get('volume_policy'),'BLOCKED_UNRESOLVED')
         self.assertEqual(result['failure_target_count'],1)
+
+    def test_explicitly_blocked_old_volume_absence_does_not_reject_equal_prices(self):
+        result, rows, indexes = self.run_case(blocked=('AAA',), missing_stored_volume=('AAA',))
+        self.assertEqual(result['changed_series'], 3)
+        self.assertEqual([r['trade_date'] for r in rows['AAA']], ['2026-11-04','2026-11-05'])
+        self.assertTrue(all('volume' not in r for r in rows['AAA']))
+        self.assertEqual(indexes['AAA']['lineage_segments'][-1]['volume_policy'], 'BLOCKED_UNRESOLVED')
+        self.assertEqual(rows['BBB'][-1]['volume'], 100.)
+
+    def test_absent_old_volume_without_explicit_lineage_still_rejects(self):
+        result, rows, indexes = self.run_case(missing_stored_volume=('AAA',))
+        self.assertEqual(result['failure_target_count'], 1)
+        self.assertEqual(len(rows['AAA']), 1)
+        self.assertNotIn('volume_policy', indexes['AAA']['lineage_segments'][-1])
+
+    def test_blocked_old_volume_absence_does_not_waive_price_or_metadata_conflicts(self):
+        for change in ({'close':11.01}, {'source_timestamp':'untrusted'}):
+            with self.subTest(change=change):
+                result, rows, _ = self.run_case({'AAA':change}, blocked=('AAA',),
+                                                missing_stored_volume=('AAA',))
+                self.assertEqual(result['failure_target_count'], 1)
+                self.assertEqual(len(rows['AAA']), 1)
+
+    def test_another_blocked_row_does_not_waive_uncovered_absence(self):
+        result, rows, _ = self.run_case(blocked=('BBB',), missing_stored_volume=('BBB',),
+                                         disjoint_volume_lineage=('BBB',), other_price=True)
+        self.assertEqual(len(rows['BBB']), 2)
+        self.assertIn('BBB', [failure['symbol'] for failure in result['failures']])
+
+    def test_blocked_old_volume_does_not_waive_invalid_new_volume(self):
+        result, rows, _ = self.run_case({'AAA':{'volume':-1}}, blocked=('AAA',),
+                                         missing_stored_volume=('AAA',))
+        self.assertEqual(len(rows['AAA']), 1)
+        self.assertIn('AAA', [failure['symbol'] for failure in result['failures']])
