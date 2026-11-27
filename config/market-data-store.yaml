@@ -242,10 +242,53 @@ collector:
     delayed_execution_may_fetch_exact_historical_target_window: true
     exact_trade_date_and_window_must_still_match: true
   twelve_data_daily:
-    # Daily conflicts are quarantined per symbol; price/metadata revisions still reject.
+    # Price/metadata revisions reject unless narrow witnessed append-only deferral qualifies.
     overlap_revision_policy: price_only_volume_blocked_v1
     # EOD may fill missing prices within the same existing basis; validated prices and volume are unchanged.
     ordinary_missing_repair_policy: active_shard_gap_fill_v1
+    # Append only the reviewed previous scheduled session. Three unchanged frontier
+    # rows and one small older non-close revision never authorize a historical edit.
+    historical_revision_defer_policy: witnessed_frontier_one_small_nonclose_revision_v1
+    # Venue facts reviewed 2026-11-26 UTC. An exact returned profile is required,
+    # without alternate MIC aliases. Provider documentation lists splits as the
+    # ordinary default; that alone is not legacy-basis equivalence. Only this
+    # policy's three stored same-ticker anchors can qualify a narrow append.
+    historical_revision_identity_profiles:
+      IBIT:
+        exchange: NASDAQ
+        mic_code: XNMS
+        type: ETF
+        adjust: splits
+        basis_mode: witnessed_same_axis_only
+        venue_sources: ['https://twelvedata.com/markets/779898/etf/nasdaq/ibit']
+      VIXY:
+        exchange: CBOE
+        mic_code: BATS
+        type: ETF
+        adjust: splits
+        basis_mode: witnessed_same_axis_only
+        venue_sources: ['https://twelvedata.com/markets/105229/etf/cboe/vixy', 'https://www.cboe.com/us/equities/listings/trade_on_cboe/lmp/securities/']
+      META:
+        exchange: NASDAQ
+        mic_code: XNGS
+        type: Common Stock
+        adjust: splits
+        basis_mode: witnessed_same_axis_only
+        venue_sources: ['https://twelvedata.com/markets/872095/stock/nasdaq/meta', 'https://www.sec.gov/Archives/edgar/data/1326801/000162828026025534/meta-12312025x10kars.htm']
+      PLTR:
+        exchange: NASDAQ
+        mic_code: XNGS
+        type: Common Stock
+        adjust: splits
+        basis_mode: witnessed_same_axis_only
+        venue_sources: ['https://twelvedata.com/markets/486896/stock/nasdaq/pltr', 'https://www.sec.gov/Archives/edgar/data/1321655/000132165526000011/pltr-20251231.htm', 'https://indexes.nasdaq.com/docs/methodology_NQGIFamily.pdf']
+      TSLA:
+        exchange: NASDAQ
+        mic_code: XNGS
+        type: Common Stock
+        adjust: splits
+        basis_mode: witnessed_same_axis_only
+        venue_sources: ['https://twelvedata.com/markets/192184/stock/nasdaq/tsla', 'https://www.sec.gov/Archives/edgar/data/1318605/000162828026003952/tsla-20251231.htm']
     bounded_overlap_revision_policy: price_only_volume_blocked_v1
     history_outputsize: 64
     bootstrap_minimum_records: 20

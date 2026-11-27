@@ -8,9 +8,13 @@ import os
 import re
 import subprocess
 from datetime import date
+from decimal import Decimal
 from pathlib import Path
 
 class AuditError(ValueError):
+    pass
+
+class _PublishedDeferralError(AuditError):
     pass
 
 HEX = re.compile(r'^[0-9a-f]{40}$')
@@ -113,17 +117,20 @@ def _audit(repo, commit, trade_date, target_date, symbols, conflict_path, expect
             value=index.get(field)
             if value is not None and (not isinstance(value,str) or not re.fullmatch(r'\d{4}-\d{2}-\d{2}',value) or date.fromisoformat(value).isoformat()!=value):
                 raise AuditError('series date invalid')
-    results=[]
-    for symbol in symbols:
+    inspected_series = {}
+    def inspect_series(symbol, snapshot, identity):
+        key = (snapshot, symbol)
+        if key in inspected_series:
+            return inspected_series[key]
         base=f'data/market-data/series/daily/twelve_data_basic/{symbol}'
-        idx, blob=read(base+'/_index.json')
-        check_index_identity(idx,symbol,current_identity)
+        idx, blob=read(base+'/_index.json', snapshot=snapshot)
+        check_index_identity(idx,symbol,identity)
         check_index_layout(idx)
         rows=[]
         for meta in idx['shards']:
             name=meta.get('path') if isinstance(meta,dict) else None
             if not isinstance(name,str) or not re.fullmatch(r'[0-9]{6}\.json',name): raise AuditError('invalid shard path')
-            doc,actual_blob=read(base+'/'+name,meta.get('blob_sha'))
+            doc,actual_blob=read(base+'/'+name,meta.get('blob_sha'),snapshot=snapshot)
             if not isinstance(doc,dict) or type(doc.get('schema_version')) is not int or doc['schema_version']!=1 or type(doc.get('start')) is not int or doc.get('series_id')!=idx['series_id'] or not isinstance(doc.get('records'),list): raise AuditError('shard identity invalid')
             canonical=json.dumps(doc,ensure_ascii=False,sort_keys=True,separators=(',',':'),allow_nan=False).encode()
             records=doc['records']; start=len(rows)
@@ -132,7 +139,12 @@ def _audit(repo, commit, trade_date, target_date, symbols, conflict_path, expect
             rows.extend(records)
         dates=[check_row(row,idx.get('identity_effective_from')) for row in rows]
         if dates!=sorted(set(dates)) or len(rows)!=idx.get('record_count') or (dates and (idx.get('first_trade_date')!=dates[0] or idx.get('last_trade_date')!=dates[-1])): raise AuditError('series dates or count mismatch')
-        results.append({'symbol':symbol,'index_blob':blob,'record_count':len(rows),'last_trade_date':dates[-1] if dates else None,'target_date_present':target_date in dates})
+        summary = {'symbol':symbol,'index_blob':blob,'record_count':len(rows),
+                   'last_trade_date':dates[-1] if dates else None,'target_date_present':target_date in dates}
+        inspected_series[key] = (summary, dict(zip(dates, rows)))
+        return inspected_series[key]
+
+    results = [inspect_series(symbol, commit, current_identity)[0] for symbol in symbols]
     pattern=rf'data/market-data/collector-state/{trade_date[:7]}/{trade_date}-previous_session_eod-[0-9a-f]{{16}}-conflicts\.json'
     if not isinstance(conflict_path,str) or not re.fullmatch(pattern,conflict_path): raise AuditError('conflict path invalid')
     conflict,conflict_blob=read(conflict_path,expected_conflict_blob)
@@ -141,6 +153,16 @@ def _audit(repo, commit, trade_date, target_date, symbols, conflict_path, expect
         valid=(type(conflict['schema_version']) is int and conflict['schema_version']==1 and conflict['diagnostic_authority']=='non_authoritative_conflict_evidence' and conflict['trade_date']==trade_date and inv['mode']=='previous_session_eod' and isinstance(inv['invocation_id'],str) and bool(inv['invocation_id']) and all(HEX.fullmatch(conflict[k]) for k in ('compute_sha','store_input_sha')) and isinstance(records,list) and all(type(n) is int and n>=0 for n in (count,displayed,failures)) and displayed==len(records) and count>=displayed and type(conflict['conflict_diagnostics_truncated']) is bool and conflict['conflict_diagnostics_truncated']==(count>displayed) and conflict_path.endswith(hashlib.sha256(inv['invocation_id'].encode()).hexdigest()[:16]+'-conflicts.json'))
     except (KeyError,TypeError): valid=False
     if not valid: raise AuditError('conflict diagnostic identity or counts invalid')
+    has_split = ('deferred_historical_revision_count' in conflict or
+                 'unresolved_historical_revision_count' in conflict)
+    deferred = conflict.get('deferred_historical_revision_count', 0)
+    unresolved = conflict.get('unresolved_historical_revision_count', count)
+    if (type(deferred) is not int or type(unresolved) is not int or min(deferred, unresolved) < 0
+            or deferred + unresolved != count
+            or (has_split and not {'deferred_historical_revision_count',
+                                   'unresolved_historical_revision_count'}.issubset(conflict))):
+        raise AuditError('conflict deferred/unresolved counts invalid')
+    verified_deferrals = set()
     old_snapshot=conflict['store_input_sha']
     if git('rev-parse','--verify',old_snapshot+'^{commit}').decode().strip()!=old_snapshot:
         raise AuditError('conflict old snapshot mismatch')
@@ -165,7 +187,38 @@ def _audit(repo, commit, trade_date, target_date, symbols, conflict_path, expect
         try:
             symbol=item['symbol']; day=item['trade_date']; ref=item['store_source']; request=item['request_parameters']
             if not isinstance(symbol,str) or not SYMBOL.fullmatch(symbol) or date.fromisoformat(day).isoformat()!=day or day>=trade_date: raise ValueError('identity')
-            conflict_symbols.add(symbol)
+            disposition = item.get('disposition')
+            accepted_target = None
+            if disposition == 'deferred_preserve_prior_prices' and has_split:
+                if symbol in verified_deferrals:
+                    raise ValueError('duplicate deferral')
+                appended = item['appended_trade_date']
+                if (date.fromisoformat(appended).isoformat() != appended
+                        or appended != target_date or not day < appended < trade_date):
+                    raise ValueError('deferred target date')
+                path = item['normalized_evidence_path']
+                evidence_digest = item['normalized_evidence_sha256']
+                if not isinstance(evidence_digest, str) or not re.fullmatch(r'[0-9a-f]{64}', evidence_digest) or path != f'collector-state/{trade_date[:7]}/price-only-{evidence_digest}.json':
+                    raise ValueError('normalized evidence path')
+                raw, _ = read('data/market-data/' + path, raw_only=True)
+                if hashlib.sha256(raw).hexdigest() != evidence_digest:
+                    raise ValueError('normalized evidence bytes')
+                proof = json.loads(raw)
+                if (proof.get('kind') != 'normalized_daily_price_only_evidence'
+                        or proof.get('execution_day') != trade_date or proof.get('symbol') != symbol
+                        or proof.get('volume_policy') != 'BLOCKED_UNRESOLVED'
+                        or not any(row.get('trade_date') == day and digest(row) == item['new_row_sha256']
+                                   for row in proof.get('records', []))
+                        ):
+                    raise ValueError('normalized evidence correlation')
+                accepted_rows = [row for row in proof['records'] if row.get('trade_date') == appended]
+                if len(accepted_rows) != 1 or check_row(accepted_rows[0]) != appended:
+                    raise ValueError('normalized append row identity')
+                accepted_target = accepted_rows[0]
+            elif disposition is None:
+                conflict_symbols.add(symbol)
+            else:
+                raise ValueError('invalid conflict disposition')
             base=f'data/market-data/series/daily/twelve_data_basic/{symbol}'
             if ref['provider']!='twelve_data_basic' or ref['index_path']!='series/daily/twelve_data_basic/'+symbol+'/_index.json' or not isinstance(ref['index_blob_sha'],str) or not HEX.fullmatch(ref['index_blob_sha']): raise ValueError('index ref')
             if request['provider']!='twelve_data_basic' or request['symbol']!=symbol or request['interval']!='1day' or request['trade_date_exclusive_upper_bound']!=trade_date: raise ValueError('request identity')
@@ -209,10 +262,31 @@ def _audit(repo, commit, trade_date, target_date, symbols, conflict_path, expect
                     for variant in without: variant.pop(name,None)
                     variants+=without
             if item['new_row_sha256'] not in {digest(variant) for variant in variants}: raise ValueError('new row digest')
+            if accepted_target is not None:
+                # Count only the durable append and immutable old value, not
+                # what an otherwise authentic diagnostic claims was promoted.
+                # Always inspect the symbol, even outside the display scope.
+                preimage, _ = inspect_series(symbol, old_snapshot, old_identity)
+                _, published = inspect_series(symbol, commit, current_identity)
+                retained, admitted = published.get(day), published.get(appended)
+                fields = ('open', 'high', 'low', 'close')
+                if (not preimage['last_trade_date'] or preimage['last_trade_date'] >= appended
+                        or retained is None or digest(retained) != item['old_row_sha256']
+                        or admitted is None or any(
+                            type(accepted_target.get(field)) not in (int, float)
+                            or type(admitted.get(field)) not in (int, float)
+                            or Decimal(str(accepted_target[field])) != Decimal(str(admitted[field]))
+                            for field in fields)):
+                    raise _PublishedDeferralError('published deferral target or retained history mismatch')
+                verified_deferrals.add(symbol)
+        except _PublishedDeferralError:
+            raise
         except (KeyError,TypeError,ValueError,IndexError) as exc:
             raise AuditError('conflict entry or old snapshot binding invalid') from exc
-    if failures<len(conflict_symbols): raise AuditError('conflict failure target count invalid')
-    return {'scope':'local_store_evidence_only','store_commit':commit,'target_date':target_date,'series':results,'conflict_blob':conflict_blob,'conflict_old_snapshot':old_snapshot,'conflict_count':count,'verified_conflict_entries':len(records),'limitations':['provider new values not independently verified','no admission or production decision']}
+    if (len(verified_deferrals) != deferred or verified_deferrals & conflict_symbols
+            or unresolved < len(conflict_symbols) or failures < len(conflict_symbols)):
+        raise AuditError('conflict failure or deferred target count invalid')
+    return {'scope':'local_store_evidence_only','store_commit':commit,'target_date':target_date,'series':results,'conflict_blob':conflict_blob,'conflict_old_snapshot':old_snapshot,'conflict_count':count,'verified_conflict_entries':len(records),'deferred_conflict_count':deferred,'unresolved_conflict_count':unresolved,'limitations':['provider new values not independently verified','no admission or production decision']}
 
 def audit(repo, commit, trade_date, target_date, symbols, conflict_path, expected_conflict_blob=None):
     try:

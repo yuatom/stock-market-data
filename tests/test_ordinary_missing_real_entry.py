@@ -15,16 +15,17 @@ from push_proof_store_commit import StorePushError, push_exact, verify_exact_out
 def bar(day,**kw):
     return dict(dict(trade_date=day,open=10.,high=12.,low=9.,close=11.,volume=100.),**kw)
 
-def run_scenario(rows, incoming, make_partial=False, permitted=(), policy=True, record_limit=512, verify_publication=False, fail_index_write=False, fail_rollback=False, witnesses=None, trade_date="2026-11-25", actual_cli=False, remote_drift=False):
+def run_scenario(rows, incoming, make_partial=False, permitted=(), policy=True, record_limit=512, verify_publication=False, fail_index_write=False, fail_rollback=False, witnesses=None, trade_date="2026-11-25", actual_cli=False, remote_drift=False, response_symbol=None, fail_append=False, response_meta=None, identity_profile=None, fixture_symbol='AAA', fixture_asset_class=None):
     with tempfile.TemporaryDirectory() as temp, ExitStack() as stack:
         repo=Path(temp).resolve()
         root=repo / "data/market-data" if verify_publication else repo
-        c.append_daily_bars(root,provider=c.TWELVE_PROVIDER,symbol='AAA',asset_class='stocks',bars=rows,series_semantics='daily_regular_ohlcv',shard_record_limit=record_limit)
+        asset_class = fixture_asset_class or ('etf' if identity_profile and identity_profile['type'] == 'ETF' else 'stocks')
+        c.append_daily_bars(root,provider=c.TWELVE_PROVIDER,symbol=fixture_symbol,asset_class=asset_class,bars=rows,series_semantics='daily_regular_ohlcv',shard_record_limit=record_limit)
         for symbol, days in (witnesses or {}).items():
             c.append_daily_bars(root,provider=c.TWELVE_PROVIDER,symbol=symbol,asset_class='etf',
                                 bars=[bar(day) for day in days],series_semantics='daily_regular_ohlcv')
         if make_partial:
-            idx=c._series_index_path(root,c.TWELVE_PROVIDER,'AAA')
+            idx=c._series_index_path(root,c.TWELVE_PROVIDER,fixture_symbol)
             index=json.loads(idx.read_bytes()); old=index['shards'][0]
             p=idx.parent/old['path']; doc=json.loads(p.read_bytes());doc['records'][0].pop('open')
             s._write_json(p,doc)
@@ -45,9 +46,15 @@ def run_scenario(rows, incoming, make_partial=False, permitted=(), policy=True, 
                 git('init','-q','--bare',str(bare))
                 git('remote','add','origin',str(bare))
                 git('push','origin','HEAD:refs/heads/main')
-        replacements={'_daily_universe':[('AAA','stocks')],'_load_daily_basis_owner':{},'_identity_effective_date':None,'wait_for_twelve_budget':None,'consume_twelve_credit':None,'fetch_twelve_daily':incoming}
+        replacements={'_daily_universe':[(fixture_symbol,asset_class)],'_load_daily_basis_owner':{},'_identity_effective_date':None,'wait_for_twelve_budget':None,'consume_twelve_credit':None,'fetch_twelve_daily':incoming}
+        if response_symbol is not None:
+            replacements.pop('fetch_twelve_daily')
+            replacements['_http_json'] = {'meta': {'symbol': response_symbol, 'interval': '1day',
+                'currency': 'USD', 'exchange_timezone': 'America/New_York', **(response_meta or {})},
+                'values': [dict({k: v for k, v in row.items() if k != 'trade_date'},
+                                datetime=row['trade_date']) for row in incoming]}
         stack.enter_context(patch.dict(os.environ,env))
-        for name,val in replacements.items():stack.enter_context(patch.object(c,name,return_value=val))
+        mocks = {name: stack.enter_context(patch.object(c,name,return_value=val)) for name,val in replacements.items()}
         cfg={'collector':{'budgets':{'twelve_data_basic':{'hard_credits_per_day':200,'hard_credits_per_minute':8}},'twelve_data_daily':{'history_outputsize':64,'bootstrap_minimum_records':1,'overlap_revision_policy':'price_only_volume_blocked_v1'}}}
         if policy: cfg['collector']['twelve_data_daily']['ordinary_missing_repair_policy']='active_shard_gap_fill_v1'
         access={'twelve_data_basic':{'base_url':'https://example.invalid','time_series_path':'/time_series','interval_daily':'1day'}}
@@ -62,6 +69,9 @@ def run_scenario(rows, incoming, make_partial=False, permitted=(), policy=True, 
                     raise OSError('synthetic preimage restoration failure')
                 return original_write(path,value)
             stack.enter_context(patch.object(s,'_write_json',side_effect=fail_only_repair_index))
+        if fail_append:
+            stack.enter_context(patch.object(c, 'append_daily_bars',
+                side_effect=c.MarketDataConflict('synthetic post-guard append rejection')))
         if actual_cli:
             source=Path(__file__).resolve().parents[1]/'config'
             # Exercise the same checked-in config the scheduled collector reads;
@@ -69,6 +79,11 @@ def run_scenario(rows, incoming, make_partial=False, permitted=(), policy=True, 
             if not policy:
                 raise AssertionError('actual CLI scenario uses production configuration')
             config_path=source/'market-data-store.yaml'
+            if identity_profile is not None:
+                candidate_config = yaml.safe_load(config_path.read_text())
+                candidate_config['collector']['twelve_data_daily']['historical_revision_identity_profiles'] = {fixture_symbol: identity_profile}
+                config_path = Path(stack.enter_context(tempfile.TemporaryDirectory()))/'market-data-store.yaml'
+                config_path.write_text(yaml.safe_dump(candidate_config))
             now=datetime.fromisoformat(trade_date+'T07:05:00-05:00')
             gate=entrypoint._settlement_gate_result
             output=StringIO()
@@ -86,7 +101,7 @@ def run_scenario(rows, incoming, make_partial=False, permitted=(), policy=True, 
             result_file=repo/'collector-result.txt'
             result_file.write_text(json.dumps(out))
             manifest=build_manifest(store_root=root,result_file=result_file,request_id='synthetic',
-                                    trade_date='2026-11-25',stage='previous_session_eod')
+                                    trade_date=trade_date,stage='previous_session_eod')
             out['publication_files']={r['path'] for r in json.loads(manifest.read_text())['required_outputs']}
             git('add','data/market-data')
             git('commit','-qm','repair')
@@ -123,8 +138,16 @@ def run_scenario(rows, incoming, make_partial=False, permitted=(), policy=True, 
                     raise
             else:
                 raise AssertionError('unmanifested output passed the exact closure')
+        if response_symbol is not None:
+            from urllib.parse import urlsplit, parse_qs
+            fetch = mocks['_http_json']
+            assert fetch.call_count == 1
+            q = parse_qs(urlsplit(fetch.call_args.args[0]).query)
+            out['request_identity'] = {k: q[k][0] for k in ('exchange','mic_code','adjust') if k in q}
+        out['normalized_evidence'] = [json.loads(p.read_bytes()) for p in root.glob('collector-state/*/price-only-*.json')]
+        out['lineage_segments'] = json.loads(c._series_index_path(root,c.TWELVE_PROVIDER,fixture_symbol).read_bytes())['lineage_segments']
         out['repair_audits']=[json.loads(p.read_bytes()) for p in root.glob('collector-state/*/ordinary-gap-*.json')]
-        return c.read_daily_series(root,provider=c.TWELVE_PROVIDER,symbol='AAA'),out
+        return c.read_daily_series(root,provider=c.TWELVE_PROVIDER,symbol=fixture_symbol),out
 
 class OrdinaryMissingProductionEntry(unittest.TestCase):
     def test_enabled_production_policy_keeps_corporate_action_series_out_of_legacy_writes(self):
@@ -237,3 +260,148 @@ class OrdinaryMissingProductionEntry(unittest.TestCase):
                                           'QQQ':[a['trade_date'],c['trade_date']]})
         self.assertEqual(out,[a,c])
         self.assertEqual(result['repair_audits'],[])
+
+
+STOCK_META = {'exchange':'NASDAQ', 'mic_code':'XNGS', 'type':'Common Stock'}
+ETF_META = {'exchange':'CBOE', 'mic_code':'BATS', 'type':'ETF'}
+def approved(meta):
+    return {**meta, 'adjust':'splits', 'basis_mode':'witnessed_same_axis_only',
+            'venue_sources':['https://example.invalid/source']}
+
+
+def test_isolated_old_price_revision_does_not_block_reviewed_calendar_target_on_thanksgiving():
+    days = ['2026-11-18','2026-11-19','2026-11-20','2026-11-23','2026-11-24','2026-11-25']
+    old = [bar(day) for day in days[:-1]]
+    incoming = [bar(days[0], high=12.01, volume=105.), *old[1:], bar(days[-1], close=11.05, volume=123.)]
+    actual, result = run_scenario(old, incoming, permitted=None,
+        witnesses={'SPY': days[:-1], 'QQQ': days[:-1]}, verify_publication=True, actual_cli=True,
+        response_symbol='AAA', trade_date='2026-11-26', response_meta=STOCK_META, identity_profile=approved(STOCK_META))
+    assert actual[:-1] == old
+    assert actual[-1]['trade_date'] == days[-1]
+    assert actual[-1]['close'] == 11.05
+    assert result['failure_target_count'] == 0
+
+    assert result['deferred_historical_revision_count'] == 1
+    assert result['conflict_diagnostics'][0]['disposition'] == 'deferred_preserve_prior_prices'
+    assert result['conflict_diagnostics'][0]['normalized_evidence_path'] in result['publication_files']
+    assert result['lineage_segments'][-1]['volume_policy'] == 'BLOCKED_UNRESOLVED'
+    assert result['normalized_evidence'][0]['verified_response_identity']['symbol'] == 'AAA'
+    assert result['normalized_evidence'][0]['verified_response_identity']['mic_code'] == 'XNGS'
+    assert result['request_identity'] == {}
+    assert result['normalized_evidence'][0]['verified_response_identity']['documented_default_adjust'] == 'splits'
+    assert result['normalized_evidence'][0]['records'][0] == incoming[0]
+    assert result['normalized_evidence'][0]['records'][-1] == incoming[-1]
+
+
+def test_old_revision_never_admits_bad_metadata_gaps_or_cross_basis_targets():
+    days = ['2026-11-17','2026-11-18','2026-11-19','2026-11-20','2026-11-23','2026-11-24']
+    old = [bar(day) for day in days[:-1]]
+    small = bar(days[0], high=12.01)
+    target = bar(days[-1])
+    ordinary = [small, *old[1:], target]
+    witnesses = {'SPY': days, 'QQQ': days}
+    cases = [
+        (ordinary, witnesses, 'OTHER'),
+        ([small, *old[1:], bar(days[-1],open=5.,high=6.,low=4.5,close=5.5)], witnesses, 'AAA'),
+        ([bar(days[0], close=11.01), *old[1:], target], witnesses, 'AAA'),
+        ([small, bar(days[1], high=12.01), *old[2:], target], witnesses, 'AAA'),
+        ([small, *old[1:-1], bar(days[-2],high=12.01), target], witnesses, 'AAA'),
+        ([small, *old[1:], bar(days[-1], low=20.)], witnesses, 'AAA'),
+        ([small, *old[1:-1], target], witnesses, 'AAA'),
+        ([*ordinary, target], witnesses, 'AAA'),
+    ]
+    for incoming, session_witnesses, response_symbol in cases:
+        actual, result = run_scenario(old, incoming, permitted=None, witnesses=session_witnesses,
+                                       actual_cli=True, verify_publication=True, response_symbol=response_symbol, response_meta=STOCK_META, identity_profile=approved(STOCK_META))
+        assert actual == old, (incoming, session_witnesses, response_symbol, result)
+        assert result['failure_target_count'] == 1
+        assert result['deferred_historical_revision_count'] == 0
+
+    # 11/26 is a published closure: with an execution on 11/27, an allegedly
+    # completed 11/26 row cannot be promoted along with the 11/25 target.
+    thanksgiving_days = ['2026-11-18','2026-11-19','2026-11-20','2026-11-23','2026-11-24']
+    existing = [bar(day) for day in thanksgiving_days]
+    incoming = [bar(thanksgiving_days[0], high=12.01), *existing[1:],
+                bar('2026-11-25'), bar('2026-11-26')]
+    actual, result = run_scenario(existing, incoming, permitted=None, actual_cli=True,
+        verify_publication=True, response_symbol='AAA', trade_date='2026-11-27', response_meta=STOCK_META, identity_profile=approved(STOCK_META))
+    assert actual == existing
+    assert result['failure_target_count'] == 1
+
+def test_append_rejected_after_deferral_guard_keeps_partial_and_unpromoted():
+    days = ['2026-11-18','2026-11-19','2026-11-20','2026-11-23','2026-11-24','2026-11-25']
+    old = [bar(day) for day in days[:-1]]
+    incoming = [bar(days[0],high=12.01), *old[1:], bar(days[-1])]
+    actual, result = run_scenario(old, incoming, permitted=None, verify_publication=True,
+        actual_cli=True, response_symbol='AAA', trade_date='2026-11-26', fail_append=True, response_meta=STOCK_META, identity_profile=approved(STOCK_META))
+    assert actual == old
+    assert result['status'] == 'partial'
+    assert result['deferred_historical_revision_count'] == 0
+    assert result['failures'][0]['reason_code'] == 'immutable_append_conflict'
+    assert result['conflict_record_count'] == 1
+    assert 'disposition' not in result['conflict_diagnostics'][0]
+    assert result['normalized_evidence'][0]['records'][-1] == incoming[-1]
+
+
+def test_explicit_identity_refuses_wrong_mic_exchange_basis_or_missing_venue_and_accepts_known_etf():
+    days = ['2026-11-18','2026-11-19','2026-11-20','2026-11-23','2026-11-24','2026-11-25']
+    old = [bar(day) for day in days[:-1]]
+    incoming = [bar(days[0],high=12.01), *old[1:], bar(days[-1])]
+    def run(meta, profile=approved(ETF_META)):
+        return run_scenario(old, incoming, permitted=None, verify_publication=True,
+            actual_cli=True, response_symbol='AAA', trade_date='2026-11-26',
+            response_meta=meta, identity_profile=profile)
+    for meta in ({**ETF_META,'mic_code':'ARCX'}, {**ETF_META,'exchange':'NASDAQ'},
+                 {**ETF_META,'adjust':'all'}, {**ETF_META,'adjustment':'none'},
+                 {**ETF_META,'adjusted': True}, {'exchange':'CBOE','type':'ETF'}):
+        actual, result = run(meta)
+        assert actual == old
+        assert result['deferred_historical_revision_count'] == 0
+        assert result['failures'][0]['reason_code'] == 'daily_response_identity_or_basis_conflict'
+    actual, result = run(ETF_META, profile=None)
+    assert actual == old and result['request_identity'] == {}
+    assert result['deferred_historical_revision_count'] == 0
+    assert 'verified_response_identity' not in result['normalized_evidence'][0]
+    actual, result = run({**ETF_META, 'adjust':'splits', 'type':'Etf'})
+    assert actual[:-1] == old and actual[-1] == incoming[-1]
+    assert result['request_identity'] == {}
+    assert result['normalized_evidence'][0]['verified_response_identity']['returned_basis_fields'] == {'adjust':'splits'}
+
+def test_ordinary_defer_scope_only_known_five_symbols_and_never_alias_profiles():
+    source = Path(__file__).resolve().parents[1]/'config/market-data-store.yaml'
+    profiles = yaml.safe_load(source.read_text())['collector']['twelve_data_daily']['historical_revision_identity_profiles']
+    assert {symbol:(row['exchange'],row['mic_code']) for symbol, row in profiles.items()} == {
+        'IBIT':('NASDAQ','XNMS'), 'VIXY':('CBOE','BATS'), 'META':('NASDAQ','XNGS'),
+        'PLTR':('NASDAQ','XNGS'), 'TSLA':('NASDAQ','XNGS')}
+    assert all(c._approved_daily_identity(symbol, profiles) is not None for symbol in profiles)
+    assert c._approved_daily_identity('SOXX', profiles) is None
+
+def test_checked_in_meta_profile_does_not_change_existing_no_conflict_append():
+    day, target = '2026-11-24','2026-11-25'
+    original = [bar(day)]
+    incoming = original + [bar(target)]
+    # Missing MIC would not qualify for deferral. The unchanged normal
+    # no-conflict request and append must still work with the real config.
+    actual, result = run_scenario(original, incoming, permitted=None, verify_publication=True,
+        actual_cli=True, response_symbol='META', trade_date='2026-11-26', fixture_symbol='META')
+    assert actual == incoming
+    assert result['request_identity'] == {}
+    assert result['deferred_historical_revision_count'] == 0
+    assert 'verified_response_identity' not in result['normalized_evidence'][0]
+    assert result['failure_target_count'] == 0
+
+def test_checked_in_five_profiles_defer_via_original_single_call_each():
+    source = Path(__file__).resolve().parents[1]/'config/market-data-store.yaml'
+    profiles = yaml.safe_load(source.read_text())['collector']['twelve_data_daily']['historical_revision_identity_profiles']
+    days = ['2026-11-18','2026-11-19','2026-11-20','2026-11-23','2026-11-24','2026-11-25']
+    old = [bar(day) for day in days[:-1]]
+    incoming = [bar(days[0],high=12.01), *old[1:], bar(days[-1])]
+    for symbol, profile in profiles.items():
+        meta = {key:profile[key] for key in ('exchange','mic_code','type')}
+        actual, outcome = run_scenario(old, incoming, permitted=None, verify_publication=True,
+            actual_cli=True, response_symbol=symbol, response_meta=meta, trade_date='2026-11-26',
+            fixture_symbol=symbol, fixture_asset_class='etf' if meta['type']=='ETF' else 'stocks')
+        assert actual == old + [incoming[-1]], symbol
+        assert outcome['request_identity'] == {}  # Helper checks transport was called exactly once.
+        assert outcome['deferred_historical_revision_count'] == 1
+        assert outcome['normalized_evidence'][0]['verified_response_identity']['mic_code'] == meta['mic_code']

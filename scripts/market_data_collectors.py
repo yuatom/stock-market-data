@@ -17,6 +17,7 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 from zoneinfo import ZoneInfo
@@ -314,12 +315,44 @@ def _identity_effective_date(watchlist: Mapping[str, Any], symbol: str) -> str |
     return str(value) if value else None
 
 
+class _DailyResponseIdentityConflict(MarketDataConflict):
+    pass
+
+
+class _NormalizedDailyRows(list):
+    """Keep provider identity proof out of normalized row fields."""
+
+    def __init__(self, rows, *, verified_identity, identity_conflict=False):
+        super().__init__(rows)
+        self.verified_identity = verified_identity
+        self.identity_conflict = identity_conflict
+
+
+def _approved_daily_identity(symbol, profiles):
+    """The normal universe and a public profile do not establish a daily MIC or basis."""
+    row = profiles.get(symbol)
+    if row is None:
+        return None
+    if (not isinstance(row, dict)
+            or set(row) != {'exchange', 'mic_code', 'type', 'adjust', 'basis_mode', 'venue_sources'}
+            or not isinstance(row['exchange'], str) or not re.fullmatch(r'[A-Za-z0-9 .&-]{1,40}', row['exchange'])
+            or not isinstance(row['mic_code'], str) or not re.fullmatch(r'[A-Z0-9]{4}', row['mic_code'])
+            or row['type'] not in {'ETF', 'Common Stock'}
+            or row['adjust'] != 'splits' or row['basis_mode'] != 'witnessed_same_axis_only'
+            or not isinstance(row['venue_sources'], list) or not row['venue_sources']
+            or any(not isinstance(url, str) or not url.startswith('https://')
+                   for url in row['venue_sources'])):
+        raise ValueError('invalid approved daily response identity')
+    return {k: row[k] for k in ('exchange', 'mic_code', 'type', 'adjust')}
+
+
 def fetch_twelve_daily(
     symbol: str,
     api_key: str,
     access: Mapping[str, Any],
     *,
     outputsize: int,
+    approved_identity: Mapping[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     spec = access["twelve_data_basic"]
     params = urllib.parse.urlencode(
@@ -339,6 +372,30 @@ def fetch_twelve_daily(
     )
     if payload.get("status") == "error":
         raise RuntimeError(str(payload.get("message") or "Twelve Data error"))
+    meta = payload.get("meta")
+    response_identity = None
+    identity_conflict = False
+    if approved_identity is not None:
+        expected = {'symbol': symbol, 'interval': '1day', 'currency': 'USD',
+                    'exchange_timezone': 'America/New_York',
+                    **{k: approved_identity[k] for k in ('exchange', 'mic_code', 'type')}}
+        if (not isinstance(meta, dict)
+                or any(meta.get(k) != v for k, v in expected.items() if k != 'type')
+                or not isinstance(meta.get('type'), str)
+                or meta['type'].casefold() != expected['type'].casefold()
+                or any(k in meta and meta[k] != approved_identity['adjust']
+                       for k in ('adjust', 'adjustment', 'adjustment_semantics', 'adjusted'))):
+            identity_conflict = True
+        else:
+            response_identity = {
+                **expected, 'type': meta['type'],
+                # Same ordinary provider request. A documented default is not
+                # a returned adjustment or cross-basis authorization.
+                'documented_default_adjust': approved_identity['adjust'],
+                'returned_basis_fields': {k: meta[k] for k in
+                    ('adjust', 'adjustment', 'adjustment_semantics', 'adjusted') if k in meta},
+            }
+    malformed = False
     bars: list[dict[str, Any]] = []
     for row in payload.get("values") or []:
         try:
@@ -351,9 +408,14 @@ def fetch_twelve_daily(
                 "volume": float(row["volume"]) if row.get("volume") not in (None, "") else 0.0,
             }
         except (KeyError, TypeError, ValueError):
+            malformed = True
             continue
+        if row.get("datetime") != bar["trade_date"] or any(type(row.get(key)) is bool for key in (*OHLC, 'volume')):
+            malformed = True
         bars.append(bar)
-    return sorted(bars, key=lambda x: x["trade_date"])
+    return _NormalizedDailyRows(sorted(bars, key=lambda x: x["trade_date"]),
+                                verified_identity=response_identity if not malformed else None,
+                                identity_conflict=identity_conflict)
 
 
 def _series_index_path(store_root: Path, provider: str, symbol: str) -> Path:
@@ -457,6 +519,9 @@ def _write_private_eod_diagnostic(
         "symbols_requested": result.get("symbols_requested", 0),
         "failure_target_count": len(result.get("failures", [])),
         "conflict_record_count": conflict_count,
+        **({key: result[key] for key in (
+            "deferred_historical_revision_count", "unresolved_historical_revision_count")}
+           if "deferred_historical_revision_count" in result else {}),
         "conflict_diagnostic_record_count": len(diagnostics),
         "conflict_diagnostics_truncated": conflict_count > len(diagnostics),
         "conflicts": diagnostics,
@@ -479,6 +544,39 @@ def _load_daily_basis_owner(store_root, trade_date):
     return load_daily_basis_owner(store_root, trade_date, filename, dict(os.environ))
 
 
+def _can_defer_daily_revision(existing, eligible, conflict, trade_date, fetched, blocked_volume_dates):
+    """Permit only one newest session; no retained price changes or basis repair."""
+    if not isinstance(fetched, _NormalizedDailyRows) or not fetched.verified_identity:
+        return False
+    days = sorted(missing_repair_sessions(trade_date))
+    if len(days) < 4 or not existing:
+        return False
+    target, anchors = days[-1], days[-4:-1]
+    current = {row['trade_date']: row for row in eligible}
+    if len(current) != len(eligible) or existing[-1]['trade_date'] != anchors[-1]:
+        return False
+    if [day for day in current if day > anchors[-1]] != [target]:
+        return False
+    prior = {row['trade_date']: row for row in existing}
+    if any(day not in current or day not in prior
+           or not _ordinary_daily_overlap(prior[day], current[day], blocked_old_volume=day in blocked_volume_dates)['price_eligible'] for day in anchors):
+        return False
+    if len(conflict) != 1:
+        return False
+    old, new, classification = conflict[0]
+    if (old["trade_date"] >= anchors[0] or old["trade_date"] not in days
+            or classification["classification"] != "PRICE_REVISION"
+            or not set(classification["changed_fields"]).issubset({"open", "high", "low", "volume"})):
+        return False
+    # Decimal comparison avoids binary rounding at the explicit bound.
+    def relative(a, b):
+        a, b = Decimal(str(a)), Decimal(str(b))
+        return abs(b - a) / a
+    if any(relative(old[k], new[k]) > Decimal("0.0025") for k in OHLC):
+        return False
+    # The reviewed calendar selects the only target; the same ticker’s three
+    # admitted Store rows establish its axis. Do not assume a corporate action.
+    return all(relative(prior[anchors[-1]]["close"], current[target][k]) <= Decimal("0.20") for k in OHLC)
 def _ordinary_daily_overlap(old, new, *, blocked_old_volume):
     if blocked_old_volume and "volume" not in old and "volume" in new:
         # Compare OHLC on a temporary copy only. The captured volume is still
@@ -507,6 +605,14 @@ def collect_previous_session_eod(
     gap_policy=config['collector']['twelve_data_daily'].get('ordinary_missing_repair_policy')
     if gap_policy not in (None, 'active_shard_gap_fill_v1') or (gap_policy and not price_only):
         raise ValueError('unsupported ordinary missing repair policy')
+    defer_policy=config['collector']['twelve_data_daily'].get('historical_revision_defer_policy')
+    if defer_policy not in (None, 'witnessed_frontier_one_small_nonclose_revision_v1') or (defer_policy and not gap_policy):
+        raise ValueError('unsupported historical daily revision defer policy')
+    identity_profiles = config['collector']['twelve_data_daily'].get('historical_revision_identity_profiles', {})
+    if not isinstance(identity_profiles, dict) or (identity_profiles and not defer_policy):
+        raise ValueError('unsupported historical revision identity profiles')
+    approved_identities = {symbol: _approved_daily_identity(symbol, identity_profiles)
+                           for symbol in identity_profiles}
     key = os.environ.get("TWELVE_DATA_API_KEY")
     if not key:
         return {
@@ -526,6 +632,7 @@ def collect_previous_session_eod(
     failures: list[dict[str, Any]] = []
     conflict_diagnostics: list[dict[str, Any]] = []
     conflict_record_count = 0
+    deferred_revision_count = 0
     volume_revision_count = 0
     volume_blocked_symbols: list[str] = []
     volume_quarantined_series = 0
@@ -571,13 +678,17 @@ def collect_previous_session_eod(
                 per_minute=int(budget["hard_credits_per_minute"]),
             )
             phase = "provider_fetch"
-            fetched = fetch_twelve_daily(symbol, key, access, outputsize=outputsize)
+            approved_identity = approved_identities.get(symbol)
+            fetched = fetch_twelve_daily(symbol, key, access, outputsize=outputsize,
+                                         **({'approved_identity': approved_identity} if approved_identity else {}))
             if price_only:
                 # Retain all normalized response rows BEFORE any comparison rejection.
                 # This is not original HTTP bytes and does not recover past responses.
                 retained=dict(schema_version=1,kind='normalized_daily_price_only_evidence',
                               symbol=symbol,execution_day=trade_date,records=fetched,
                               volume_policy='BLOCKED_UNRESOLVED')
+                if isinstance(fetched, _NormalizedDailyRows) and fetched.verified_identity:
+                    retained['verified_response_identity'] = fetched.verified_identity
                 payload=canonical_bytes(retained)
                 evidence_digest=hashlib.sha256(payload).hexdigest()
                 relative=Path('collector-state')/trade_date[:7]/('price-only-'+evidence_digest+'.json')
@@ -600,6 +711,7 @@ def collect_previous_session_eod(
                 phase='price_only_quality_validation'
                 if any(not classify_daily_overlap(dict(row),dict(row))['price_eligible'] for row in eligible):
                     raise MarketDataConflict('price-only daily response quality invalid')
+            deferred = False
             overlap_classifications=[]
             witnessed_blocked_volume_absence = False
             index_path = _series_index_path(store_root, TWELVE_PROVIDER, symbol)
@@ -630,7 +742,8 @@ def collect_previous_session_eod(
                     if "volume" not in row and any(start <= i <= end for start, end in blocked_intervals)
                 }
                 phase = "historical_overlap_comparison"
-                has_conflict = False
+                unresolved = []
+                diagnostic_start = len(conflict_diagnostics)
                 active_dates = set()
                 if gap_policy:
                     shards = json.loads(index_path.read_bytes())['shards']
@@ -661,7 +774,7 @@ def collect_previous_session_eod(
                             and min(active_dates) < row['trade_date'] < max(active_dates)):
                         repairs.append((None, {k: row[k] for k in ('trade_date', *OHLC)}))
                     if rejected:
-                        has_conflict = True
+                        unresolved.append((old, row, classification))
                         conflict_record_count += 1
                         if len(conflict_diagnostics) < MAX_CONFLICT_DIAGNOSTIC_RECORDS:
                             conflict_diagnostics.append(_conflict_record(
@@ -680,8 +793,15 @@ def collect_previous_session_eod(
                             evidence_path=evidence_path, evidence_sha256=evidence_digest,
                             observed_trade_date=trade_date):
                         volume_quarantined_series += 1
-                if has_conflict:
-                    raise MarketDataConflict("provider historical revision detected")
+                if unresolved:
+                    if isinstance(fetched, _NormalizedDailyRows) and fetched.identity_conflict:
+                        raise _DailyResponseIdentityConflict('explicit daily response identity or adjustment mismatch')
+                    if not (defer_policy and len(conflict_diagnostics) > diagnostic_start
+                            and _can_defer_daily_revision(
+                            existing, eligible, unresolved, trade_date, fetched, blocked_volume_dates)):
+                        raise MarketDataConflict("provider historical revision detected")
+                    deferred = True
+                    repairs.clear()
             elif len(eligible) < bootstrap_minimum:
                 failures.append(
                     {
@@ -709,7 +829,7 @@ def collect_previous_session_eod(
 
             lineage={"ingest_kind":"collector_previous_session_eod",
                      "ingest_trade_date":trade_date,"history_outputsize":outputsize}
-            if price_only and symbol_volume_blocked:
+            if price_only and (symbol_volume_blocked or deferred):
                 lineage.update(ingest_kind='collector_price_only_revision_v1',
                                volume_policy='BLOCKED_UNRESOLVED',
                                normalized_evidence_path=evidence_path,
@@ -729,6 +849,15 @@ def collect_previous_session_eod(
                 lineage=lineage,
             )
             if result.changed:
+                if deferred:
+                    deferred_revision_count += 1
+                    if not symbol_volume_blocked:
+                        volume_blocked_symbols.append(symbol)
+                    for diagnostic in conflict_diagnostics[diagnostic_start:]:
+                        diagnostic.update(disposition="deferred_preserve_prior_prices",
+                                          appended_trade_date=new_rows[0]["trade_date"],
+                                          normalized_evidence_path=evidence_path,
+                                          normalized_evidence_sha256=evidence_digest)
                 changed_series += int(not repairs)
                 if not existing:
                     bootstrapped_series += 1
@@ -739,12 +868,13 @@ def collect_previous_session_eod(
             if isinstance(exc, MarketDataConflict):
                 # Classify only by the proven call phase, never by private provider data
                 # or a substring of an exception message. Do not relax append-only.
-                failure["reason_code"] = {
+                failure["reason_code"] = ("daily_response_identity_or_basis_conflict"
+                    if isinstance(exc, _DailyResponseIdentityConflict) else {
                     "stored_series_read": "stored_series_integrity_conflict",
                     "price_only_quality_validation": "daily_price_quality_invalid",
                     "historical_overlap_comparison": "historical_provider_revision",
                     "immutable_append": "immutable_append_conflict",
-                }.get(phase, "unclassified_market_data_conflict")
+                }.get(phase, "unclassified_market_data_conflict"))
             failures.append(failure)
 
     result = {
@@ -755,6 +885,9 @@ def collect_previous_session_eod(
         "bootstrapped_series": bootstrapped_series,
         "failure_target_count": len(failures),
         "conflict_record_count": conflict_record_count,
+        **({"deferred_historical_revision_count": deferred_revision_count,
+            "unresolved_historical_revision_count": conflict_record_count - deferred_revision_count}
+           if defer_policy else {}),
         **({"price_only_volume_revision_count":volume_revision_count,
             "numeric_representation_only_count":representation_only_count,
             "volume_policy_scope":"per_symbol",
