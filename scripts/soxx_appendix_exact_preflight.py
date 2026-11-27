@@ -166,7 +166,7 @@ def _verify_base_advance(root,evidence_base,native_blob,publication_base,advance
         _require(g('ls-tree',publication_base,'--',path)==f'100644 blob {blob}\t{path}',
                  'STORE_BASE_ADVANCE_BLOB_DRIFT')
     manifest=_strict_json(_git(root,'show',publication_base+':'+advance.manifest))
-    _require(manifest.get('stage')=='premarket' and manifest.get('trade_date')==date,'STORE_PREMARKET_CLOSURE_SCOPE')
+    _require(manifest.get('stage')=='premarket' and manifest.get('trade_date')==advance.trade_date,'STORE_PREMARKET_CLOSURE_SCOPE')
     try:
         verify_exact_output_closure(root,evidence_base,publication_base,advance.manifest)
     except StorePushError as exc:
