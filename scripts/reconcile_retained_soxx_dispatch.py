@@ -3,6 +3,7 @@
 Owner dispatch identifies independently approved private receipt bytes; neither
 the reader nor the Store credential establishes consent. No provider access.
 """
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
@@ -16,8 +17,8 @@ import tempfile
 
 from scripts.run_private_authority_route import _environment, _quiet, _source, STORE_URL
 from publish_soxx_web_appendix import (
-    COMPUTE, STORE, STATUS, _create_exact, _require_local_and_remote,
-    _require_origins, _verify_created_local, _quiet_store_checkout, verify_publication)
+    COMPUTE, STORE, _require_local_and_remote, _require_origins, _quiet_store_checkout)
+from push_proof_store_commit import verify_exact_output_closure
 from soxx_appendix_exact_preflight import _git, _strict_json, load_profile, preflight
 
 WORKFLOW_REF=COMPUTE+'/.github/workflows/reconcile-retained-daily.yml@refs/heads/main'
@@ -48,6 +49,24 @@ def public_request(env):
          and type(obj['commitment']) is str and HASH.fullmatch(obj['commitment']))
     return sha,rid,obj['commitment']
 
+@dataclass(frozen=True)
+class _ReceiptValidity:
+    start:datetime
+    end:datetime
+
+def _receipt_window(obj):
+    def parse(s):
+        need(type(s) is str and re.fullmatch(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z',s))
+        return datetime.fromisoformat(s[:-1]+'+00:00')
+    start,end=parse(obj['valid_from']),parse(obj['valid_until'])
+    need(timedelta(0)<end-start<=timedelta(minutes=30))
+    return _ReceiptValidity(start,end)
+
+def require_current_receipt(receipt_store,ref,expected,approval):
+    # This is the last remote read before the UTC window check and the only write.
+    need(_resolve_ref(receipt_store,ref)==expected)
+    need(approval.start<=datetime.now(timezone.utc)<approval.end)
+
 def bound_receipt(raw,sha,commitment,now):
     need(type(raw) is bytes and 0<len(raw)<=24000 and type(commitment) is str and HASH.fullmatch(commitment)
          and hmac.compare_digest(hashlib.sha256(DOMAIN+raw).hexdigest(),commitment))
@@ -57,11 +76,8 @@ def bound_receipt(raw,sha,commitment,now):
          obj['kind']=='soxx_retained_reconciliation_receipt' and obj['compute_sha']==sha and obj['workflow_ref']==WORKFLOW_REF
          and obj['action']=='exact_price_appendix_only' and type(obj['profile']) is str)
     need(json.dumps(obj,separators=(',',':'),sort_keys=True).encode()==raw)
-    def time(s):
-        need(type(s) is str and re.fullmatch(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z',s))
-        return datetime.fromisoformat(s[:-1]+'+00:00')
-    start,end=time(obj['valid_from']),time(obj['valid_until'])
-    need(start<=now<end and end-start<=timedelta(minutes=30))
+    approval=_receipt_window(obj)
+    need(approval.start<=now<approval.end)
     # A protected receipt must commit to the current-head route. Runtime checks
     # salt syntax only; independent staging must use fresh CSPRNG bytes.
     profile=obj['profile'].encode()
@@ -119,39 +135,98 @@ def _output(root,*args,raw=None,env=None):
     need(out.returncode==0)
     return out.stdout
 
-def consume_claim(root,compute_sha,actual_run,approved_commitment,receipt_oid,plan):
-    """Create one irreversible private claim; this never alters Store main."""
-    # One stable lane for the already-approved frozen historical appendix. The
-    # independently verified private manifest binds the dates; no caller input
-    # (including a shifted date tuple) may create a second replay key.
-    scope=dict(action='exact_price_appendix_only',symbol='SOXX',trade_dates=plan.trade_dates,actor_id=OWNER_ID)
-    identity=hashlib.sha256(CLAIM_DOMAIN+CLAIM_LANE).hexdigest()
-    ref='refs/heads/reconciliation-claims/soxx-web-appendix/'+identity
+def claim_ref():
+    # One lane for the existing frozen appendix, regardless of dates/base/run.
+    return 'refs/heads/reconciliation-claims/soxx-web-appendix/'+hashlib.sha256(CLAIM_DOMAIN+CLAIM_LANE).hexdigest()
+
+def _require_absent(root,ref):
     existing=_git_result(root,'ls-remote','--refs','--exit-code','origin',ref)
     need(existing.returncode==2 and existing.stdout==b'')
+
+def _local_oid(root,*args,**kwargs):
+    val=_output(root,*args,**kwargs).decode('ascii').strip()
+    need(SHA.fullmatch(val))
+    return val
+
+def _local_commit(root,tree,label,parent=None):
+    local_author=dict(os.environ,GIT_AUTHOR_NAME='SOXX Retained Publication',GIT_COMMITTER_NAME='SOXX Retained Publication',
+                      GIT_AUTHOR_EMAIL='retained-publication@users.noreply.github.com',GIT_COMMITTER_EMAIL='retained-publication@users.noreply.github.com')
+    parents=('-p',parent) if parent else ()
+    return _local_oid(root,'commit-tree',tree,*parents,'-m',label,env=local_author)
+
+def _prove_publication_tree(root,commit,plan):
+    def text(*a): return _git(root,*a).decode('ascii').strip()
+    need(text('rev-list','--parents','-n','1',commit).split()==[commit,plan.base])
+    need(text('rev-parse',commit+'^{tree}')==plan.tree)
+    delta=_git(root,'diff-tree','-z','-r','--no-renames','--name-status',plan.base,commit).decode('ascii').split('\0')
+    need(len(plan.blobs)==4 and delta[-1]=='' and len(delta)==9 and
+         dict(zip(delta[1::2],delta[::2]))==dict.fromkeys(plan.blobs,'A'))
+    for path,expected in plan.blobs.items():
+        need(text('ls-tree',commit,'--',path)==f'100644 blob {expected}\t{path}')
+    verify_exact_output_closure(root,plan.base,commit,plan.manifest)
+
+def _check_push_ack(stdout,refs):
+    changed={}
+    for line in stdout.decode('ascii').splitlines():
+        if '\t' not in line:
+            continue
+        parts=line.split('\t')
+        need(len(parts)==3 and len(parts[0])==1)
+        _,sep,ref=parts[1].partition(':')
+        need(sep and ref in refs and ref not in changed)
+        changed[ref]=parts[0]
+    need(changed==refs)
+
+def _verify_store_publisher(root,refs,main,claim,claim_blob,body,plan):
+    """Read-only after the single atomic write: never recreate missing refs."""
+    def read_refs():
+        return all(_resolve_ref(root,ref)==oid for ref,oid in refs.items())
+    need(read_refs())
+    _git(root,'fetch','--quiet','--no-tags','--no-recurse-submodules','origin',main)
+    need(_git(root,'rev-parse','FETCH_HEAD').decode().strip()==main)
+    _prove_publication_tree(root,main,plan)
+    _git(root,'fetch','--quiet','--no-tags','--no-recurse-submodules','origin',claim)
+    need(_git(root,'rev-parse','FETCH_HEAD').decode().strip()==claim and
+         _git(root,'ls-tree',claim,'--','claim.json').decode().strip()==f'100644 blob {claim_blob}\tclaim.json' and
+         _git(root,'show',claim+':claim.json')==body and read_refs())
+    return {'status':'durability_verified','store_commit_sha':main}
+
+def publish_atomically(root,compute_sha,actual_run,approved_commitment,receipt_oid,plan,*,before_push):
+    """One atomic expected-old main CAS, create-only durability and fixed claim.
+
+    Ref retention is an operator contract, not protection from an administrator
+    able to delete refs and rewrite the repository. A lost ack is inspection only.
+    """
+    main_ref='refs/heads/main'
+    ref=claim_ref()
+    _require_absent(root,ref)
+    need(_resolve_ref(root,main_ref)==plan.base)
+    main=_local_commit(root,plan.tree,'data: append retained SOXX public-web prior-close evidence',parent=plan.base)
+    _prove_publication_tree(root,main,plan)
+    tag='refs/tags/market-data-read/'+main
+    _require_absent(root,tag)
+    scope=dict(action='exact_price_appendix_only',symbol='SOXX',trade_dates=plan.trade_dates,actor_id=OWNER_ID)
     body=_canonical(dict(schema_version=1,kind='soxx_retained_publication_claim',
           actor='yuatom',actor_id=OWNER_ID,run_id=actual_run,run_attempt=1,
           receipt_commitment=approved_commitment,receipt_commit=receipt_oid,
           compute_sha=compute_sha,expected_store_base=plan.base,store_candidate=plan.head,
-          candidate_tree=plan.tree,evidence_base=plan.evidence_base,scope=scope))
-    def oid(*args,**kwargs):
-        val=_output(root,*args,**kwargs).decode('ascii').strip()
-        need(SHA.fullmatch(val))
-        return val
-    blob=oid('hash-object','-w','--stdin',raw=body)
-    tree=oid('mktree',raw=f'100644 blob {blob}\tclaim.json\n'.encode())
-    local_author=dict(os.environ,GIT_AUTHOR_NAME='SOXX Retained Publication',GIT_COMMITTER_NAME='SOXX Retained Publication',
-                      GIT_AUTHOR_EMAIL='retained-publication@users.noreply.github.com',GIT_COMMITTER_EMAIL='retained-publication@users.noreply.github.com')
-    claim=oid('commit-tree',tree,'-m','Retained appendix claim',env=local_author)
-    # Zero is a compare-and-create lease on this private claim ref only. Any
-    # existing value blocks it. Never push/force/update or delete Store main here.
-    _output(root,'push','--porcelain','--force-with-lease='+ref+':'+'0'*40,'origin',claim+':'+ref)
-    need(_resolve_ref(root,ref)==claim)
-    _git(root,'fetch','--quiet','--no-tags','--no-recurse-submodules','origin',claim)
-    need(_git(root,'rev-parse','FETCH_HEAD').decode().strip()==claim and
-         _git(root,'ls-tree',claim,'--','claim.json').decode().strip()==f'100644 blob {blob}\tclaim.json' and
-         _git(root,'show',claim+':claim.json')==body and _resolve_ref(root,ref)==claim)
-    return ref,claim
+          candidate_tree=plan.tree,evidence_base=plan.evidence_base,published_store_commit=main,scope=scope))
+    blob=_local_oid(root,'hash-object','-w','--stdin',raw=body)
+    tree=_local_oid(root,'mktree',raw=f'100644 blob {blob}\tclaim.json\n'.encode())
+    claim=_local_commit(root,tree,'Retained appendix claim')
+    refs={main_ref:main,tag:main,ref:claim}
+    zero='0'*40
+    leases={main_ref:plan.base,tag:zero,ref:zero}
+    # The main lease is safe only for the exact validated direct child above.
+    # The two zero leases are create-only. Any failure stops; no fallback.
+    args=('push','--porcelain','--atomic',
+          *('--force-with-lease='+r+':'+p for r,p in leases.items()),'origin',
+          *(o+':'+r for r,o in refs.items()))
+    before_push()
+    ack=_output(root,*args)
+    _check_push_ack(ack,{main_ref:' ',tag:'*',ref:'*'})
+    return _verify_store_publisher(root,refs,main,claim,blob,body,plan)
+
 
 def run(compute,receipt_store,store,env):
     sha,rid,commitment=public_request(env)
@@ -166,19 +241,13 @@ def run(compute,receipt_store,store,env):
         _require_origins(compute,store)
         preflight(store,plan)
         _require_local_and_remote(compute,store,sha,plan)
-        need(_resolve_ref(receipt_store,ref)==receipt_oid)
-        bound_receipt(raw,sha,commitment,datetime.now(timezone.utc))
-        consume_claim(receipt_store,sha,rid,commitment,receipt_oid,plan)
-        # A failed or uncertain claim stops here. Once consumed, later failures
-        # leave it closed for inspection, never retry, repair or delete it.
-        _require_local_and_remote(compute,store,sha,plan)
-        need(_resolve_ref(receipt_store,ref)==receipt_oid)
-        bound_receipt(raw,sha,commitment,datetime.now(timezone.utc))
-        oid=_create_exact(store,token,rid,plan)
-        _verify_created_local(store,oid,plan)
-        result=verify_publication(store,oid,status=STATUS,required_manifest=plan.manifest)
-        need(result.get('status')=='durability_verified' and result.get('verified_changed_paths')==4 and
-             len(result.get('verified_required_outputs',[]))==3)
+        def final_authority_check():
+            # Receipt bytes were already validated against the owner-selected
+            # commitment; parse only the pinned window before the late ref read.
+            approval=_receipt_window(_strict_json(raw))
+            require_current_receipt(receipt_store,ref,receipt_oid,approval)
+        result=publish_atomically(store,sha,rid,commitment,receipt_oid,plan,before_push=final_authority_check)
+        need(result.get('status')=='durability_verified')
 
 def main():
     try:

@@ -55,10 +55,23 @@ authorizer, not an independent reviewer or an additional machine signer. The
 writer only validates and consumes the selected authority, never issues it.
 The exact exchange dates stay private, bound to the independently read-back
 frozen batch; they are never inputs or a way to create a second claim lane.
-The private receipt and stable, whole-batch claim namespaces must be retained
-and immutable under Store rules: only exact create-only writers, no rewrites,
-deletes, cleanup, or replay. If required independent approval or retention
-cannot be established under existing controls, stop before a live invocation.
+The exact private receipt is still immutable by the approved operating contract,
+and re-read before writing. The existing Git atomic-CAS pattern supplies a single
+atomic publication of the exact direct child of Store main, a create-only
+deterministic durable reference and a create-only stable, whole-batch claim.
+Readback is read-only, even after a missing or uncertain acknowledgement.
+No retry, partially published write, cleanup, force rewrite, or replacement of an
+occupied reference is permitted by this route.
+
+This narrow route relies on the trusted private Store operating contract: no
+actor with repository write access may retarget or delete the receipt, durable
+ref, or claim, or rewrite retained ancestry. It does not require a paid ruleset
+to enforce that promise and does not protect against administrators or other
+writers who violate it. Atomic receive-pack and all three exact readbacks are
+mandatory. If governance requires technical enforcement against those actors,
+or cannot independently confirm the owner authorization and trusted-retention
+boundary, stop before live invocation; no claim of server-enforced immutability
+or broader publishing authority follows from this transport.
 
 ## Exact approved operation scope
 
