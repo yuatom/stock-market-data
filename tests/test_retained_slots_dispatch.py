@@ -14,13 +14,29 @@ class Dispatch(TestCase):
             GITHUB_ACTOR_ID=L.OWNER_ID,GITHUB_TRIGGERING_ACTOR='yuatom',GITHUB_RUN_ATTEMPT='1',
             GITHUB_WORKFLOW_REF=L.WORKFLOW_REF,GITHUB_WORKFLOW_SHA=pin,EXPECTED_COMPUTE_SHA=pin,
             REQUEST_JSON=json.dumps({'kind':D.REQUEST_KIND,'commitment':'b'*64}))
-    def test_reuses_same_job_and_preserves_v1_step(self):
-        yaml_data=yaml.safe_load((Path(__file__).resolve().parents[1]/'.github/workflows/reconcile-retained-daily.yml').read_text())
-        job=yaml_data['jobs']['reconcile_soxx']
-        self.assertIn('daily_price_only_backup',job['if'])
+    def test_source_only_release_cannot_activate_hosted_backup(self):
+        root=Path(__file__).resolve().parents[1]
+        path='.github/workflows/reconcile-retained-daily.yml'
+        current=yaml.safe_load((root/path).read_text())
+        triggers=current.get('on',current.get(True))
+        self.assertEqual(set(triggers),{'workflow_dispatch'})
+        operation=triggers['workflow_dispatch']['inputs']['operation']
+        self.assertEqual(operation['options'],['gld','soxx_web_appendix'])
+        self.assertEqual(operation['default'],'gld')
+        job=current['jobs']['reconcile_soxx']
         self.assertEqual(job['concurrency']['group'],'market-data-collector')
         self.assertTrue(any('scripts.reconcile_retained_soxx_dispatch' in step.get('run','') for step in job['steps']))
-        self.assertTrue(any('scripts.retained_price_only_dispatch' in step.get('run','') for step in job['steps']))
+        for workflow in (root/'.github/workflows').glob('*'):
+            if workflow.is_file():
+                text=workflow.read_text()
+                self.assertNotIn('retained_price_only_dispatch',text)
+                self.assertNotIn('daily_price_only_backup',text)
+        contract=yaml.safe_load((root/'config/store-publication-durability.yaml').read_text())
+        wrapper=contract['writer_scope']['guarded_manual_wrappers'][path]
+        self.assertNotIn('separately_authorized_reusable_prior_close_backup',wrapper)
+        self.assertEqual(json.loads((root/D.trust.TRUST_PATH).read_text())['keys'],[])
+        sources=D.eligibility.load_policy((root/D.eligibility.POLICY_PATH).read_bytes())
+        self.assertTrue(all(item['role']=='corroboration_only' for item in sources.values()))
     def test_owner_event_scope_before_any_private_io(self):
         env=self.env()
         self.assertEqual(D.public_request(env),('a'*40,'42','b'*64))
