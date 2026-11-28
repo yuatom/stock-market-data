@@ -33,22 +33,23 @@ class LiveCloseRetrySelectionTest(unittest.TestCase):
                 "event_time": stamp, "source_timestamp": stamp,
                 "last_sale": 100.0, "reported_volume": 1.0}
 
-    def snapshot(self, facts_by_symbol, missing=()):
+    def snapshot(self, facts_by_symbol, missing=(), *, provider=runtime.NASDAQ,
+                 feed="nasdaq_public_chart_last_sale_volume_v1"):
         self.snapshot_number += 1
         refs = []
         for symbol, facts in facts_by_symbol.items():
             path, blob = runtime.write_capture(
                 self.store, trade_date=self.DATE, session="regular",
-                provider=runtime.NASDAQ, capture_id=f"close-{symbol.lower()}-test-{self.snapshot_number}",
+                provider=provider, capture_id=f"close-{symbol.lower()}-test-{self.snapshot_number}",
                 generated_at="2026-10-07T16:00:05-04:00",
                 actual_data_cutoff="2026-10-07T15:59:00-04:00",
                 window={"start": "15:45", "end": "16:00"},
-                feed_scope="nasdaq_public_chart_last_sale_volume_v1",
+                feed_scope=feed,
                 qualified_facts=facts, missing_symbols=[],
             )
             refs.append({"path": path, "blob_sha": blob,
                          "kind": "regular_intraday_capture", "window": "15:45-16:00",
-                         "provider": runtime.NASDAQ, "symbol": symbol})
+                         "provider": provider, "symbol": symbol})
         runtime.write_snapshot(
             self.store, stage="close", trade_date=self.DATE, snapshot_id=f"close-test-{self.snapshot_number}",
             generated_at=f"2026-10-07T16:00:{10+self.snapshot_number:02d}-04:00", data_refs=refs,
@@ -126,7 +127,7 @@ class LiveCloseRetrySelectionTest(unittest.TestCase):
                 self.snapshot({"SPY": [self.fact("SPY", stamp)]})
                 self.assertEqual(self.selection(), ["XLE"])
 
-    def test_partial_captures_do_not_splice_or_trigger_requests_or_new_proof(self):
+    def test_partial_captures_do_not_splice_or_trigger_requests_but_keep_proof(self):
         parts = {
             "SPY": [self.fact("SPY", f"2026-10-07T15:{minute:02d}:00-04:00")
                     for minute in range(45, 58)],
@@ -161,8 +162,43 @@ class LiveCloseRetrySelectionTest(unittest.TestCase):
                               result["retained_close_empty_count"]), (0, 2, 0))
             nasdaq.assert_not_called()
             twelve.assert_not_called()
-            proof.assert_not_called()
+            proof.assert_called_once_with(self.invocation_args(mode))
             self.assertEqual({p: p.read_bytes() for p in self.store.rglob("*") if p.is_file()}, before)
+
+    def test_timestamps_without_positive_prices_stay_partial_without_retries(self):
+        priced = [self.fact("SPY", f"2026-10-07T15:{minute:02d}:00-04:00")
+                  for minute in range(45, 60)]
+        for bad in (None, 0.0, -1.0):
+            with self.subTest(bad=bad):
+                rows = [dict(fact) for fact in priced]
+                if bad is None:
+                    for fact in rows:
+                        del fact["last_sale"]
+                else:
+                    rows[-1]["last_sale"] = bad
+                self.snapshot({"SPY": rows})
+                self.assertEqual(entry._live_close_retry_coverage(self.store, self.DATE, self.ELIGIBLE),
+                                 dict(full=[], partial=["SPY"], empty=["XLE"]))
+        self.snapshot({"SPY": priced})
+        self.assertEqual(entry._live_close_retry_coverage(self.store, self.DATE, self.ELIGIBLE),
+                         dict(full=["SPY"], partial=[], empty=["XLE"]))
+
+    def test_twelve_requires_complete_positive_ohlc_and_matching_feed_for_full(self):
+        priced = []
+        for minute in range(45, 60):
+            fact = self.fact("SPY", f"2026-10-07T15:{minute:02d}:00-04:00")
+            del fact["last_sale"]
+            priced.append(dict(fact, open=10, high=12, low=9, close=11))
+        feed = "twelve_data_basic_us_equities_limited_realtime_coverage"
+        invalid = [dict(fact) for fact in priced]
+        invalid[-1]["high"] = 10
+        for facts, scoped_feed in ((invalid, feed), (priced, "wrong-feed")):
+            self.snapshot({"SPY": facts}, provider=runtime.TWELVE, feed=scoped_feed)
+            self.assertEqual(entry._live_close_retry_coverage(self.store, self.DATE, self.ELIGIBLE),
+                             dict(full=[], partial=["SPY"], empty=["XLE"]))
+        self.snapshot({"SPY": priced}, provider=runtime.TWELVE, feed=feed)
+        self.assertEqual(entry._live_close_retry_coverage(self.store, self.DATE, self.ELIGIBLE),
+                         dict(full=["SPY"], partial=[], empty=["XLE"]))
 
     def test_attempted_empty_target_preserves_proof_refresh_even_without_snapshot(self):
         self.snapshot({"SPY": [self.fact("SPY")]}, missing=["XLE"])

@@ -245,6 +245,20 @@ def _live_close_universe(universe_config: Mapping[str, Any]) -> list[tuple[str, 
     return [(symbol, assets[symbol]) for symbol in sorted(symbols)]
 
 
+def _close_price_fact(fact: Mapping[str, Any], provider: str, symbol: str) -> bool:
+    """A timestamp alone is not a complete priced minute."""
+    if fact.get("symbol") != symbol or not runtime._finite_regular_fact(fact):
+        return False
+    if provider == runtime.NASDAQ:
+        last = fact.get("last_sale")
+        return type(last) in (int, float) and last > 0
+    prices = [fact.get(key) for key in ("open", "high", "low", "close")]
+    if not all(type(price) in (int, float) and price > 0 for price in prices):
+        return False
+    open_, high, low, close = prices
+    return low <= min(open_, close) <= max(open_, close) <= high
+
+
 def _live_close_retry_coverage(
     store_root: Path, trade_date: str, eligible: list[tuple[str, str]]
 ) -> dict[str, list[str]]:
@@ -279,10 +293,18 @@ def _live_close_retry_coverage(
                 continue
             qualified.add(symbol)
             provider = capture.get("provider")
-            if (provider in (runtime.NASDAQ, runtime.TWELVE)
-                    and ref.get("provider") == provider
+            feed = {
+                runtime.NASDAQ: "nasdaq_public_chart_last_sale_volume_v1",
+                runtime.TWELVE: "twelve_data_basic_us_equities_limited_realtime_coverage",
+            }
+            if (type(provider) is str and provider in feed
+                    and ref.get("provider") == provider and ref.get("symbol") == symbol
+                    and ref.get("window") == f"{start}-{end}"
+                    and capture.get("feed_scope") == feed[provider]
                     and capture.get("session") == "regular" and capture.get("trade_date") == trade_date
                     and capture.get("window") == window
+                    and set(facts_by_symbol) == {symbol}
+                    and all(_close_price_fact(fact, provider, symbol) for fact in in_window)
                     and runtime._full_window_from_one_provider(in_window, trade_date, start, end)):
                 full.add(symbol)
     if hinted_missing & qualified:
@@ -299,7 +321,7 @@ def _live_close_retry_symbols(
     return _live_close_retry_coverage(store_root, trade_date, eligible)["empty"]
 
 
-def _run_live_close(argv: list[str], *, build_proof: bool = False) -> int | None:
+def _run_live_close(argv: list[str]) -> int | None:
     mode = str(_arg_value(argv, "--mode") or "")
     if mode not in {"close", "close_retry", "close_final"}:
         return None
@@ -356,10 +378,6 @@ def _run_live_close(argv: list[str], *, build_proof: bool = False) -> int | None
     if retry_counts:
         result.update(retry_counts, close_retry_attempt_state="legacy_empty_targets_only")
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
-    # An attempted legacy retry may update Close advisory state without a
-    # new snapshot. Preserve the existing proof refresh for that path.
-    if build_proof:
-        _build_metric_proof_if_applicable(argv)
     return 0
 
 
@@ -401,8 +419,10 @@ def cli(argv: list[str] | None = None) -> int:
         return 0
     _wait_until_regular_stage_cutoff(args)
     _ensure_predecessors(args)
-    close_result = _run_live_close(args, build_proof=True)
+    close_result = _run_live_close(args)
     if close_result is not None:
+        if close_result == 0:
+            _build_metric_proof_if_applicable(args)
         return close_result
     rc = runtime.main(args)
     if rc == 0:
