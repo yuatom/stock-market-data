@@ -15,6 +15,11 @@ WORKFLOW_ID = 415302427
 PLATFORM = {'self-hosted', 'macOS', 'ARM64'}
 
 def validate_scope(scope):
+    if type(scope) is dict and scope.get('kind') == 'private_github_hosted_v1':
+        B._closed(scope, ('kind','commitment','workflow_blob','expires'))
+        B._hex(scope['commitment'],64); B._hex(scope['workflow_blob'])
+        B._need(scope['commitment'] != '0'*64 and scope['workflow_blob'] != '0'*40)
+        return B._stamp(scope['expires'])
     B._closed(scope, ('commitment', 'runner_id', 'runner_name', 'labels', 'expires'))
     B._hex(scope['commitment'],64)
     B._need(scope['commitment'] != '0'*64 and type(scope['runner_id']) is int and scope['runner_id'] > 0)
@@ -28,10 +33,22 @@ def validate_scope(scope):
 def probe(*,api,store,scope,grant,slot,prior,head,request_id,repository,
           compute_sha,clock,sleep=time.sleep,monotonic=time.monotonic):
     expires=validate_scope(scope)
+    hosted='kind' in scope
     source=B._hex(grant['workflow_source_sha'])
     B._need(grant['workflow_id']==WORKFLOW_ID
             and B._stamp(slot['valid_from'])<=clock()<expires<=B._stamp(slot['valid_until'])
             and expires<=clock()+timedelta(minutes=10))
+    if hosted:
+        # Exact current Store Git head is checked independently of the staged
+        # scope. It is the authority for the pre-existing verifier bytes, not
+        # an owner-provided interpretation of a label or guessed runner ID.
+        from scripts.hosted_v2_durable_candidate import _check_source
+        from scripts.hosted_v2_mapping import verify_independent_hosted_source
+        B._need(store.head()==head)
+        approved=verify_independent_hosted_source(store,head)
+        B._need(approved==scope['workflow_blob'])
+        _check_source(store,DeliveryExpectation(grant['repository_id'],grant['owner_id'],
+            WORKFLOW_ID,source,compute_sha,scope['commitment'],1),approved)
     commitment=scope['commitment']
     ref=f'refs/heads/basis-read-receipts/{compute_sha}/{commitment}'
     receipt_commit=store.materialize_ref(ref)
@@ -80,11 +97,24 @@ def probe(*,api,store,scope,grant,slot,prior,head,request_id,repository,
     jobs=api.request('GET',f'{base}/runs/{run_id}/jobs?per_page=2')
     B._need(jobs.get('total_count')==1 and len(jobs.get('jobs',[]))==1)
     job=jobs['jobs'][0]
-    B._need(job['runner_id']==scope['runner_id'] and job['runner_name']==scope['runner_name']
-            and set(job['labels'])==set(scope['labels']) and clock()<expires)
+    if hosted:
+        B._need(job['labels']==['ubuntu-latest'] and clock()<expires)
+    else:
+        B._need(job['runner_id']==scope['runner_id'] and job['runner_name']==scope['runner_name']
+                and set(job['labels'])==set(scope['labels']) and clock()<expires)
     expected=DeliveryExpectation(grant['repository_id'],grant['owner_id'],WORKFLOW_ID,source,compute_sha,commitment,run_id)
-    proof=_verify_private_delivery(expected,repository,run,jobs,api.job_log(job['id']),now=clock().isoformat(),
+    log=api.job_log(job['id'])
+    proof=_verify_private_delivery(expected,repository,run,jobs,log,now=clock().isoformat(),
         calendar_authority={'finite_scheduled_readiness': True})
     B._need(proof['receipt_commit']==receipt_commit and proof['receipt_blob_sha']==receipt_blob
         and proof['selector']==selector and proof['valid_until']==receipt['valid_until'] and clock()<expires)
+    if hosted:
+        from scripts.hosted_v2_durable_candidate import record_preproof
+        profile={k:scope[k] for k in ('kind','workflow_blob','expires')}
+        pin=record_preproof(store=store,profile=profile,repository=repository,
+            ready=(expected,run,jobs,log,(receipt_commit,receipt_blob,selector)),
+            anchored_workflow_blob=approved,ready_dispatched_at=started.isoformat(),
+            request_id=request_id,clock=clock)
+        return run_id,dict(kind=scope['kind'],profile=scope,expires=scope['expires'],
+            preproof=dict(pin=pin,commitment=commitment,run_id=run_id,request_id=request_id))
     return run_id,{k:scope[k] for k in ('runner_id','runner_name','labels','expires')}

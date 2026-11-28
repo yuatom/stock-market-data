@@ -79,7 +79,9 @@ class LiveCloseEarlySessionWitness(unittest.TestCase):
                 for mode in ("close_retry","close_final"):
                     called,status=self.before_provider(root,mode,day)
                     self.assertFalse(called.called)
-                    self.assertEqual(status["status"],"nothing_missing")
+                    self.assertEqual(status["status"],"partial_window_no_supplement_authority")
+                    self.assertEqual(status["retained_close_partial_count"],len(symbols))
+                    self.assertEqual(status["retained_close_empty_count"],0)
                 self.assertEqual({p.relative_to(root):p.read_bytes() for p in root.rglob("*") if p.is_file()},before)
 
     def test_metric_proof_uses_calendar_not_snapshot_assertion(self):

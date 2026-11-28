@@ -241,7 +241,7 @@ class DailyUpdater:
         B._need(snap['last_trade_date']<slot['cutoff'] and snap['first_trade_date']==self._sessions(slot)[0])
         return current,snap
 
-    def _debit(self,slot,request_id,head,previous):
+    def _debit(self,slot,request_id,head,previous,*,hosted_binding=None,debit_guard=None):
         now=self._fresh(slot);minute=now.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%MZ')
         B._need(now.second+now.microsecond/1_000_000<38)
         day=slot['execution_day'];path=f'data/market-data/collector-state/{day[:7]}/{day}-twelve-data-budget.json'
@@ -255,11 +255,18 @@ class DailyUpdater:
         B._need(sum(old['minutes'].values())<=old['credits'] and old['minutes'].get(minute,0)<8)
         B._need(sum(self.store.exists(head,self._prefix(s)+'/claim.json') for s in self.grant['slots'])<self.grant['request_limit'])
         claim=dict(schema_version=1,kind='daily_basis_attempt',status='CLAIMED_NO_REPLAY',grant_sha256=self.digest,slot_id=slot['slot_id'],request_id=request_id,previous_selector=previous,claimed_at=now.isoformat(),budget_minute=minute,request_limit=1,credit_limit=1,verification_limit=1)
+        if hosted_binding is not None:
+            B._closed(hosted_binding,('kind','scope_commitment','pin'))
+            B._need(hosted_binding['kind']=='private_github_hosted_v1')
+            B._hex(hosted_binding['scope_commitment'],64); B._hex(hosted_binding['pin'])
+            claim['hosted_binding']=hosted_binding
         new=dict(old,credits=old['credits']+1,minutes=dict(old['minutes']))
         new['minutes'][minute]=new['minutes'].get(minute,0)+1
         new['minutes']=dict(sorted(new['minutes'].items())[-16:])
         updates={self._prefix(slot)+'/claim.json':B.encode(claim),path:B.encode(new)}
-        newhead=self.store.publish(head,updates,replace={path} if self.store.exists(head,path) else set())
+        B._need((debit_guard is None)==(hosted_binding is None))
+        opts={'write_guard':debit_guard} if hosted_binding is not None else {}
+        newhead=self.store.publish(head,updates,replace={path} if self.store.exists(head,path) else set(),**opts)
         return newhead,minute,path,B.blob_sha(B.encode(new))
 
     @guarded
@@ -274,12 +281,30 @@ class DailyUpdater:
         return slot,head,prefix,previous,old
 
     @guarded
-    def run_slot(self,slot_id,request_id,*,capture,request_guard=None):
+    def run_slot(self,slot_id,request_id,*,capture,request_guard=None,hosted_binding=None):
         slot,head,prefix,previous,old=self.preflight_slot(slot_id,request_id)
         if request_guard is not None:
             try:request_guard()
             except ScopedRequestExpired:raise ScopedProviderHold() from None
-        head,minute,budget_path,budget_blob=self._debit(slot,request_id,head,previous)
+        if hosted_binding is None:
+            head,minute,budget_path,budget_blob=self._debit(slot,request_id,head,previous)
+        else:
+            B._need(request_guard is not None)
+            stopped_before_debit=False
+            def guarded_debit():
+                nonlocal stopped_before_debit
+                try:request_guard()
+                except ScopedRequestExpired:
+                    # The production adapters call this exactly at the final
+                    # pre-push boundary. If it raises, no push was attempted.
+                    stopped_before_debit=True
+                    raise
+            try:
+                head,minute,budget_path,budget_blob=self._debit(slot,request_id,head,previous,
+                    hosted_binding=hosted_binding,debit_guard=guarded_debit)
+            except Exception:
+                if stopped_before_debit:raise ScopedProviderHold() from None
+                raise
         evidence_head=head
         evidence_ref_expected='0'*40
         request=dict(self.grant['request_template'],end_date=slot['cutoff'])
@@ -373,7 +398,13 @@ class DailyUpdater:
         B._need(self.store.g.commit(candidate.selector['read_sha'])[1]==(head,))
         previous,old=self._previous(slot,head);prefix=self._prefix(slot)
         claim=B._parse(self.store.read(head,prefix+'/claim.json'))
-        B._closed(claim,('schema_version','kind','status','grant_sha256','slot_id','request_id','previous_selector','claimed_at','budget_minute','request_limit','credit_limit','verification_limit'))
+        B._closed(claim,('schema_version','kind','status','grant_sha256','slot_id','request_id','previous_selector','claimed_at','budget_minute','request_limit','credit_limit','verification_limit')+(('hosted_binding',) if 'hosted_binding' in claim else ()))
+        if 'hosted_binding' in claim:
+            hb=claim['hosted_binding']
+            B._closed(hb,('kind','scope_commitment','pin'))
+            B._need(hb['kind']=='private_github_hosted_v1')
+            B._hex(hb['scope_commitment'],64); B._hex(hb['pin'])
+
         B._need(claim['grant_sha256']==self.digest and claim['slot_id']==candidate.slot_id and
                 claim['kind']=='daily_basis_attempt' and claim['status']=='CLAIMED_NO_REPLAY' and
                 claim['previous_selector']['basis_id']==old['basis_id'] and
@@ -470,7 +501,7 @@ class DailyUpdater:
         return DailyDeliveryExpectation(self.digest,candidate.slot_id,self.grant['repository_id'],self.grant['owner_id'],self.grant['workflow_id'],self.authority.workflow_source_sha,self.authority.compute_sha,run_id,candidate)
 
     @guarded
-    def promote(self,candidate,delivery):
+    def promote(self,candidate,delivery,*,publish_guard=None):
         from scripts.daily_basis_delivery import VerifiedDailyDelivery
         B._need(type(candidate) is Candidate and type(delivery) is VerifiedDailyDelivery)
         slot=self._slot(candidate.slot_id);now=self._fresh(slot)
@@ -482,7 +513,13 @@ class DailyUpdater:
         selector,_=B.load_consumer_receipt(self.store.repo,candidate.receipt_commitment,self.authority.compute_sha,now=now.isoformat())
         B._need(selector==candidate.selector)
         self._view(selector,dates=self._sessions(slot),now=now)
-        self.store.cas('refs/heads/main',candidate.selector['read_sha'],candidate.expected_head)
+        claim=B._parse(self.store.read(candidate.expected_head,self._prefix(slot)+'/claim.json'))
+        B._need((publish_guard is not None)==('hosted_binding' in claim))
+        if publish_guard is None:
+            self.store.cas('refs/heads/main',candidate.selector['read_sha'],candidate.expected_head)
+        else:
+            self.store.cas('refs/heads/main',candidate.selector['read_sha'],candidate.expected_head,
+                write_guard=publish_guard)
         return candidate.selector
 
     @guarded
