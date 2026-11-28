@@ -515,6 +515,7 @@ jobs:
           TRADE_DATE: ${{ steps.invocation.outputs.trade_date }}
           PROBE_PATH: ${{ steps.invocation.outputs.probe_path }}
           MAINTENANCE_AUTHORIZED: ${{ steps.invocation.outputs.maintenance_authorized }}
+          SCHEDULED_ORDINARY_EOD: ${{ inputs.trigger_kind == 'schedule' && inputs.schedule == '5 7 * * 1-5' && steps.invocation.outputs.mode == 'previous_session_eod' }}
           MARKET_DATA_COMPUTE_SHA: ${{ steps.invocation.outputs.market_data_contract_sha }}
           MARKET_DATA_REQUEST_ID: ${{ steps.invocation.outputs.request_id }}
           DAILY_BASIS_DELEGATION_FILE: ${{ steps.daily_basis_owner.outputs.delegation_path }}
@@ -566,6 +567,9 @@ jobs:
               --access-config config/market-data-collector-access.yaml > /tmp/collector-output.txt 2>/tmp/collector-error.txt || collector_failed "$?"
           else
             extra=()
+            if [[ "$SCHEDULED_ORDINARY_EOD" == 'true' ]]; then
+              extra+=(--scheduled-eod-target-guard)
+            fi
             if [[ "$MODE" == 'historical_context_repair' ]]; then
               if [[ "$MAINTENANCE_AUTHORIZED" != 'true' ]]; then
                 echo 'historical_context_repair lacks maintenance authorization' >&2
@@ -601,7 +605,8 @@ jobs:
               'snapshot_written','snapshot_path','snapshot_latest_updated','target_records','request_id','path',
               'result_count','target_count','application_success_json','trade_detail_rows','repair_scope',
               'context_categories_requested','sector_symbols_requested','actual_data_cutoff','source_contract',
-              'probe_path','probe_blob_sha','sample_only'
+              'probe_path','probe_blob_sha','sample_only',
+              'accounting_et_date','target_eod_session','target_already_qualified_count','target_eod_unqualified_count','target_eod_not_applicable_count','target_eod_status'
           }
           safe = {k: result[k] for k in sorted(result) if k in allowed}
           if result.get('delegated_daily_symbols'):
