@@ -1,0 +1,149 @@
+{
+  "observed_date": "2026-11-11",
+  "method": "Public Twelve Data instrument overview pages only; original eleven observed 2026-11-11, GLD observed 2026-11-12. Profile identity qualifies capture request construction, not response MIC equivalence or legacy price basis. No authenticated API request made.",
+  "profiles": [
+    {
+      "symbol": "GLD",
+      "exchange": "NYSE",
+      "profile_mic_code": "ARCX",
+      "type": "ETF",
+      "country": "United States",
+      "url": "https://twelvedata.com/markets/163377/etf/nyse/gld",
+      "capture_identity_verified": true,
+      "response_mic_equivalence_verified": false,
+      "legacy_basis_equivalence_verified": false,
+      "evidence_status": "Public instrument overview identifies GLD / SPDR Gold Shares / NYSE / ARCX / ETF / United States. Response identity must still match exactly at capture; no MIC alias or legacy basis equivalence is asserted.",
+      "observed_date": "2026-11-12"
+    },
+    {
+      "symbol": "IBIT",
+      "exchange": "NASDAQ",
+      "profile_mic_code": "XNMS",
+      "type": "ETF",
+      "country": "United States",
+      "url": "https://twelvedata.com/markets/779898/etf/nasdaq/ibit",
+      "response_mic_equivalence_verified": false,
+      "legacy_basis_equivalence_verified": false,
+      "capture_identity_verified": true
+    },
+    {
+      "symbol": "IWM",
+      "exchange": "NYSE",
+      "profile_mic_code": "ARCX",
+      "type": "ETF",
+      "country": "United States",
+      "url": "https://twelvedata.com/markets/141255/etf/nyse/iwm",
+      "response_mic_equivalence_verified": false,
+      "legacy_basis_equivalence_verified": false,
+      "capture_identity_verified": true
+    },
+    {
+      "symbol": "KWEB",
+      "exchange": "NYSE",
+      "profile_mic_code": "ARCX",
+      "type": "ETF",
+      "country": "United States",
+      "url": "https://twelvedata.com/markets/785193/etf/nyse/kweb",
+      "response_mic_equivalence_verified": false,
+      "legacy_basis_equivalence_verified": false,
+      "capture_identity_verified": true
+    },
+    {
+      "symbol": "QQQ",
+      "exchange": "NASDAQ",
+      "profile_mic_code": "XNMS",
+      "type": "ETF",
+      "country": "United States",
+      "url": "https://twelvedata.com/markets/958673/etf/nasdaq/qqq",
+      "response_mic_equivalence_verified": false,
+      "legacy_basis_equivalence_verified": false,
+      "capture_identity_verified": true
+    },
+    {
+      "symbol": "SMH",
+      "exchange": "NASDAQ",
+      "profile_mic_code": "XNMS",
+      "type": "ETF",
+      "country": "United States",
+      "url": "https://twelvedata.com/markets/291499/etf/nasdaq/smh",
+      "response_mic_equivalence_verified": false,
+      "legacy_basis_equivalence_verified": false,
+      "capture_identity_verified": true
+    },
+    {
+      "symbol": "SPY",
+      "exchange": "NYSE",
+      "profile_mic_code": "ARCX",
+      "type": "ETF",
+      "country": "United States",
+      "url": "https://twelvedata.com/markets/568728/etf/nyse/spy",
+      "response_mic_equivalence_verified": false,
+      "legacy_basis_equivalence_verified": false,
+      "capture_identity_verified": true
+    },
+    {
+      "symbol": "TLT",
+      "exchange": "NASDAQ",
+      "profile_mic_code": "XNMS",
+      "type": "ETF",
+      "country": "United States",
+      "url": "https://twelvedata.com/markets/333615/etf/nasdaq/tlt",
+      "response_mic_equivalence_verified": false,
+      "legacy_basis_equivalence_verified": false,
+      "capture_identity_verified": true
+    },
+    {
+      "symbol": "VIXY",
+      "exchange": "CBOE",
+      "profile_mic_code": "BATS",
+      "type": "ETF",
+      "country": "United States",
+      "url": "https://twelvedata.com/markets/105229/etf/cboe/vixy",
+      "response_mic_equivalence_verified": false,
+      "legacy_basis_equivalence_verified": false,
+      "capture_identity_verified": true
+    },
+    {
+      "symbol": "XLE",
+      "exchange": "NYSE",
+      "profile_mic_code": "ARCX",
+      "type": "ETF",
+      "country": "United States",
+      "url": "https://twelvedata.com/markets/776406/etf/nyse/xle",
+      "response_mic_equivalence_verified": false,
+      "legacy_basis_equivalence_verified": false,
+      "capture_identity_verified": true
+    },
+    {
+      "symbol": "XLU",
+      "exchange": "NYSE",
+      "profile_mic_code": "ARCX",
+      "type": "ETF",
+      "country": "United States",
+      "url": "https://twelvedata.com/markets/227896/etf/nyse/xlu",
+      "response_mic_equivalence_verified": false,
+      "legacy_basis_equivalence_verified": false,
+      "capture_identity_verified": true
+    },
+    {
+      "symbol": "XLK",
+      "exchange": "NYSE",
+      "profile_mic_code": "ARCX",
+      "type": "ETF",
+      "country": "United States",
+      "url": "https://twelvedata.com/markets/998455/etf/nyse/xlk",
+      "response_mic_equivalence_verified": false,
+      "legacy_basis_equivalence_verified": false,
+      "capture_identity_verified": true
+    }
+  ],
+  "api_docs": {
+    "url": "https://twelvedata.com/docs/market-data/time-series",
+    "documented_current_defaults": {
+      "adjust": "splits",
+      "dp": -1
+    },
+    "credits_per_symbol": 1,
+    "notes": "Current docs are not proof of historical defaults or precise rounding/volume-adjustment semantics. Segment profile MIC may differ from response operating MIC. Do not silently alias."
+  }
+}
