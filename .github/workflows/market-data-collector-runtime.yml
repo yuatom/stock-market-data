@@ -50,6 +50,7 @@ concurrency:
 
 jobs:
   collect:
+    if: inputs.mode != 'daily_basis_only' || (inputs.trigger_kind == 'workflow_dispatch' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.actor == 'yuatom' && github.triggering_actor == 'yuatom' && github.actor_id == '10399225' && github.run_attempt == '1')
     runs-on: ubuntu-latest
     timeout-minutes: 12
     steps:
@@ -78,6 +79,7 @@ jobs:
         run: python -m pip install --disable-pip-version-check PyYAML
 
       - name: Quietly clone private Market Data Store
+        if: inputs.mode != 'daily_basis_only'
         working-directory: compute
         env:
           MARKET_DATA_STORE_TOKEN: ${{ secrets.MARKET_DATA_STORE_TOKEN }}
@@ -110,7 +112,8 @@ jobs:
           compute_sha = subprocess.check_output(
               ['git', '-C', 'compute', 'rev-parse', 'HEAD'], text=True
           ).strip()
-          store_sha = subprocess.check_output(
+          basis_only = event == 'workflow_dispatch' and os.environ.get('MANUAL_MODE') == 'daily_basis_only'
+          store_sha = None if basis_only else subprocess.check_output(
               ['git', '-C', 'store', 'rev-parse', 'HEAD'], text=True
           ).strip()
           mode = ''
@@ -134,7 +137,7 @@ jobs:
               '51 16 * * 1-5': 'close_final',
           }
           manual_modes = {
-              'smoke_readonly', 'previous_session_eod', 'daily_baseline_init',
+              'smoke_readonly', 'previous_session_eod', 'daily_basis_only', 'daily_baseline_init',
               'daily_baseline_rebase', 'nasdaq_extended_probe', 'premarket',
               'open_15m', 'open_30m', 'open_60m', 'close', 'close_retry',
               'close_final', 'historical_context_repair',
@@ -275,6 +278,8 @@ jobs:
               trade_date = os.environ.get('MANUAL_TRADE_DATE', '')
               if mode not in manual_modes:
                   raise SystemExit(f'unauthorized manual mode: {mode}')
+              if mode == 'daily_basis_only' and trade_date:
+                  raise SystemExit('basis-only owner does not accept a public execution date')
               maintenance_authorized = mode == 'historical_context_repair'
           elif event == 'schedule':
               mode = schedules.get(os.environ.get('EVENT_SCHEDULE', ''), '')
@@ -322,9 +327,10 @@ jobs:
               fh.write(f'probe_blob_sha={probe_blob_sha}\n')
               fh.write(f'market_data_contract_sha={compute_sha}\n')
               fh.write(f"maintenance_authorized={'true' if maintenance_authorized else 'false'}\n")
-          private_pin = Path(os.environ['RUNNER_TEMP']) / 'market-data-store-input-sha'
-          private_pin.write_text(store_sha + '\n', encoding='ascii')
-          private_pin.chmod(0o600)
+          if not basis_only:
+              private_pin = Path(os.environ['RUNNER_TEMP']) / 'market-data-store-input-sha'
+              private_pin.write_text(store_sha + '\n', encoding='ascii')
+              private_pin.chmod(0o600)
           print(json.dumps({
               'logical_trigger': event,
               'control_branch': branch or None,
@@ -409,7 +415,7 @@ jobs:
           PY
 
       - name: Quietly clone isolated finite daily Store
-        if: steps.invocation.outputs.mode == 'previous_session_eod' && vars.DAILY_BASIS_GRANT_COMMITMENT != ''
+        if: steps.invocation.outputs.mode == 'daily_basis_only' || (steps.invocation.outputs.mode == 'previous_session_eod' && vars.DAILY_BASIS_GRANT_COMMITMENT != '')
         working-directory: compute
         env:
           MARKET_DATA_STORE_TOKEN: ${{ secrets.MARKET_DATA_STORE_TOKEN }}
@@ -418,7 +424,7 @@ jobs:
 
       - name: Run finite daily basis owner
         id: daily_basis_owner
-        if: steps.invocation.outputs.mode == 'previous_session_eod' && vars.DAILY_BASIS_GRANT_COMMITMENT != ''
+        if: steps.invocation.outputs.mode == 'daily_basis_only' || (steps.invocation.outputs.mode == 'previous_session_eod' && vars.DAILY_BASIS_GRANT_COMMITMENT != '')
         working-directory: compute
         env:
           PYTHONDONTWRITEBYTECODE: '1'
@@ -429,6 +435,7 @@ jobs:
           DAILY_BASIS_GRANT_COMMITMENT: ${{ vars.DAILY_BASIS_GRANT_COMMITMENT }}
           DAILY_BASIS_TRIGGER_KIND: ${{ inputs.trigger_kind }}
           DAILY_BASIS_SCHEDULE: ${{ inputs.schedule }}
+          DAILY_BASIS_MODE: ${{ steps.invocation.outputs.mode }}
           COMPUTE_SHA: ${{ steps.invocation.outputs.market_data_contract_sha }}
           TRADE_DATE: ${{ steps.invocation.outputs.trade_date }}
         run: |
@@ -437,10 +444,12 @@ jobs:
             --store ../daily-basis-store --compute-sha "$COMPUTE_SHA" \
             --trade-date "$TRADE_DATE" \
             --delegation-output "$RUNNER_TEMP/daily-basis-delegation.json"
-          printf 'delegation_path=%s\n' "$RUNNER_TEMP/daily-basis-delegation.json" >> "$GITHUB_OUTPUT"
+          if [[ "$DAILY_BASIS_MODE" != daily_basis_only ]]; then
+            printf 'delegation_path=%s\n' "$RUNNER_TEMP/daily-basis-delegation.json" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Materialize verified daily Store base
-        if: steps.daily_basis_owner.outputs.delegation_path != ''
+        if: steps.invocation.outputs.mode != 'daily_basis_only' && steps.daily_basis_owner.outputs.delegation_path != ''
         env:
           OWNER_FILE: ${{ steps.daily_basis_owner.outputs.delegation_path }}
           MARKET_DATA_STORE_TOKEN: ${{ secrets.MARKET_DATA_STORE_TOKEN }}
@@ -497,7 +506,7 @@ jobs:
           fi
 
       - name: Collect qualified facts into private Store checkout
-        if: steps.invocation.outputs.mode != 'smoke_readonly' && steps.close_reuse.outputs.reuse != 'true'
+        if: steps.invocation.outputs.mode != 'daily_basis_only' && steps.invocation.outputs.mode != 'smoke_readonly' && steps.close_reuse.outputs.reuse != 'true'
         working-directory: compute
         shell: bash
         env:
@@ -638,7 +647,7 @@ jobs:
           PY
 
       - name: Rebuild private Store inventory
-        if: steps.invocation.outputs.mode != 'smoke_readonly' && steps.close_reuse.outputs.reuse != 'true'
+        if: steps.invocation.outputs.mode != 'daily_basis_only' && steps.invocation.outputs.mode != 'smoke_readonly' && steps.close_reuse.outputs.reuse != 'true'
         working-directory: compute
         run: >-
           python scripts/build_market_data_inventory.py
@@ -648,7 +657,7 @@ jobs:
 
       - name: Build Store publication manifest
         id: publication
-        if: steps.invocation.outputs.mode != 'smoke_readonly' && steps.close_reuse.outputs.reuse != 'true'
+        if: steps.invocation.outputs.mode != 'daily_basis_only' && steps.invocation.outputs.mode != 'smoke_readonly' && steps.close_reuse.outputs.reuse != 'true'
         working-directory: compute
         shell: bash
         run: |
@@ -662,7 +671,7 @@ jobs:
           echo "publication_manifest_path=$manifest_path" >> "$GITHUB_OUTPUT"
 
       - name: Persist private Store only
-        if: steps.invocation.outputs.mode != 'smoke_readonly' && steps.close_reuse.outputs.reuse != 'true'
+        if: steps.invocation.outputs.mode != 'daily_basis_only' && steps.invocation.outputs.mode != 'smoke_readonly' && steps.close_reuse.outputs.reuse != 'true'
         working-directory: store
         shell: bash
         env:
@@ -728,7 +737,7 @@ jobs:
           PRIVATE_SCRIPT
 
       - name: Verify durable Store publication
-        if: steps.invocation.outputs.mode != 'smoke_readonly' && steps.close_reuse.outputs.reuse != 'true'
+        if: steps.invocation.outputs.mode != 'daily_basis_only' && steps.invocation.outputs.mode != 'smoke_readonly' && steps.close_reuse.outputs.reuse != 'true'
         working-directory: store
         shell: bash
         env:

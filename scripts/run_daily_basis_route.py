@@ -1,4 +1,4 @@
-"""Approved finite scheduled owner. No self-authorizing defaults or new secrets.
+"""Approved finite daily owner. No self-authorizing defaults or new secrets.
 
 The only public activation setting is an independently approved salted opaque
 commitment. Its distinct private authority ref contains exact finite grant,
@@ -10,7 +10,8 @@ inject transport/API doubles and synthetic Git repositories, never credentials.
 import argparse
 import base64
 from dataclasses import asdict
-from datetime import datetime,timezone,timedelta
+from datetime import date,datetime,time as datetime_time,timezone,timedelta
+import hmac
 import json
 import os
 from pathlib import Path
@@ -23,8 +24,10 @@ import urllib.parse
 import urllib.request
 from scripts import provider_basis_snapshot as B
 from scripts.daily_basis_updates import (DailyUpdater,GrantAuthority,Candidate,provider_capture,
-    ScopedRequestExpired,ScopedProviderHold)
+    ScopedRequestExpired,ScopedProviderHold,DailyBasisError)
 from scripts.daily_basis_delivery import verify_daily_delivery
+from scripts.reviewed_equity_calendar import missing_repair_sessions, scheduled_close
+from zoneinfo import ZoneInfo
 from scripts.scheduled_basis_readiness import probe as scheduled_readiness_probe, validate_scope as validate_scheduled_readiness
 from scripts.run_private_authority_route import _quiet,_source,_environment,SAFETY
 
@@ -36,6 +39,13 @@ CALLER='.github/workflows/market-data-collector.yml'
 VERIFIER='.github/workflows/basis-consumer-delivery.yml'
 STOP='FINITE_DAILY_BASIS_STOPPED_INSPECT_NO_RETRY'
 SCOPED_MIN_CAPTURE_RUNWAY=timedelta(seconds=120)
+# Pinned reviewed provider/article identity, not a timestamp that proves
+# publication. Reviewed semantics: Basic US daily EOD is included and becomes
+# eligible strictly after next exchange-session midnight New York.
+BASIC_US_EOD_ARTICLE='https://support.twelvedata.com/en/articles/9935903-us-equities-market-data'
+BASIC_US_EOD_POLICY_ID='twelvedata_support_9935903_basic_us_eod_next_session_after_0000_ny_v1'
+BASIC_OWNER_KEY_DOMAIN=b'twelve-data-basic-owner-key:v1\0'
+EARLY_POLICY_KEY='early_owner_policy'
 
 
 class HostedDailyError(RuntimeError):pass
@@ -159,7 +169,8 @@ def validate_authority_receipt(raw,commitment,compute_sha,*,now,allow_expired_ho
     value=B._parse(raw)
     B._closed(value,('schema_version','kind','compute_sha','consumer_sha','workflow_source_sha','grant_ref',
         'calendar_ref','nonce','valid_from','valid_until','actions_free_until','readiness_run_id',
-        'repository_id','owner_id','runtime_workflow_id','trigger_kind','schedule','old_writers_drained')+(('readiness',) if 'readiness' in value else ()))
+        'repository_id','owner_id','runtime_workflow_id','trigger_kind','schedule','old_writers_drained')+(('readiness',) if 'readiness' in value else ())+
+        ((EARLY_POLICY_KEY,) if EARLY_POLICY_KEY in value else ()))
     need(value['schema_version']==1 and value['kind']=='finite_daily_basis_authority' and
          authority_commitment(raw)==B._hex(commitment,64) and value['compute_sha']==B._hex(compute_sha))
     for key in ('consumer_sha','workflow_source_sha'):B._hex(value[key])
@@ -171,6 +182,9 @@ def validate_authority_receipt(raw,commitment,compute_sha,*,now,allow_expired_ho
         ready_until=validate_scheduled_readiness(value['readiness'])
         need(B._stamp(value['valid_from'])<ready_until<=B._stamp(value['valid_until']))
     else:need(type(value['readiness_run_id']) is int and value['readiness_run_id']>0)
+    if EARLY_POLICY_KEY in value:
+        need('readiness' in value)
+        validate_early_policy(value[EARLY_POLICY_KEY])
     instant=B._stamp(now)
     need(type(allow_expired_hold) is bool and B._stamp(value['valid_from'])<=instant and B._stamp(value['valid_from'])<B._stamp(value['valid_until'])<=B._stamp(value['actions_free_until']))
     need(instant<B._stamp(value['valid_until']) or allow_expired_hold)
@@ -181,19 +195,71 @@ def validate_authority_receipt(raw,commitment,compute_sha,*,now,allow_expired_ho
     return value
 
 
+def owner_event(env):
+    if env.get('DAILY_BASIS_MODE')=='daily_basis_only':
+        return 'workflow_dispatch',''
+    return 'schedule','5 7 * * 1-5'
+
+
+def validate_early_policy(proof):
+    B._closed(proof,('policy_id','availability_semantics','provider','symbol','article',
+        'account_plan','included_credit_only','account_checked_at','account_valid_until',
+        'key_fingerprint','cutoff','execution_day'))
+    need(proof['policy_id']==BASIC_US_EOD_POLICY_ID and
+         proof['availability_semantics']=='eligibility_only_one_sample' and
+         proof['provider']=='twelve_data_basic' and proof['symbol']=='SOXX' and
+         proof['article']==BASIC_US_EOD_ARTICLE and proof['account_plan']=='Basic' and
+         proof['included_credit_only'] is True)
+    B._day(proof['cutoff']);B._day(proof['execution_day'])
+    B._hex(proof['key_fingerprint'],64)
+    start,end=(B._stamp(proof[k]) for k in ('account_checked_at','account_valid_until'))
+    need(start<end<=start+timedelta(hours=24))
+    return start,end
+
+
+def validate_early_scope(authority,grant,slot,*,trade_date,now,manual,key,access):
+    if EARLY_POLICY_KEY not in authority:
+        need(not manual and 'early_owner' not in authority)
+        return
+    proof=authority[EARLY_POLICY_KEY]
+    checked,account_until=validate_early_policy(proof)
+    need(checked<=now<account_until and type(key) is str and bool(key) and
+         hmac.compare_digest(B.sha(BASIC_OWNER_KEY_DOMAIN+key.encode()),proof['key_fingerprint']))
+    provider=access['twelve_data_basic']
+    need(provider['provider_identity']=='twelve_data_basic' and
+         provider['base_url']=='https://api.twelvedata.com' and
+         provider['api_key_env']=='TWELVE_DATA_API_KEY')
+    need(len(grant['slots'])==1 and grant['slots'][0]==slot and
+         all(type(grant[k]) is int and grant[k]==1
+             for k in ('request_limit','credit_limit','verification_limit')))
+    need(proof['cutoff']==slot['cutoff'] and
+         proof['execution_day']==slot['execution_day']==trade_date)
+    reviewed=missing_repair_sessions(trade_date)
+    need(scheduled_close(trade_date) is not None and bool(reviewed) and max(reviewed)==proof['cutoff'])
+    et=ZoneInfo('America/New_York')
+    floor=datetime.combine(date.fromisoformat(trade_date),datetime_time(0),et)
+    civil_floor=datetime.combine(date.fromisoformat(slot['cutoff'])+timedelta(days=1),datetime_time(7),et)
+    scheduled=floor.replace(hour=7,minute=5)
+    need(now.astimezone(et).date()==floor.date() and
+         now>=civil_floor and floor<now and (not manual or now<scheduled))
+
+
 def validate_runtime_surface(env,authority,run,*,compute_sha,trade_date):
+    event,cron=owner_event(env)
     required=dict(GITHUB_ACTIONS='true',GITHUB_REPOSITORY=COMPUTE,GITHUB_SHA=compute_sha,
-        GITHUB_REF='refs/heads/main',GITHUB_EVENT_NAME='schedule',GITHUB_RUN_ATTEMPT='1',
+        GITHUB_REF='refs/heads/main',GITHUB_EVENT_NAME=event,GITHUB_RUN_ATTEMPT='1',
         GITHUB_ACTOR='yuatom',GITHUB_TRIGGERING_ACTOR='yuatom',GITHUB_JOB='collect',
-        DAILY_BASIS_TRIGGER_KIND='schedule',DAILY_BASIS_SCHEDULE='5 7 * * 1-5')
+        DAILY_BASIS_TRIGGER_KIND=event,DAILY_BASIS_SCHEDULE=cron)
     need(all(env.get(k)==v for k,v in required.items()))
     need(env.get('GITHUB_WORKFLOW_REF')==COMPUTE+'/'+CALLER+'@refs/heads/main')
     run_id=env.get('GITHUB_RUN_ID','');need(re.fullmatch('[1-9][0-9]*',run_id))
     need(run.get('id')==int(run_id) and run.get('workflow_id')==authority['runtime_workflow_id'] and
-         run.get('path')==CALLER and run.get('head_sha')==compute_sha and run.get('event')=='schedule' and
+         run.get('path')==CALLER and run.get('head_sha')==compute_sha and run.get('event')==event and
          run.get('run_attempt')==1 and run.get('head_branch')=='main' and run.get('status')=='in_progress')
     need(run['repository']['full_name']==COMPUTE and run['head_repository']['full_name']==COMPUTE)
     need(run['actor']['id']==run['triggering_actor']['id']==authority['owner_id'])
+    if event=='workflow_dispatch':
+        need(authority['owner_id']==10399225 and run['actor']['login']==run['triggering_actor']['login']=='yuatom')
     B._day(trade_date)
 
 
@@ -356,9 +422,12 @@ def run_route(*,store,api,compute,compute_sha,commitment,trade_date,env,key,acce
             need(repository.get('private') is True and repository.get('full_name')==STORE)
             # Basic immutable workflow/platform checks remain global even when
             # optional SOXX authority is absent, malformed or exhausted.
+            manual=owner_event(env)[0]=='workflow_dispatch'
             bootstrap=dict(runtime_workflow_id=run.get('workflow_id'),owner_id=repository['owner']['id'])
+            if manual:need(bootstrap['owner_id']==10399225)
             validate_runtime_surface(env,bootstrap,run,compute_sha=compute_sha,trade_date=trade_date)
             def scope_hold(status,*,binding=None,grant_digest=None):
+                if manual:return 'FINITE_DAILY_BASIS_HELD'
                 head=store.head();path='data/market-data/series-active/daily/twelve_data_basic/SOXX.json'
                 selector=B._parse(store.read(head,path))|{'read_sha':head} if store.exists(head,path) else None
                 if selector is not None:B._selection(selector)
@@ -376,6 +445,8 @@ def run_route(*,store,api,compute,compute_sha,commitment,trade_date,env,key,acce
             # exhausted optional authority. Once authorized, fail closed on
             # the fixed Diary GET; never retry it with the Store/Actions token.
             scoped='readiness' in authority
+            if manual and (EARLY_POLICY_KEY not in authority or not scoped):
+                return scope_hold('ACQUISITION_HELD_REVIEW_REQUIRED',binding=binding,grant_digest=B.sha(grant_raw))
             if not scoped:
                 release_api=release_reader_factory() if release_reader_factory is not None else None
                 repository=check_private_readiness(api,store,authority,grant,now=clock().isoformat(),release_api=release_api)
@@ -385,6 +456,16 @@ def run_route(*,store,api,compute,compute_sha,commitment,trade_date,env,key,acce
             slots=[s for s in grant['slots'] if s['execution_day']==trade_date and B._stamp(s['valid_from'])<=clock()<B._stamp(s['valid_until'])]
             if not slots:return scope_hold('ACQUISITION_HELD_REVIEW_REQUIRED',binding=binding,grant_digest=B.sha(grant_raw))
             need(len(slots)==1);slot=slots[0]
+            def timing_guard():
+                validate_early_scope(authority,grant,slot,trade_date=trade_date,now=clock(),manual=manual,key=key,access=access)
+            try:
+                timing_guard()
+                if EARLY_POLICY_KEY in authority:
+                    # Both triggers share the exact immutable grant/slot. A
+                    # consumed or uncertain attempt must not start readiness again.
+                    updater.preflight_slot(slot['slot_id'],request_id)
+            except (B.BasisError,HostedDailyError,DailyBasisError,ValueError,KeyError,TypeError):
+                return scope_hold('ACQUISITION_HELD_REVIEW_REQUIRED',binding=binding,grant_digest=updater.digest)
             for prior in grant['slots'][:grant['slots'].index(slot)]:
                 if not store.exists(store.head(),updater._transition_path(prior)):
                     return scope_hold('ACQUISITION_HELD_REVIEW_REQUIRED',binding=binding,grant_digest=updater.digest)
@@ -404,6 +485,7 @@ def run_route(*,store,api,compute,compute_sha,commitment,trade_date,env,key,acce
                     release_api=release_reader_factory() if release_reader_factory is not None else None
                     repository=validate_private_target(api,store,authority,grant,now=clock().isoformat(),release_api=release_api)
                     _,head,_,prior,_=updater.preflight_slot(slot['slot_id'],request_id)
+                    timing_guard()
                     ready_id,runner_expectation=scheduled_readiness_probe(api=api,store=store,
                         scope=authority['readiness'],grant=grant,slot=slot,prior=prior,head=head,
                         request_id=request_id,repository=repository,compute_sha=compute_sha,clock=clock)
@@ -417,6 +499,8 @@ def run_route(*,store,api,compute,compute_sha,commitment,trade_date,env,key,acce
             if source_check:source_check()
             wait_for_daily_budget_window(updater,slot,clock=clock)
             def scoped_request_guard():
+                try:timing_guard()
+                except (B.BasisError,HostedDailyError,ValueError,KeyError,TypeError):raise ScopedRequestExpired() from None
                 if not (clock()+SCOPED_MIN_CAPTURE_RUNWAY<B._stamp(runner_expectation['expires']) and
                         api.has_recent_dispatch_proof(grant['workflow_id'])):raise ScopedRequestExpired()
             if scoped:
@@ -436,7 +520,8 @@ def run_route(*,store,api,compute,compute_sha,commitment,trade_date,env,key,acce
             if scoped:need(clock()<B._stamp(runner_expectation['expires']))
             if source_check:source_check()
             updater.promote(candidate,verified);updater.read_current(verified,fields=('close',))
-            _save_private(delegation_output,_delegation(updater,binding,trade_date=trade_date,request_id=request_id,status='OWNED_IMMUTABLE_DAILY',selector=candidate.selector))
+            if not manual:
+                _save_private(delegation_output,_delegation(updater,binding,trade_date=trade_date,request_id=request_id,status='OWNED_IMMUTABLE_DAILY',selector=candidate.selector))
             return 'FINITE_DAILY_BASIS_COMPLETE'
     except Exception:raise HostedDailyError(STOP) from None
 
@@ -500,12 +585,12 @@ def main(argv=None):
             source_check()
             api=GitHubAPI(basis_actions_token(os.environ))
             def platform_guard():
-                env=dict(os.environ)
-                need(env.get('GITHUB_ACTIONS')=='true' and env.get('GITHUB_EVENT_NAME')=='schedule' and env.get('GITHUB_RUN_ATTEMPT')=='1' and env.get('GITHUB_REPOSITORY')==COMPUTE and env.get('GITHUB_SHA')==args.compute_sha and env.get('GITHUB_JOB')=='collect')
+                env=dict(os.environ);event,_=owner_event(env)
+                need(env.get('GITHUB_ACTIONS')=='true' and env.get('GITHUB_EVENT_NAME')==event and env.get('GITHUB_RUN_ATTEMPT')=='1' and env.get('GITHUB_REPOSITORY')==COMPUTE and env.get('GITHUB_SHA')==args.compute_sha and env.get('GITHUB_JOB')=='collect')
                 repository=api.request('GET','/repos/'+COMPUTE)
                 run=api.request('GET','/repos/'+COMPUTE+'/actions/runs/'+env['GITHUB_RUN_ID'])
                 need(repository['full_name']==COMPUTE and run['repository']['id']==repository['id'] and run['head_repository']['id']==repository['id'])
-                need(run['actor']['id']==run['triggering_actor']['id']==repository['owner']['id'] and run['head_sha']==args.compute_sha and run['path']==CALLER and run['event']=='schedule' and run['run_attempt']==1 and run['status']=='in_progress')
+                need(run['actor']['id']==run['triggering_actor']['id']==repository['owner']['id'] and run['head_sha']==args.compute_sha and run['path']==CALLER and run['event']==event and run['run_attempt']==1 and run['status']=='in_progress')
             platform_guard()
             store=RemoteGitStore(Path(args.store),token,source_recheck=source_check,platform_guard=platform_guard)
             status=run_route(store=store,api=api,compute=compute,compute_sha=args.compute_sha,commitment=commitment,trade_date=args.trade_date,env=dict(os.environ),key=key,access=yaml.safe_load((compute/'config/market-data-collector-access.yaml').read_text()),

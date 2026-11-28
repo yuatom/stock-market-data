@@ -11,6 +11,7 @@ on:
         options:
           - smoke_readonly
           - previous_session_eod
+          - daily_basis_only
           - daily_baseline_init
           - daily_baseline_rebase
           - daily_symbol_maintenance
@@ -82,9 +83,13 @@ jobs:
           TRADE_DATE: ${{ inputs.trade_date }}
           DYNAMIC_SELECTION: ${{ inputs.dynamic_selection }}
           FIXED_SELECTION: ${{ inputs.fixed_selection }}
+          EXPECTED_COMPUTE: ${{ inputs.expected_compute_sha }}
+          EXPECTED_STORE: ${{ inputs.expected_store_sha }}
         shell: python
         run: |
           import os
+          if os.environ.get('MODE') == 'daily_basis_only' and any(os.environ.get(key) for key in ('TRADE_DATE','EXECUTION_DATE','HISTORICAL_CUTOFF','DYNAMIC_SELECTION','FIXED_SELECTION','EXPECTED_COMPUTE','EXPECTED_STORE')):
+              raise SystemExit('basis-only owner does not accept public scope selectors')
           dynamic = bool(os.environ.get('DYNAMIC_SELECTION'))
           fixed = bool(os.environ.get('FIXED_SELECTION'))
           mode = os.environ.get('MODE', '')
@@ -102,7 +107,7 @@ jobs:
               raise SystemExit('explicit target selection requires a guarded daily baseline mode')
 
   run:
-    if: inputs.mode != 'daily_symbol_maintenance' && inputs.mode != 'daily_history_tail_backfill' && inputs.execution_date == '' && inputs.historical_cutoff == '' && inputs.mode != 'daily_baseline_admission' && inputs.mode != 'daily_baseline_rebase' && (github.event_name != 'workflow_dispatch' || (inputs.dynamic_selection == '' && inputs.fixed_selection == ''))
+    if: inputs.mode != 'daily_symbol_maintenance' && inputs.mode != 'daily_history_tail_backfill' && inputs.execution_date == '' && inputs.historical_cutoff == '' && inputs.mode != 'daily_baseline_admission' && inputs.mode != 'daily_baseline_rebase' && (github.event_name != 'workflow_dispatch' || (inputs.dynamic_selection == '' && inputs.fixed_selection == '')) && (inputs.mode != 'daily_basis_only' || (inputs.trade_date == '' && inputs.expected_compute_sha == '' && inputs.expected_store_sha == '')) && (inputs.mode != 'daily_basis_only' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.actor == 'yuatom' && github.triggering_actor == 'yuatom' && github.actor_id == '10399225' && github.run_attempt == '1'))
     uses: ./.github/workflows/market-data-collector-runtime.yml
     with:
       trigger_kind: ${{ github.event_name }}
