@@ -36,6 +36,7 @@ try:
         git_blob_sha_bytes,
         json_sha256,
         read_daily_series,
+        read_affine_ordinary_daily_series,
         write_capture,
         write_snapshot,
     )
@@ -51,6 +52,7 @@ except ImportError:  # pragma: no cover
         git_blob_sha_bytes,
         json_sha256,
         read_daily_series,
+        read_affine_ordinary_daily_series,
         write_capture,
         write_snapshot,
     )
@@ -63,11 +65,11 @@ except ModuleNotFoundError as exc:
 
 try:
     from scripts.normal_daily_missing_repair import OHLC, fill_missing_regular_daily_fields
-    from scripts.reviewed_equity_calendar import missing_repair_sessions
+    from scripts.reviewed_equity_calendar import missing_repair_sessions, previous_eligible_eod_session
 except ModuleNotFoundError as exc:
     if exc.name != 'scripts': raise
     from normal_daily_missing_repair import OHLC, fill_missing_regular_daily_fields
-    from reviewed_equity_calendar import missing_repair_sessions
+    from reviewed_equity_calendar import missing_repair_sessions, previous_eligible_eod_session
 
 ET = ZoneInfo("America/New_York")
 TWELVE_PROVIDER = "twelve_data_basic"
@@ -518,6 +520,11 @@ def _write_private_eod_diagnostic(
         "store_input_sha": os.environ.get("MARKET_DATA_STORE_INPUT_SHA"),
         "symbols_requested": result.get("symbols_requested", 0),
         "failure_target_count": len(result.get("failures", [])),
+        **({"ordinary_target_progress": {
+            key: result[key] for key in ("accounting_et_date", "target_eod_session",
+                "target_already_qualified_count", "target_eod_unqualified_count", "target_eod_not_applicable_count",
+                "target_eod_status")
+        }} if "target_eod_status" in result else {}),
         "conflict_record_count": conflict_count,
         **({key: result[key] for key in (
             "deferred_historical_revision_count", "unresolved_historical_revision_count")}
@@ -596,6 +603,8 @@ def collect_previous_session_eod(
     config: Mapping[str, Any],
     access: Mapping[str, Any],
     verified_gap_sessions: frozenset[str] | None = None,
+    scheduled_target_guard: bool = False,
+    now_et: datetime | None = None,
 ) -> dict[str, Any]:
     # New behavior requires an explicitly deployed policy; absent preserves legacy.
     revision_policy=config['collector']['twelve_data_daily'].get('overlap_revision_policy')
@@ -655,15 +664,58 @@ def collect_previous_session_eod(
                 witnesses.append(set())
         verified_gap_sessions = frozenset(set.intersection(*witnesses)) if witnesses else frozenset()
     verified_gap_sessions = verified_gap_sessions or frozenset()
+    ordinary_target = None
+    target_already_qualified_count = 0
+    target_not_applicable_count = 0
+    if scheduled_target_guard:
+        accounting_clock = now_et or datetime.now(ET)
+        if accounting_clock.utcoffset() is not None and accounting_clock.astimezone(ET).date().isoformat() == trade_date:
+            ordinary_target = previous_eligible_eod_session(trade_date)
+
+    def has_target(rows, segments, target):
+        matches = [(i, row) for i, row in enumerate(rows) if row['trade_date'] == target]
+        if len(matches) != 1:
+            return False
+        i, row = matches[0]
+        if 'volume' not in row:
+            allowed = isinstance(segments, list) and any(
+                isinstance(seg, dict) and seg.get('volume_policy') == 'BLOCKED_UNRESOLVED'
+                and type(seg.get('start')) is int and type(seg.get('end')) is int
+                and 0 <= seg['start'] <= i <= seg['end'] < len(rows)
+                for seg in segments
+            )
+            if not allowed:
+                return False
+            # Validation only; the Store row and disallowed volume are unchanged.
+            row = dict(row, volume=0)
+        return classify_daily_overlap(dict(row), dict(row))['price_eligible']
 
     for symbol, asset_class in universe:
         if symbol in daily_basis_owner:
             delegated_daily_symbols.append({"symbol": symbol, "status": daily_basis_owner[symbol]})
             continue
+        target_aware = scheduled_target_guard and symbol != 'SOXX'
+        if target_aware and ordinary_target is None:
+            failures.append({"symbol":symbol,"reason":"target_eod_session_unavailable"})
+            continue
         symbol_volume_blocked = False
         phase = "budget_check"
         try:
             assert_legacy_basis(store_root, provider=TWELVE_PROVIDER, symbol=symbol)
+            prechecked = None
+            if target_aware:
+                effective = _identity_effective_date(watchlist, symbol)
+                if effective is not None and ordinary_target < effective:
+                    target_not_applicable_count += 1
+                    continue
+                phase = "stored_series_read"
+                prechecked, prechecked_segments = read_affine_ordinary_daily_series(store_root,
+                    provider=TWELVE_PROVIDER, symbol=symbol, asset_class=asset_class,
+                    identity_effective_from=effective)
+                if has_target(prechecked, prechecked_segments, ordinary_target):
+                    target_already_qualified_count += 1
+                    continue
+                phase = "budget_check"
             wait_for_twelve_budget(
                 store_root,
                 trade_date,
@@ -701,8 +753,16 @@ def collect_previous_session_eod(
                 bar
                 for bar in fetched
                 if bar["trade_date"] < trade_date
+                and (not target_aware or bar["trade_date"] <= ordinary_target)
                 and (effective is None or bar["trade_date"] >= effective)
             ]
+            if target_aware and not any(row['trade_date']==ordinary_target for row in eligible):
+                failures.append({"symbol":symbol,"reason":"target_eod_session_missing"})
+                continue
+            if target_aware and not any(row['trade_date']==ordinary_target and
+                    classify_daily_overlap(dict(row),dict(row))['price_eligible'] for row in eligible):
+                failures.append({"symbol":symbol,"reason":"target_eod_session_quality_invalid"})
+                continue
             if not eligible:
                 failures.append({"symbol": symbol, "reason": "no_eligible_previous_session_daily_rows"})
                 continue
@@ -719,7 +779,7 @@ def collect_previous_session_eod(
             repairs: list[tuple[dict | None, dict]] = []
             if index_path.exists():
                 phase = "stored_series_read"
-                existing = read_daily_series(store_root, provider=TWELVE_PROVIDER, symbol=symbol)
+                existing = prechecked if prechecked is not None else read_daily_series(store_root, provider=TWELVE_PROVIDER, symbol=symbol)
                 segments = []
                 if price_only:
                     segments = json.loads(index_path.read_text(encoding="utf-8")).get("lineage_segments", [])
@@ -825,6 +885,13 @@ def collect_previous_session_eod(
                 if result.changed:
                     changed_series += 1
             if not new_rows:
+                if target_aware:
+                    phase = "stored_series_read"
+                    post_rows, post_segments = read_affine_ordinary_daily_series(store_root,
+                        provider=TWELVE_PROVIDER, symbol=symbol, asset_class=asset_class,
+                        identity_effective_from=effective)
+                    if not has_target(post_rows, post_segments, ordinary_target):
+                        failures.append({"symbol":symbol,"reason":"target_eod_session_not_written"})
                 continue
 
             lineage={"ingest_kind":"collector_previous_session_eod",
@@ -881,6 +948,13 @@ def collect_previous_session_eod(
         "mode": "previous_session_eod",
         "status": "ok" if not failures else "partial",
         "symbols_requested": len(universe),
+        **({"accounting_et_date":trade_date, "target_eod_session":ordinary_target,
+            "target_already_qualified_count":target_already_qualified_count,
+            "target_eod_status":("unavailable" if ordinary_target is None else
+                "partial" if any(f["symbol"] != "SOXX" for f in failures) else "complete"),
+            "target_eod_unqualified_count":sum(f["symbol"] != "SOXX" for f in failures),
+            "target_eod_not_applicable_count":target_not_applicable_count}
+           if scheduled_target_guard else {}),
         "changed_series": changed_series,
         "bootstrapped_series": bootstrapped_series,
         "failure_target_count": len(failures),
@@ -1162,6 +1236,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ],
     )
     parser.add_argument("--trade-date")
+    parser.add_argument("--scheduled-eod-target-guard",action="store_true")
     parser.add_argument("--store-root", default="sources/market-data")
     parser.add_argument("--watchlist", default="config/watchlist.json")
     parser.add_argument("--config", default="config/market-data-store.yaml")
@@ -1179,6 +1254,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.mode == "previous_session_eod":
         result = collect_previous_session_eod(
             trade_date=trade_date,
+            scheduled_target_guard=args.scheduled_eod_target_guard,
             store_root=store_root,
             watchlist=watchlist,
             completeness=completeness,

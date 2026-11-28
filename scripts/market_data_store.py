@@ -153,10 +153,21 @@ def _shard_meta(path_name: str, start: int, doc: Mapping[str, Any], sealed: bool
     }
 
 
-def _read_all_records(series_dir: Path, index: Mapping[str, Any]) -> list[dict[str, Any]]:
+def _read_all_records(series_dir: Path, index: Mapping[str, Any], *, strict_shape: bool = False) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     for meta in index.get("shards", []):
+        if strict_shape and (not isinstance(meta, dict) or
+                meta.get("path") != f"{len(records):06d}.json" or
+                type(meta.get("start")) is not int or meta["start"] != len(records) or
+                type(meta.get("sealed")) is not bool or
+                (series_dir / meta["path"]).is_symlink()):
+            raise MarketDataConflict("ordinary daily shard identity mismatch")
         doc = _load_json(series_dir / meta["path"])
+        if strict_shape and (not isinstance(doc, dict) or
+                type(doc.get("schema_version")) is not int or doc["schema_version"] != SCHEMA_VERSION or
+                type(doc.get("start")) is not int or doc["start"] != len(records) or
+                not isinstance(doc.get("records"), list) or not doc["records"]):
+            raise MarketDataConflict("ordinary daily shard schema mismatch")
         if doc.get("series_id") != index.get("series_id"):
             raise MarketDataConflict(f"series id mismatch in {meta['path']}")
         actual = _shard_meta(meta["path"], int(meta["start"]), doc, bool(meta["sealed"]))
@@ -482,6 +493,37 @@ def read_daily_series(root: str | Path, *, provider: str, symbol: str, last_sess
         return records[-last_sessions:]
     return records
 
+
+
+def read_affine_ordinary_daily_series(root: str | Path, *, provider: str, symbol: str,
+                                     asset_class: str, identity_effective_from: str | None):
+    """Read producer-affine ordinary bars before interpreting target coverage."""
+    root = Path(root)
+    sdir = _series_dir(root, provider, symbol)
+    index_path = sdir / "_index.json"
+    if any(path.is_symlink() for path in (index_path, sdir, *sdir.parents)
+           if path == root or root in path.parents):
+        raise MarketDataConflict("ordinary daily series cannot use symlinks")
+    if not index_path.exists():
+        return [], []
+    index = _load_json(index_path)
+    expected = dict(series_id=f"{provider}:{symbol.upper()}:regular:1d", provider=provider,
+                    symbol=symbol.upper(), asset_class=asset_class, session="regular",
+                    interval="1d", series_semantics="daily_regular_ohlcv",
+                    adjustment_semantics="provider_reported",
+                    identity_effective_from=identity_effective_from, sort_order="trade_date_asc")
+    if (not isinstance(index, dict) or type(index.get("schema_version")) is not int or
+            index["schema_version"] != SCHEMA_VERSION or
+            type(index.get("record_count")) is not int or index["record_count"] < 0 or
+            any(k not in index or index[k] != v for k, v in expected.items()) or
+            not isinstance(index.get("shards"), list) or
+            not isinstance(index.get("lineage_segments"), list)):
+        raise MarketDataConflict("ordinary daily series affinity mismatch")
+    rows = _read_all_records(sdir, index, strict_shape=True)
+    bounds = (rows[0]["trade_date"], rows[-1]["trade_date"]) if rows else (None, None)
+    if (index.get("first_trade_date"), index.get("last_trade_date")) != bounds:
+        raise MarketDataConflict("ordinary daily index date bounds mismatch")
+    return rows, index["lineage_segments"]
 
 def read_daily_exact(root: str | Path, *, provider: str, symbol: str, trade_date: str) -> dict[str, Any] | None:
     target = _date(trade_date)

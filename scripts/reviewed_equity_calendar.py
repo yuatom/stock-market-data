@@ -58,3 +58,25 @@ def scheduled_close(day):
         return '13:00' if day in early else '16:00'
     except (OSError, ValueError, TypeError, KeyError):
         return None
+
+
+def previous_eligible_eod_session(accounting_day):
+    """Resolve a previous scheduled session only on a known exchange session.
+
+    This is calendar eligibility, not proof that the venue opened or the
+    supplier returned a settled row. A missing yearly authority fails closed.
+    """
+    try:
+        target, closed, _ = _load(accounting_day)
+        if target.weekday() >= 5 or accounting_day in closed:
+            return None
+        for days in range(1, 15):
+            day = target - timedelta(days=days)
+            if day.weekday() >= 5:
+                continue
+            _, prior_closed, _ = _load(day.isoformat())
+            if day.isoformat() not in prior_closed:
+                return day.isoformat()
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+    return None
