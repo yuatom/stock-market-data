@@ -356,7 +356,9 @@ def _run_live_close(argv: list[str], *, build_proof: bool = False) -> int | None
     if retry_counts:
         result.update(retry_counts, close_retry_attempt_state="legacy_empty_targets_only")
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
-    if build_proof and (mode == "close" or result.get("snapshot_written") is True):
+    # An attempted legacy retry may update Close advisory state without a
+    # new snapshot. Preserve the existing proof refresh for that path.
+    if build_proof:
         _build_metric_proof_if_applicable(argv)
     return 0
 

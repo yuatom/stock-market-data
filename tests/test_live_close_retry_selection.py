@@ -164,6 +164,20 @@ class LiveCloseRetrySelectionTest(unittest.TestCase):
             proof.assert_not_called()
             self.assertEqual({p: p.read_bytes() for p in self.store.rglob("*") if p.is_file()}, before)
 
+    def test_attempted_empty_target_preserves_proof_refresh_even_without_snapshot(self):
+        self.snapshot({"SPY": [self.fact("SPY")]}, missing=["XLE"])
+        result = {"mode": "close_final", "status": "no_new_qualified_facts", "snapshot_written": False}
+        with (mock.patch.object(entry, "_live_close_universe", return_value=self.ELIGIBLE),
+              mock.patch.object(entry, "_settlement_gate_result", return_value=None),
+              mock.patch.object(entry, "_wait_until_regular_stage_cutoff"),
+              mock.patch.object(entry, "_ensure_predecessors"),
+              mock.patch.object(runtime, "collect_regular_window", return_value=result) as collect,
+              mock.patch.object(entry, "_build_metric_proof_if_applicable") as proof,
+              contextlib.redirect_stdout(io.StringIO())):
+            self.assertEqual(entry.cli(self.invocation_args("close_final")), 0)
+        self.assertEqual(collect.call_args.kwargs["symbols_override"], ["XLE"])
+        proof.assert_called_once_with(self.invocation_args("close_final"))
+
     def test_capture_blob_mismatch_remains_failure(self):
         refs = self.snapshot({"SPY": [self.fact("SPY")]})
         path = self.store / refs[0]["path"]
