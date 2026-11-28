@@ -1058,7 +1058,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--config", default="config/market-data-store.yaml")
     parser.add_argument("--access-config", default="config/market-data-collector-access.yaml")
     parser.add_argument("--maintenance-authorized", action="store_true")
+    parser.add_argument("--scheduled-eod-target-guard", action="store_true")
     args = parser.parse_args(argv)
+    if args.scheduled_eod_target_guard and args.mode != "previous_session_eod":
+        parser.error("--scheduled-eod-target-guard requires previous_session_eod")
 
     trade_date = args.trade_date or datetime.now(ET).strftime("%Y-%m-%d")
     store_root = Path(args.store_root)
@@ -1078,6 +1081,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             completeness=completeness,
             config=config,
             access=access,
+            scheduled_target_guard=args.scheduled_eod_target_guard,
         )
     elif args.mode == "open_15m":
         result = collect_regular_window(mode=args.mode, stage=None, trade_date=trade_date, start_et="09:30", end_et="09:45", store_root=store_root, universe_config=universe_config, config=config, access=access)
