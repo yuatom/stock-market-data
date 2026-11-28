@@ -166,7 +166,9 @@ class LiveCloseCollectionIntegrationTest(unittest.TestCase):
                     before = {path.relative_to(store): path.read_bytes()
                               for path in store.rglob("*") if path.is_file()}
                     again, primary_again, fallback_again = self.invoke(store, mode, {})
-                    self.assertEqual(again["status"], "nothing_missing")
+                    self.assertEqual(again["status"], "partial_window_no_supplement_authority" if sparse else "nothing_missing")
+                    self.assertEqual(again["retained_close_partial_count"], len(sparse))
+                    self.assertEqual(again["retained_close_empty_count"], 0)
                     self.assertEqual((primary_again, fallback_again), ([], []))
                     self.assertEqual({path.relative_to(store): path.read_bytes()
                                       for path in store.rglob("*") if path.is_file()}, before)

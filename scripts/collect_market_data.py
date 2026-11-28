@@ -245,44 +245,61 @@ def _live_close_universe(universe_config: Mapping[str, Any]) -> list[tuple[str, 
     return [(symbol, assets[symbol]) for symbol in sorted(symbols)]
 
 
-def _live_close_retry_symbols(
+def _live_close_retry_coverage(
     store_root: Path, trade_date: str, eligible: list[tuple[str, str]]
-) -> list[str]:
-    """Retry absent Close-window facts, not an advisory missing-state cache.
-
-    A missing/older snapshot must not erase the live Close sector group. An
-    empty cache may have been written before snapshot publication failed, so
-    only exact blob-verified persisted captures can justify skipping a symbol.
-    Keep the existing missing-vs-partial boundary: one qualified Close-window
-    fact is sufficient here; this does not assert full-window readiness.
-    """
+) -> dict[str, list[str]]:
+    """Classify exact retained Close facts without widening retry authorization."""
     window = candidate_close_window(trade_date)
+    start, end = window["start"], window["end"]
     required = {symbol for symbol, _asset in eligible}
     refs, prior_missing = base._load_prior_snapshot(store_root, trade_date, "close")
-    # Match the coverage owner's symbol identity before scope/overlap checks.
-    # Do not strip invalid whitespace into a seemingly valid missing hint.
     hinted_missing = {symbol.upper() for symbol in prior_missing}
     if not hinted_missing <= required:
         raise runtime.CoverageContractError(
             "Close snapshot missing symbols must be eligible symbols"
         )
-    facts = runtime._capture_facts(store_root, refs) if refs else {}
-    qualified = {
-        symbol for symbol in required
-        if any(
-            fact.get("session") == "regular"
-            and runtime._fact_timestamp(fact, trade_date, window["start"], window["end"]) is not None
-            for fact in facts.get(symbol, [])
-        )
-    }
+    qualified: set[str] = set()
+    full: set[str] = set()
+    for ref in refs:
+        # Do not compose a full grid from disjoint or duplicate captures.
+        capture = base._verify_local_blob(store_root, str(ref["path"]), str(ref["blob_sha"]))
+        facts_by_symbol = {}
+        for fact in capture.get("qualified_facts") or []:
+            if not isinstance(fact, Mapping) or not fact.get("symbol"):
+                raise runtime.CoverageContractError("qualified capture fact requires symbol")
+            facts_by_symbol.setdefault(str(fact["symbol"]).upper(), []).append(fact)
+        for symbol, facts in facts_by_symbol.items():
+            if symbol not in required:
+                continue
+            in_window = [
+                fact for fact in facts if fact.get("session") == "regular"
+                and runtime._fact_timestamp(fact, trade_date, start, end) is not None
+            ]
+            if not in_window:
+                continue
+            qualified.add(symbol)
+            provider = capture.get("provider")
+            if (provider in (runtime.NASDAQ, runtime.TWELVE)
+                    and ref.get("provider") == provider
+                    and capture.get("session") == "regular" and capture.get("trade_date") == trade_date
+                    and capture.get("window") == window
+                    and runtime._full_window_from_one_provider(in_window, trade_date, start, end)):
+                full.add(symbol)
     if hinted_missing & qualified:
         raise runtime.CoverageContractError(
             "Close snapshot cannot mark a qualified Close-window symbol missing"
         )
-    return sorted(required - qualified)
+    return {"full": sorted(full), "partial": sorted(qualified - full),
+            "empty": sorted(required - qualified)}
 
 
-def _run_live_close(argv: list[str]) -> int | None:
+def _live_close_retry_symbols(
+    store_root: Path, trade_date: str, eligible: list[tuple[str, str]]
+) -> list[str]:
+    return _live_close_retry_coverage(store_root, trade_date, eligible)["empty"]
+
+
+def _run_live_close(argv: list[str], *, build_proof: bool = False) -> int | None:
     mode = str(_arg_value(argv, "--mode") or "")
     if mode not in {"close", "close_retry", "close_final"}:
         return None
@@ -300,10 +317,20 @@ def _run_live_close(argv: list[str]) -> int | None:
     window = candidate_close_window(trade_date)
 
     symbols_override = None
+    retry_counts = {}
     if mode in {"close_retry", "close_final"}:
-        symbols_override = _live_close_retry_symbols(store_root, trade_date, eligible)
+        scope = _live_close_retry_coverage(store_root, trade_date, eligible)
+        symbols_override = scope["empty"]
+        retry_counts = {"retained_close_full_count": len(scope["full"]),
+                        "retained_close_partial_count": len(scope["partial"]),
+                        "retained_close_empty_count": len(scope["empty"])}
         if not symbols_override:
-            print(json.dumps({"mode": mode, "status": "nothing_missing", "changed": 0}, sort_keys=True))
+            print(json.dumps({
+                "mode": mode, "status": ("partial_window_no_supplement_authority"
+                                         if scope["partial"] else "nothing_missing"),
+                "changed": 0, "close_retry_attempt_state": "not_attempted",
+                "snapshot_written": False, **retry_counts,
+            }, sort_keys=True))
             return 0
 
     result = runtime.collect_regular_window(
@@ -326,7 +353,11 @@ def _run_live_close(argv: list[str]) -> int | None:
         "required_sector_symbols": collection.sector_symbols(universe_config),
         "sector_symbols_requested": result.get("sector_symbols_requested", []),
     }
+    if retry_counts:
+        result.update(retry_counts, close_retry_attempt_state="legacy_empty_targets_only")
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    if build_proof and (mode == "close" or result.get("snapshot_written") is True):
+        _build_metric_proof_if_applicable(argv)
     return 0
 
 
@@ -368,10 +399,8 @@ def cli(argv: list[str] | None = None) -> int:
         return 0
     _wait_until_regular_stage_cutoff(args)
     _ensure_predecessors(args)
-    close_result = _run_live_close(args)
+    close_result = _run_live_close(args, build_proof=True)
     if close_result is not None:
-        if close_result == 0:
-            _build_metric_proof_if_applicable(args)
         return close_result
     rc = runtime.main(args)
     if rc == 0:
