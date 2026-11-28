@@ -95,21 +95,27 @@ class LocalGitStore:
         for path,raw in updates.items():B._need(self.read(candidate,path)==raw)
         return candidate
 
-    def cas(self,ref,new,expected):
+    def cas(self,ref,new,expected,*,write_guard=None):
         self.assert_locked();B._hex(new);B._hex(expected)
         B._need(self.ref(ref)==(None if expected=='0'*40 else expected))
         tag='refs/tags/market-data-read/'+new
         existing=self.ref(tag);B._need(existing in (None,new))
         tag_line=('create '+tag+' '+new) if existing is None else ('verify '+tag+' '+new)
         commands='start\nupdate '+ref+' '+new+' '+expected+'\n'+tag_line+'\nprepare\ncommit\n'
+        if write_guard is not None:
+            B._need(ref=='refs/heads/main')
+            write_guard()
         self._write('update-ref','--stdin',raw=commands.encode('ascii'))
         B._need(self.ref(tag)==new)
         # A failed readback is uncertain, never a reason to retry or rollback.
         B._need(self.ref(ref)==new)
         self.g.commit(new)
 
-    def publish(self,expected,updates,*,replace):
+    def publish(self,expected,updates,*,replace,write_guard=None):
         B._need(self.head()==expected)
         candidate=self.commit(expected,updates,replace=replace)
-        self.cas('refs/heads/main',candidate,expected)
+        if write_guard is None:
+            self.cas('refs/heads/main',candidate,expected)
+        else:
+            self.cas('refs/heads/main',candidate,expected,write_guard=write_guard)
         return candidate
