@@ -29,6 +29,7 @@ from scripts.daily_basis_delivery import verify_daily_delivery
 from scripts.reviewed_equity_calendar import missing_repair_sessions, scheduled_close
 from zoneinfo import ZoneInfo
 from scripts.scheduled_basis_readiness import probe as scheduled_readiness_probe, validate_scope as validate_scheduled_readiness
+from scripts.hosted_v2_mapping import HOSTED, inspect_hosted_mapping, verify_historical_preproof, load_sidecar, seal_verified_sidecar
 from scripts.run_private_authority_route import _quiet,_source,_environment,SAFETY
 
 STORE='yuatom/stock-market-data-store'
@@ -328,10 +329,17 @@ def check_private_readiness(api,store,authority,grant,*,now,release_api=None):
     return validate_private_target(api,store,authority,grant,now=now,release_api=release_api,verify_ready=True)
 
 
-def fetch_delivery(api,updater,candidate,run_id,*,now,repository,runner_expectation=None,read_only=False):
+def fetch_delivery(api,updater,candidate,run_id,*,now,repository,runner_expectation=None,read_only=False,hosted_job=None):
     run=api.request('GET','/repos/'+STORE+'/actions/runs/'+str(run_id))
     jobs=api.request('GET','/repos/'+STORE+'/actions/runs/'+str(run_id)+'/jobs?per_page=2')
     need(jobs.get('total_count')==1 and len(jobs.get('jobs',[]))==1)
+    if hosted_job is not None:
+        B._need(runner_expectation is None)
+        prior_id,final_id,dispatched_at,expires=hosted_job
+        job=jobs['jobs'][0]
+        B._need(job['labels']==['ubuntu-latest'] and (final_id is None or job['id']==final_id) and job['id']!=prior_id
+            and dispatched_at.replace(microsecond=0)<=B._stamp(run['created_at'])
+            <=B._stamp(run['run_started_at'])<=B._stamp(job['completed_at'])<expires)
     if runner_expectation is not None:
         B._closed(runner_expectation,('runner_id','runner_name','labels','expires'))
         job=jobs['jobs'][0]
@@ -344,6 +352,8 @@ def fetch_delivery(api,updater,candidate,run_id,*,now,repository,runner_expectat
 
 
 def dispatch_verify_once(api,updater,candidate,*,repository,clock,sleep=time.sleep,monotonic=time.monotonic,runner_expectation=None):
+    hosted=runner_expectation is not None and runner_expectation.get('kind')==HOSTED
+    hosted_expiry=B._stamp(runner_expectation['expires']) if hosted else None
     # Reserve BEFORE the POST. Expiry or an uncertain response never redispatches.
     if runner_expectation is not None:need(clock()<B._stamp(runner_expectation['expires']))
     updater.reserve_verification(candidate)
@@ -361,15 +371,33 @@ def dispatch_verify_once(api,updater,candidate,*,repository,clock,sleep=time.sle
     run_id=reply['workflow_run_id'];need(type(run_id) is int and run_id>0)
     need(reply['run_url']=='https://api.github.com/repos/'+STORE+'/actions/runs/'+str(run_id) and
          reply['html_url']=='https://github.com/'+STORE+'/actions/runs/'+str(run_id))
-    mapping=B.encode(dict(schema_version=1,kind='finite_daily_delivery_mapping',candidate=asdict(candidate),run_id=run_id,dispatched_at=started.isoformat()))
+    if hosted:need(clock()<hosted_expiry)
+    mapping=dict(schema_version=1,kind='finite_daily_delivery_mapping',candidate=asdict(candidate),run_id=run_id,dispatched_at=started.isoformat())
     mapping_ref=f'refs/heads/basis-daily-deliveries/{updater.digest}/{candidate.slot_id}'
-    mapping_commit=updater.store.commit(candidate.selector['read_sha'],{'basis-authority/daily-delivery.json':mapping},replace=set())
+    mapping_commit=updater.store.commit(candidate.selector['read_sha'],{'basis-authority/daily-delivery.json':B.encode(mapping)},replace=set())
+    if hosted:need(clock()<hosted_expiry)
     updater.store.cas(mapping_ref,mapping_commit,'0'*40)
-    while monotonic()<deadline:
+    while monotonic()<deadline and (not hosted or clock()<hosted_expiry):
         run=api.request('GET','/repos/'+STORE+'/actions/runs/'+str(run_id))
         need(run.get('id')==run_id and run.get('workflow_id')==grant['workflow_id'] and run.get('head_sha')==grant['workflow_source_sha'] and run.get('head_branch')==branch and run.get('event')=='workflow_dispatch' and run.get('run_attempt')==1)
         if run.get('status')=='completed':
             need(run.get('conclusion')=='success')
+            if hosted:
+                profile=runner_expectation['profile'];pointer=runner_expectation['preproof']
+                normalized=dict(mapping,schema_version=2,kind='finite_hosted_daily_delivery_mapping',preproof=pointer)
+                pre,proof,debit,expires,prior=inspect_hosted_mapping(updater,normalized,candidate,
+                    updater._slot(candidate.slot_id),profile,runner_expectation['scope_commitment'])
+                verify_historical_preproof(api,updater,repository,pre,proof,debit,prior)
+                jobs=api.request('GET','/repos/'+STORE+'/actions/runs/'+str(run_id)+'/jobs?per_page=2')
+                need(jobs.get('total_count')==1 and len(jobs.get('jobs',[]))==1)
+                final_id=jobs['jobs'][0]['id']
+                need(clock()<expires)
+                verified=fetch_delivery(api,updater,candidate,run_id,now=clock().isoformat(),repository=repository,
+                    hosted_job=(proof['job_id'],final_id,started,expires))
+                need(started<=B._stamp(verified.verified_at) and clock()<expires)
+                seal_verified_sidecar(updater.store,updater,candidate,mapping_commit,mapping,pointer,final_id)
+                need(clock()<expires)
+                return verified
             return fetch_delivery(api,updater,candidate,run_id,now=clock().isoformat(),repository=repository,**({'runner_expectation':runner_expectation} if runner_expectation else {}))
         sleep(5)
     raise HostedDailyError(STOP)
@@ -445,7 +473,8 @@ def run_route(*,store,api,compute,compute_sha,commitment,trade_date,env,key,acce
             # exhausted optional authority. Once authorized, fail closed on
             # the fixed Diary GET; never retry it with the Store/Actions token.
             scoped='readiness' in authority
-            if manual and (EARLY_POLICY_KEY not in authority or not scoped):
+            if (manual and (EARLY_POLICY_KEY not in authority or not scoped)
+                or scoped and authority['readiness'].get('kind')==HOSTED and EARLY_POLICY_KEY not in authority):
                 return scope_hold('ACQUISITION_HELD_REVIEW_REQUIRED',binding=binding,grant_digest=B.sha(grant_raw))
             if not scoped:
                 release_api=release_reader_factory() if release_reader_factory is not None else None
@@ -509,9 +538,15 @@ def run_route(*,store,api,compute,compute_sha,commitment,trade_date,env,key,acce
                     scoped_request_guard()
                 except (HostedDailyError,ScopedRequestExpired):
                     return hold_before_provider()
+            hosted=scoped and runner_expectation.get('kind')==HOSTED
+            hosted_binding={}
+            if hosted:
+                runner_expectation['scope_commitment']=binding['commitment']
+                hosted_binding={'hosted_binding':dict(kind=HOSTED,scope_commitment=binding['commitment'],
+                    pin=runner_expectation['preproof']['pin'])}
             try:
                 candidate=updater.run_slot(slot['slot_id'],request_id,capture=capture or provider_capture(key,access),
-                    **({'request_guard':scoped_request_guard} if scoped else {}))
+                    **({'request_guard':scoped_request_guard} if scoped else {}),**hosted_binding)
             except ScopedProviderHold:
                 need(scoped)
                 return hold_before_provider()
@@ -519,7 +554,13 @@ def run_route(*,store,api,compute,compute_sha,commitment,trade_date,env,key,acce
                 **({'runner_expectation':runner_expectation} if scoped else {}))
             if scoped:need(clock()<B._stamp(runner_expectation['expires']))
             if source_check:source_check()
-            updater.promote(candidate,verified);updater.read_current(verified,fields=('close',))
+            if hosted:
+                def hosted_promotion_guard():
+                    need(clock()<B._stamp(runner_expectation['expires']))
+                updater.promote(candidate,verified,publish_guard=hosted_promotion_guard)
+            else:
+                updater.promote(candidate,verified)
+            updater.read_current(verified,fields=('close',))
             if not manual:
                 _save_private(delegation_output,_delegation(updater,binding,trade_date=trade_date,request_id=request_id,status='OWNED_IMMUTABLE_DAILY',selector=candidate.selector))
             return 'FINITE_DAILY_BASIS_COMPLETE'
@@ -552,15 +593,29 @@ def current_delivery(*,store,api,compute_sha,commitment,clock=lambda:datetime.no
         need(len(found)==1);slot=found[0]
         oid=store.materialize_ref(f'refs/heads/basis-daily-deliveries/{updater.digest}/{slot["slot_id"]}')
         mapping=B._parse(store.read(oid,'basis-authority/daily-delivery.json'))
+        requested_hosted=scoped and authority['readiness'].get('kind')==HOSTED
         B._closed(mapping,('schema_version','kind','candidate','run_id','dispatched_at'))
         need(mapping['schema_version']==1 and mapping['kind']=='finite_daily_delivery_mapping')
         candidate=Candidate(**mapping['candidate'])
+        claim=B._parse(store.read(candidate.expected_head,updater._prefix(slot)+'/claim.json'))
+        hosted='hosted_binding' in claim
+        need(hosted==requested_hosted)
+        if hosted:
+            need(claim['hosted_binding']['scope_commitment']==binding['commitment'])
         mapping_path='basis-authority/daily-delivery.json'
         store.g.single_addition(oid,candidate.selector['read_sha'],mapping_path,store.g.normal_blob_identity(oid,mapping_path))
         need(B._stamp(slot['valid_from'])<=B._stamp(mapping['dispatched_at'])<B._stamp(slot['valid_until']))
         for ref in (updater._candidate_ref(slot),updater._attempt_ref(slot),updater._verification_ref(slot),candidate.receipt_ref):store.materialize_ref(ref)
         final_gate={}
-        if scoped:
+        if hosted:
+            # Read-only v2: require the exact immutable mapping object plus its
+            # own retention identity before opening the authenticated job logs.
+            need(store.materialize_ref('refs/tags/market-data-read/'+oid)==oid)
+            normalized,final_id=load_sidecar(store,updater,slot,oid,mapping,candidate)
+            pre, proof, debit, expires, prior_selector=inspect_hosted_mapping(updater,normalized,candidate,slot,authority['readiness'],binding['commitment'])
+            verify_historical_preproof(api,updater,repository,pre,proof,debit,prior_selector)
+            final_gate={'hosted_job':(proof['job_id'],final_id,B._stamp(mapping['dispatched_at']),expires),'read_only':True}
+        elif scoped:
             readiness=authority['readiness']
             final_gate={'runner_expectation':{key:readiness[key] for key in ('runner_id','runner_name','labels','expires')},
                 'read_only':True}

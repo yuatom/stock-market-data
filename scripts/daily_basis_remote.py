@@ -212,11 +212,13 @@ class RemoteGitStore(LocalGitStore):
         attempt = re.fullmatch(r'refs/heads/basis-daily-attempts/[0-9a-f]{64}/[A-Za-z0-9_-]{1,64}', ref)
         immutable = re.fullmatch(r'refs/heads/basis-daily-(?:candidates|verification|deliveries)/[0-9a-f]{64}/[A-Za-z0-9_-]{1,64}', ref)
         readiness = re.fullmatch(r'refs/heads/basis-daily-readiness-attempt/[0-9a-f]{40}/[0-9a-f]{64}', ref)
+        hosted_proof = re.fullmatch(r'refs/heads/basis-daily-readiness-proof/[0-9a-f]{40}/[0-9a-f]{64}', ref)
+        hosted_sidecar = re.fullmatch(r'refs/heads/basis-daily-hosted-deliveries/[0-9a-f]{64}/[A-Za-z0-9_-]{1,64}', ref)
         receipt = re.fullmatch(r'refs/heads/basis-read-receipts/[0-9a-f]{40}/[0-9a-f]{64}', ref)
         authority = re.fullmatch(r'refs/heads/basis-daily-authority/[0-9a-f]{40}/[0-9a-f]{64}', ref)
         retention = re.fullmatch(r'refs/tags/market-data-read/[0-9a-f]{40}', ref)
         verifier = re.fullmatch(r'refs/heads/basis-consumer-delivery/[0-9a-f]{40}', ref)
-        _need(main or attempt or immutable or readiness or receipt or not write and (authority or retention or verifier))
+        _need(main or attempt or immutable or readiness or receipt or hosted_proof or hosted_sidecar or not write and (authority or retention or verifier))
         path = self.g.gitdir / ref
         _need(not any(p.is_symlink() for p in (path, *path.parents)))
         return 'mutable' if main or attempt else 'immutable'
@@ -297,7 +299,7 @@ class RemoteGitStore(LocalGitStore):
         _need(records[tag] == ('=' if tag_existed else '*'))
 
     @_safe
-    def cas(self, ref, new, expected):
+    def cas(self, ref, new, expected, *, write_guard=None):
         self.assert_locked()
         _need(not self._uncertain)
         B._hex(new); B._hex(expected)
@@ -309,6 +311,18 @@ class RemoteGitStore(LocalGitStore):
         old = None if creation else expected
         _need(self.ref(ref) == old and self._remote_ref(ref) == old)
         _, parents = self.g.commit(new)
+        if ref.startswith('refs/heads/basis-daily-readiness-proof/'):
+            from scripts.hosted_v2_durable_candidate import PATH
+            predecessor=ref.replace('-proof/','-attempt/',1)
+            parent=self._remote_ref(predecessor)
+            _need(creation and parent is not None and parents==(parent,))
+            self.g.single_addition(new,parent,PATH,self.g.normal_blob_identity(new,PATH))
+        elif ref.startswith('refs/heads/basis-daily-hosted-deliveries/'):
+            from scripts.hosted_v2_mapping import SIDE_PATH
+            predecessor=ref.replace('-hosted-deliveries/','-deliveries/',1)
+            parent=self._remote_ref(predecessor)
+            _need(creation and parent is not None and parents==(parent,))
+            self.g.single_addition(new,parent,SIDE_PATH,self.g.normal_blob_identity(new,SIDE_PATH))
         if not creation:
             _need(new != expected and parents == (expected,))
         tag = 'refs/tags/market-data-read/' + new
@@ -316,6 +330,9 @@ class RemoteGitStore(LocalGitStore):
         _need(tag_old is None or tag_old == new)
         self._check()
         _need(self.ref(ref) == old and self._remote_ref(ref) == old)
+        if write_guard is not None:
+            _need(ref == 'refs/heads/main')
+            write_guard()
         # Set before crossing the write boundary. Any failure, malformed receipt,
         # '=' lost claim, or uncertain readback blocks further writes in this run.
         self._uncertain = True
@@ -333,5 +350,5 @@ class RemoteGitStore(LocalGitStore):
         self._uncertain = False
 
     @_safe
-    def publish(self, expected, updates, *, replace):
-        return super().publish(expected, updates, replace=replace)
+    def publish(self, expected, updates, *, replace, write_guard=None):
+        return super().publish(expected, updates, replace=replace, write_guard=write_guard)
