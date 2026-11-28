@@ -26,30 +26,33 @@ class LiveCloseRetrySelectionTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.store = Path(self.tmp.name)
+        self.snapshot_number = 0
 
     def fact(self, symbol, stamp="2026-10-07T15:59:00-04:00"):
         return {"symbol": symbol, "asset_class": "etf", "session": "regular",
                 "event_time": stamp, "source_timestamp": stamp,
                 "last_sale": 100.0, "reported_volume": 1.0}
 
-    def snapshot(self, facts_by_symbol, missing=()):
+    def snapshot(self, facts_by_symbol, missing=(), *, provider=runtime.NASDAQ,
+                 feed="nasdaq_public_chart_last_sale_volume_v1"):
+        self.snapshot_number += 1
         refs = []
         for symbol, facts in facts_by_symbol.items():
             path, blob = runtime.write_capture(
                 self.store, trade_date=self.DATE, session="regular",
-                provider=runtime.NASDAQ, capture_id=f"close-{symbol.lower()}-test",
+                provider=provider, capture_id=f"close-{symbol.lower()}-test-{self.snapshot_number}",
                 generated_at="2026-10-07T16:00:05-04:00",
-                actual_data_cutoff=facts[-1]["source_timestamp"],
+                actual_data_cutoff="2026-10-07T15:59:00-04:00",
                 window={"start": "15:45", "end": "16:00"},
-                feed_scope="nasdaq_public_chart_last_sale_volume_v1",
+                feed_scope=feed,
                 qualified_facts=facts, missing_symbols=[],
             )
             refs.append({"path": path, "blob_sha": blob,
                          "kind": "regular_intraday_capture", "window": "15:45-16:00",
-                         "provider": runtime.NASDAQ, "symbol": symbol})
+                         "provider": provider, "symbol": symbol})
         runtime.write_snapshot(
-            self.store, stage="close", trade_date=self.DATE, snapshot_id="close-test",
-            generated_at="2026-10-07T16:00:10-04:00", data_refs=refs,
+            self.store, stage="close", trade_date=self.DATE, snapshot_id=f"close-test-{self.snapshot_number}",
+            generated_at=f"2026-10-07T16:00:{10+self.snapshot_number:02d}-04:00", data_refs=refs,
             coverage={}, missing=list(missing),
             target_window={"start": "15:45", "end": "16:00"},
             actual_data_cutoff="2026-10-07T15:59:00-04:00",
@@ -109,24 +112,107 @@ class LiveCloseRetrySelectionTest(unittest.TestCase):
     def test_timestamp_and_session_qualification_preserved(self):
         invalid = ["2026-10-06T15:59:00-04:00", "2026-10-07T16:00:00-04:00",
                    "2026-10-07T15:44:59-04:00", "2026-10-07T15:59:00", "invalid"]
-        with mock.patch.object(entry.base, "_load_prior_snapshot", return_value=([{}], [])):
-            for stamp in invalid:
-                with self.subTest(stamp=stamp), mock.patch.object(
-                    runtime, "_capture_facts", return_value={"SPY": [self.fact("SPY", stamp)]}
-                ):
-                    self.assertEqual(self.selection(), ["SPY", "XLE"])
-            fact = self.fact("SPY")
-            fact["session"] = "premarket"
-            with mock.patch.object(runtime, "_capture_facts", return_value={"SPY": [fact]}):
+        for stamp in invalid:
+            with self.subTest(stamp=stamp):
+                self.snapshot({"SPY": [self.fact("SPY", stamp)]})
                 self.assertEqual(self.selection(), ["SPY", "XLE"])
+        fact = self.fact("SPY")
+        fact["session"] = "premarket"
+        self.snapshot({"SPY": [fact]})
+        self.assertEqual(self.selection(), ["SPY", "XLE"])
 
     def test_window_start_and_equivalent_utc_are_qualified(self):
-        with mock.patch.object(entry.base, "_load_prior_snapshot", return_value=([{}], [])):
-            for stamp in ("2026-10-07T15:45:00-04:00", "2026-10-07T19:59:00Z"):
-                with self.subTest(stamp=stamp), mock.patch.object(
-                    runtime, "_capture_facts", return_value={"SPY": [self.fact("SPY", stamp)]}
-                ):
-                    self.assertEqual(self.selection(), ["XLE"])
+        for stamp in ("2026-10-07T15:45:00-04:00", "2026-10-07T19:59:00Z"):
+            with self.subTest(stamp=stamp):
+                self.snapshot({"SPY": [self.fact("SPY", stamp)]})
+                self.assertEqual(self.selection(), ["XLE"])
+
+    def test_partial_captures_do_not_splice_or_trigger_requests_but_keep_proof(self):
+        parts = {
+            "SPY": [self.fact("SPY", f"2026-10-07T15:{minute:02d}:00-04:00")
+                    for minute in range(45, 58)],
+            "XLE": [self.fact("XLE", f"2026-10-07T15:{minute:02d}:00-04:00")
+                    for minute in (45, 47, 56, 59)],
+        }
+        first = self.snapshot(parts)
+        second = self.snapshot({"SPY": [self.fact("SPY", f"2026-10-07T15:{minute:02d}:00-04:00")
+                                        for minute in (58, 59)]})
+        runtime.write_snapshot(
+            self.store, stage="close", trade_date=self.DATE, snapshot_id="synthetic-two-pieces",
+            generated_at="2026-10-07T16:00:20-04:00", data_refs=first+second,
+            coverage={}, missing=[], target_window={"start": "15:45", "end": "16:00"},
+            actual_data_cutoff="2026-10-07T15:59:00-04:00",
+        )
+        for mode in ("close_retry", "close_final"):
+            output = io.StringIO()
+            before = {p: p.read_bytes() for p in self.store.rglob("*") if p.is_file()}
+            with (self.subTest(mode=mode), mock.patch.object(entry, "_live_close_universe", return_value=self.ELIGIBLE),
+                  mock.patch.object(entry, "_settlement_gate_result", return_value=None),
+                  mock.patch.object(entry, "_wait_until_regular_stage_cutoff"),
+                  mock.patch.object(entry, "_ensure_predecessors"),
+                  mock.patch.object(runtime, "fetch_nasdaq_regular") as nasdaq,
+                  mock.patch.object(runtime, "fetch_twelve_regular") as twelve,
+                  mock.patch.object(entry, "_build_metric_proof_if_applicable") as proof,
+                  contextlib.redirect_stdout(output)):
+                self.assertEqual(entry.cli(self.invocation_args(mode)), 0)
+            result = json.loads(output.getvalue())
+            self.assertEqual(result["status"], "partial_window_no_supplement_authority")
+            self.assertEqual(result["close_retry_attempt_state"], "not_attempted")
+            self.assertEqual((result["retained_close_full_count"], result["retained_close_partial_count"],
+                              result["retained_close_empty_count"]), (0, 2, 0))
+            nasdaq.assert_not_called()
+            twelve.assert_not_called()
+            proof.assert_called_once_with(self.invocation_args(mode))
+            self.assertEqual({p: p.read_bytes() for p in self.store.rglob("*") if p.is_file()}, before)
+
+    def test_timestamps_without_positive_prices_stay_partial_without_retries(self):
+        priced = [self.fact("SPY", f"2026-10-07T15:{minute:02d}:00-04:00")
+                  for minute in range(45, 60)]
+        for bad in (None, 0.0, -1.0):
+            with self.subTest(bad=bad):
+                rows = [dict(fact) for fact in priced]
+                if bad is None:
+                    for fact in rows:
+                        del fact["last_sale"]
+                else:
+                    rows[-1]["last_sale"] = bad
+                self.snapshot({"SPY": rows})
+                self.assertEqual(entry._live_close_retry_coverage(self.store, self.DATE, self.ELIGIBLE),
+                                 dict(full=[], partial=["SPY"], empty=["XLE"]))
+        self.snapshot({"SPY": priced})
+        self.assertEqual(entry._live_close_retry_coverage(self.store, self.DATE, self.ELIGIBLE),
+                         dict(full=["SPY"], partial=[], empty=["XLE"]))
+
+    def test_twelve_requires_complete_positive_ohlc_and_matching_feed_for_full(self):
+        priced = []
+        for minute in range(45, 60):
+            fact = self.fact("SPY", f"2026-10-07T15:{minute:02d}:00-04:00")
+            del fact["last_sale"]
+            priced.append(dict(fact, open=10, high=12, low=9, close=11))
+        feed = "twelve_data_basic_us_equities_limited_realtime_coverage"
+        invalid = [dict(fact) for fact in priced]
+        invalid[-1]["high"] = 10
+        for facts, scoped_feed in ((invalid, feed), (priced, "wrong-feed")):
+            self.snapshot({"SPY": facts}, provider=runtime.TWELVE, feed=scoped_feed)
+            self.assertEqual(entry._live_close_retry_coverage(self.store, self.DATE, self.ELIGIBLE),
+                             dict(full=[], partial=["SPY"], empty=["XLE"]))
+        self.snapshot({"SPY": priced}, provider=runtime.TWELVE, feed=feed)
+        self.assertEqual(entry._live_close_retry_coverage(self.store, self.DATE, self.ELIGIBLE),
+                         dict(full=["SPY"], partial=[], empty=["XLE"]))
+
+    def test_attempted_empty_target_preserves_proof_refresh_even_without_snapshot(self):
+        self.snapshot({"SPY": [self.fact("SPY")]}, missing=["XLE"])
+        result = {"mode": "close_final", "status": "no_new_qualified_facts", "snapshot_written": False}
+        with (mock.patch.object(entry, "_live_close_universe", return_value=self.ELIGIBLE),
+              mock.patch.object(entry, "_settlement_gate_result", return_value=None),
+              mock.patch.object(entry, "_wait_until_regular_stage_cutoff"),
+              mock.patch.object(entry, "_ensure_predecessors"),
+              mock.patch.object(runtime, "collect_regular_window", return_value=result) as collect,
+              mock.patch.object(entry, "_build_metric_proof_if_applicable") as proof,
+              contextlib.redirect_stdout(io.StringIO())):
+            self.assertEqual(entry.cli(self.invocation_args("close_final")), 0)
+        self.assertEqual(collect.call_args.kwargs["symbols_override"], ["XLE"])
+        proof.assert_called_once_with(self.invocation_args("close_final"))
 
     def test_capture_blob_mismatch_remains_failure(self):
         refs = self.snapshot({"SPY": [self.fact("SPY")]})
