@@ -104,3 +104,62 @@ The two hosted routes interpret the approved `end_date` as an inclusive daily-se
 `scripts/inclusive_daily_wire.py` supplies the shared secret-free mapping. Official SOXX capture opts into it explicitly; unrelated callers of the generic capture function retain their previous default behavior. The eleven-symbol transport uses the same mapping. Approval bytes, `request.json`, and logical envelope/request identities remain date-based and unchanged. Both routes retain the sanitized endpoint and mapped query parameters under `wire_request` in the existing private `attempt.json`, marked as a `provider_wire_request_plan` with the credential omitted. This is pre-request intent, not proof that HTTP occurred. No API key, credential-bearing URL, or new public output is recorded.
 
 Raw-response validation remains bounded by the exact logical dates, including rejection of a next-day row. The mapping does not add requests, credits, retries or evidence writes. A consumed SOXX or append grant stays consumed; fixing transport semantics does not authorize a retry or renew any approval.
+
+### Reusable price-only prior-session backup
+
+This source-only preparation does not change or enable any GitHub workflow.
+A separately authorized follow-up may wire the fixed `daily_price_only_backup`
+operation into the existing retained reconciler job. The public envelope is only the reviewed Compute pin and a salted
+opaque private receipt commitment. The exact owner-dispatched first attempt
+must independently bind the latest retained Store, historical one-shot claim and
+its original scope, a healthy explicitly selected native anchor, qualifying
+exchange sessions, and the separately retained independently accepted publisher
+evidence package. Raw preimages and source-specific normalization evidence are
+read by exact refs/objects, not generated or discharged by the writer. A matching
+already qualified native target is a verified no-op; an unhealthy selection or
+mixed scope holds. No vendor is called. If the exact receipt is absent or
+expired, the route stays dormant. Nothing authorizes a second ref for a frozen
+historical target or changing native daily prices, volume or any selector.
+
+No change to the historical v1 rules or GLD. Existing authorized private Store
+Contents access and shared concurrency suffice, subject to its existing
+repository protection; no GitHub Admin, new credential or new workflow. The
+operator must not delete or retarget claims or rewrite protected ancestry. One
+atomic expected-head direct-child compare-and-swap includes all canonical
+target claims and the immutable retention tag; failed or ambiguous writes stop
+before retry. Public outputs contain only fixed statuses.
+
+The reusable route defaults to no active publisher approval keys in
+`config/retained-price-only-source-trust.json` at its exact reviewed Compute
+revision. No provider metadata or private Store API is read if this trust
+surface is unconfigured. An independent authority must retain its signing key
+outside the repository/Contents writer and have its Ed25519 public key reviewed
+and released separately. Sign the closed canonical evidence document for the
+exact Compute revision, opaque logical target slots, original-byte and
+normalized-byte digests, source-specific basis proof and validity interval.
+The private receipt binds both document and detached signature immutable blobs;
+the same runtime rejects invalid issuers, wrong scopes, revoked/configured-out
+keys, and expiry just before the one atomic push. No test key is an approved
+issuer. Verification uses the existing Linux runner's OpenSSL 3 capability and
+fails closed if that binary/capability is missing; it does not fetch or generate
+keys. Source eligibility is separate from issuer trust and cannot be expanded by a
+signature. The exact Compute release file
+`config/retained-price-only-source-eligibility.json` records closed provider
+profiles. Stock Analysis and Barchart WebSol are corroboration-only. Their
+web-page parser is for offline investigation, outside the hosted writer;
+no recurring scraping, retention import or redistribution is enabled for them.
+A licensed provider-neutral import is available only for previously retained
+canonical closed regular-session price export bytes from two distinct reviewed
+provider identities and origins. Each eligible profile requires a separately
+reviewed applicable license digest and validity dates; the hosted writer checks
+the same license at the recorded observation, receipt selection and final push,
+and checks normalized prices against the exact raw export. Release code cannot
+infer legal rights from a subscriber's API key, a signature or a public URL.
+No eligible providers are configured by default; this holds before private
+source or Store access. No new supplier credentials are needed for verification.
+
+A verified prior admitted slot with identical OHLC but different evidence or
+authority bytes remains immutable and reports
+`RETAINED_PRICE_ONLY_SAME_PRICES_AUTHORITY_CHANGED`, not a price disagreement.
+Exact identical admitted record and evidence can be independently re-read as
+a no-op. Neither result makes another Store write.
