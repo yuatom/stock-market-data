@@ -2,7 +2,7 @@
 
 No credential is written into Git configuration, command arguments or logs.
 Private ref/commit names emitted by Git are captured into private temporary file
-handles and never forwarded to public Actions output. All failures are value-free.
+handles and never forwarded to public Actions output. All failure labels are value-free.
 The run mode executes only the immutable workflow's stdin shell program; it is
 not a user-content execution interface. No automatic retry is added here.
 """
@@ -30,9 +30,19 @@ def git_environment(token):
     return env
 
 
-def quiet_call(args,*,env,stdin=None,cwd=None,timeout=120):
+# The reviewed Persist heredoc translates all other nonzero exits to 1.
+_PROOF_RECHECK_EXIT = 78
+
+
+class _ProofRecheckStopped(Exception):
+    pass
+
+
+def quiet_call(args,*,env,stdin=None,cwd=None,timeout=120,report_proof_recheck_failure=False):
     with tempfile.TemporaryFile(mode='w+b') as sink:
         result=subprocess.run(args,input=stdin,cwd=cwd,env=env,stdout=sink,stderr=sink,timeout=timeout)
+        if report_proof_recheck_failure and result.returncode==_PROOF_RECHECK_EXIT:
+            raise _ProofRecheckStopped()
         if result.returncode!=0:raise ValueError()
         sink.seek(0,2)
         if sink.tell()>1024*1024:raise ValueError()
@@ -58,6 +68,7 @@ def main(argv=None):
         parser=argparse.ArgumentParser();sub=parser.add_subparsers(dest='mode',required=True)
         clone=sub.add_parser('clone');clone.add_argument('--destination',required=True)
         run=sub.add_parser('run');run.add_argument('--repo',required=True)
+        run.add_argument('--report-proof-recheck-failure',action='store_true')
         args=parser.parse_args(argv);token=os.environ.get('MARKET_DATA_STORE_TOKEN','')
         if args.mode=='clone':clone_private_store(args.destination,token)
         else:
@@ -66,8 +77,10 @@ def main(argv=None):
             if origin.returncode or origin.stdout.decode().strip()!=STORE_URL:raise ValueError()
             script=sys.stdin.buffer.read(65537)
             if not 0<len(script)<=65536:raise ValueError()
-            quiet_call(['bash','-euo','pipefail'],env=env,stdin=script,cwd=path,timeout=600)
+            quiet_call(['bash','-euo','pipefail'],env=env,stdin=script,cwd=path,timeout=600,
+                       report_proof_recheck_failure=args.report_proof_recheck_failure)
         print('PRIVATE_STORE_OPERATION_COMPLETE');return 0
+    except _ProofRecheckStopped:print('PRIVATE_STORE_PROOF_RECHECK_STOPPED');return 2
     except Exception:print('PRIVATE_STORE_OPERATION_STOPPED');return 2
 
 
